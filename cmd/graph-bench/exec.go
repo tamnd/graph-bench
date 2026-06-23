@@ -7,9 +7,9 @@ import (
 	"runtime"
 	"time"
 
+	grAdapter "github.com/tamnd/graph-bench/adapter/gr"
 	"github.com/tamnd/graph-bench/dataset"
 	"github.com/tamnd/graph-bench/dataset/gen"
-	grAdapter "github.com/tamnd/graph-bench/adapter/gr"
 	"github.com/tamnd/graph-bench/measure"
 	"github.com/tamnd/graph-bench/report"
 	"github.com/tamnd/graph-bench/target"
@@ -245,18 +245,18 @@ func buildCondition(
 	opts measure.Options,
 ) measure.Condition {
 	c := measure.Condition{
-		Engine:        tgt.Name(),
-		EngineVersion: version,
-		Plane:         tgt.Plane().String(),
+		Engine:          tgt.Name(),
+		EngineVersion:   version,
+		Plane:           tgt.Plane().String(),
 		Dataset:         ds.Name(),
 		DatasetChecksum: ds.Checksum(),
 		Workload:        wl.Name,
-		Scale:         scale,
-		Cache:         cache,
-		OfferedRate:   opts.Rate,
-		GoVersion:     runtime.Version(),
-		OS:            runtime.GOOS + "/" + runtime.GOARCH,
-		Timestamp:     time.Now().UTC(),
+		Scale:           scale,
+		Cache:           cache,
+		OfferedRate:     opts.Rate,
+		GoVersion:       runtime.Version(),
+		OS:              runtime.GOOS + "/" + runtime.GOARCH,
+		Timestamp:       time.Now().UTC(),
 	}
 	if opts.Count > 0 {
 		c.Repetitions = opts.Count
