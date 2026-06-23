@@ -13,9 +13,17 @@ jobs:
     name: smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      # gr is a local replace (../gr); check it out beside this repo so the
+      # module resolves, the way githome-bench checks out githome.
+      - name: check out gr
+        uses: actions/checkout@v5
+        with:
+          repository: tamnd/gr
+          path: ../gr
+
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
