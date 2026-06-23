@@ -317,3 +317,62 @@ func copyFile(src, dst string) error {
 	_, err = io.Copy(out, in)
 	return err
 }
+
+// ComputePin builds a Pin by hashing a local .tar.zst archive, extracting it
+// to a temp directory, and computing the content checksum. The caller supplies
+// the name, scale, and URL fields (which are metadata, not derived from the
+// archive itself). This is the tooling path: download the archive once, run
+// ComputePin, commit the resulting JSON as a pin file.
+func ComputePin(ctx context.Context, archivePath, name, scale, url, mirror string) (*Pin, error) {
+	// Hash the archive file.
+	archiveSum, err := hashFile(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("ldbc: hash archive: %w", err)
+	}
+
+	// Extract to a temp directory.
+	tmpDir, err := os.MkdirTemp("", "ldbc-pin-*")
+	if err != nil {
+		return nil, fmt.Errorf("ldbc: temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := extractTarZst(ctx, archivePath, tmpDir); err != nil {
+		return nil, fmt.Errorf("ldbc: extract: %w", err)
+	}
+
+	// Read the manifest and compute the content checksum.
+	m, err := dataset.ReadManifest(tmpDir)
+	if err != nil {
+		return nil, fmt.Errorf("ldbc: read manifest from extracted archive: %w", err)
+	}
+	contentSum, err := dataset.Checksum(tmpDir, m)
+	if err != nil {
+		return nil, fmt.Errorf("ldbc: compute content checksum: %w", err)
+	}
+
+	return &Pin{
+		Name:            name,
+		Scale:           scale,
+		URL:             url,
+		Mirror:          mirror,
+		ArchiveChecksum: "sha256:" + archiveSum,
+		Checksum:        contentSum,
+		NodeCount:       m.NodeCount,
+		EdgeCount:       m.EdgeCount,
+	}, nil
+}
+
+// hashFile returns the lowercase hex sha256 digest of the file at path.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
