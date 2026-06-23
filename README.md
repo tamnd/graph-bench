@@ -20,16 +20,55 @@ It is not a leaderboard that crowns a winner, not a vendor benchmark, and not a 
 
 ## Status
 
-Scaffold. The command tree, the package layout, and the smoke CI are in place; the engine adapters, datasets, workloads, measurement, and gates land over the milestones in the spec roadmap. The verbs (`generate`, `run`, `compare`, `report`, `gate`) are present but not yet wired up.
+The core is in place. Milestones M1-M7 are merged; M8 (first published cross-engine result) is in progress.
 
-## Build
+What works today:
+
+- `generate` -- materializes any of five synthetic graph types (uniform, power-law, ER, grid, RMAT) to the canonical CSV layout with a content-verified manifest.
+- `list workloads` -- shows all registered workloads (micro, lsqb, snb-short, snb-complex, snb-write, snb-mix).
+- `list engines` -- shows the registered engine adapters and their build tags.
+- `report --file result.json` -- re-renders any saved JSON result in table, Markdown, CSV, or JSON.
+- `compare --files a.json,b.json` -- puts two or more result sets side by side with optional Bolt plane-overhead section.
+- `gate --file result.json --point-read-budget 1ms` -- checks p99 against per-class budgets and exits 2 on violations.
+
+What is not yet wired:
+
+- `run` -- flag surface is complete; engine execution requires an adapter import. The gr in-process adapter exists (`adapter/gr`); the run command stub will be connected in the next slice.
+- LDBC SNB SF1 pin -- the URL and checksums in `dataset/ldbc/pins/snb-sf1.json` are placeholders until the first verified dataset run.
+- First published cross-engine result in the lineage.
+
+The spec roadmap is at `notes/Spec/2060/bench/10-roadmap.md`.
+
+## Install
+
+Homebrew (macOS/Linux):
+
+```
+brew install tamnd/tap/graph-bench
+```
+
+Pre-built binaries for linux/darwin/windows amd64+arm64 are on the [releases page](https://github.com/tamnd/graph-bench/releases).
+
+OCI image (no shell, distroless):
+
+```
+docker pull ghcr.io/tamnd/graph-bench:latest
+```
+
+## Build from source
 
 ```
 go build ./...
 go test ./...
 ```
 
-The default build is pure Go with no cgo and no dependency beyond the standard library, the CLI framework, and (once the adapter lands) `gr`. Adapters for other engines sit behind build tags (`bolt`, `kuzu`, `duckpgq`, `age`) so they never enter the default build.
+The default build is pure Go with no cgo and no dependency beyond the standard library, the CLI framework, and `gr`. Adapters for other engines sit behind build tags (`bolt`, `kuzu`, `duckpgq`, `age`) so they never enter the default binary.
+
+To include the Bolt adapters (Neo4j, Memgraph, gr-bolt):
+
+```
+go build -tags bolt ./...
+```
 
 ## Spec
 
