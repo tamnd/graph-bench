@@ -27,19 +27,20 @@ func newRunCmd() *cobra.Command {
 	var (
 		wlName      string
 		engines     []string
-		scale       string
-		cache       string
-		format      string
-		outFile     string
-		publish     bool
-		rate        float64
-		concurrency []int
-		lineageDir  string
-		warmup      time.Duration
-		window      time.Duration
-		count       int
-		datasetPath string
-		datasetsDir string
+		scale        string
+		cache        string
+		format       string
+		outFile      string
+		publish      bool
+		rate         float64
+		concurrency  []int
+		lineageDir   string
+		warmup       time.Duration
+		window       time.Duration
+		count        int
+		datasetPath  string
+		datasetsDir  string
+		curateSeed   int64
 	)
 
 	cmd := &cobra.Command{
@@ -111,7 +112,7 @@ func newRunCmd() *cobra.Command {
 			var results []report.EngineResult
 			ctx := cmd.Context()
 			for _, eng := range flat {
-				er, runErr := executeRun(ctx, eng, wl, datasetPath, datasetsDir, scale, cache, opts, lineageDir, publish)
+				er, runErr := executeRun(ctx, eng, wl, datasetPath, datasetsDir, scale, cache, opts, lineageDir, publish, curateSeed)
 				if runErr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "run: engine %s: %v\n", eng, runErr)
 					continue
@@ -160,6 +161,7 @@ func newRunCmd() *cobra.Command {
 	f.IntSliceVar(&concurrency, "concurrency", nil, "concurrency sweep points")
 	f.StringVar(&datasetPath, "dataset-path", "", "path to an existing materialized dataset directory")
 	f.StringVar(&datasetsDir, "datasets-dir", "datasets", "directory of pre-generated datasets; searched by manifest name")
+	f.Int64Var(&curateSeed, "curate-seed", 1, "PRNG seed for the parameter curation step")
 
 	_ = cmd.MarkFlagRequired("workload")
 	return cmd

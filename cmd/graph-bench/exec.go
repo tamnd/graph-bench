@@ -29,6 +29,7 @@ func executeRun(
 	opts measure.Options,
 	lineageDir string,
 	publish bool,
+	curateSeed int64,
 ) (report.EngineResult, error) {
 	// Resolve the target adapter.
 	tgt, err := lookupTarget(engineName)
@@ -84,7 +85,7 @@ func executeRun(
 
 	// Load curated parameter pools for any query that declares a PoolKey.
 	// Auto-curates params.json if absent and the dataset has a directory.
-	paramSources, err := loadParamSources(ctx, wl, ds)
+	paramSources, err := loadParamSources(ctx, wl, ds, curateSeed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "run: load curated params: %v (queries will run without seeded params)\n", err)
 		paramSources = nil
@@ -180,7 +181,7 @@ func buildQueryOps(q *workload.WorkloadQuery, count int, ps workload.ParamSource
 // workload that declare a PoolKey. If the dataset has a directory but no
 // params.json, it runs workload.Curate first (idempotent). Returns a map from
 // query ID to ParamSource; missing or unreadable pools produce no entry.
-func loadParamSources(ctx context.Context, wl *workload.Workload, ds target.Dataset) (map[string]workload.ParamSource, error) {
+func loadParamSources(ctx context.Context, wl *workload.Workload, ds target.Dataset, curateSeed int64) (map[string]workload.ParamSource, error) {
 	_ = ctx
 	// Check if any query needs a curated pool.
 	needsPool := false
@@ -196,7 +197,7 @@ func loadParamSources(ctx context.Context, wl *workload.Workload, ds target.Data
 
 	// Auto-curate if the dataset has a directory (file-backed, not a statements set).
 	if ds.Dir() != "" {
-		if err := workload.Curate(ds, 1); err != nil {
+		if err := workload.Curate(ds, curateSeed); err != nil {
 			return nil, fmt.Errorf("curate %s: %w", ds.Name(), err)
 		}
 	}
