@@ -28,7 +28,7 @@ builds:
 
 archives:
   - id: graph-bench
-    builds: [graph-bench]
+    ids: [graph-bench]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
@@ -70,8 +70,9 @@ changelog:
       - Merge pull request
       - Merge branch
 
-brews:
+homebrew_casks:
   - name: graph-bench
+    ids: [graph-bench]
     repository:
       owner: tamnd
       name: homebrew-tap
@@ -79,14 +80,10 @@ brews:
     homepage: "https://graph-bench.tamnd.com"
     description: "Fair, reproducible cross-engine benchmark for graph databases"
     license: "Apache-2.0"
-    install: |
-      bin.install "graph-bench"
-    test: |
-      system "#{bin}/graph-bench", "--version"
 
 nfpms:
   - id: graph-bench
-    builds: [graph-bench]
+    ids: [graph-bench]
     package_name: graph-bench
     homepage: "https://graph-bench.tamnd.com"
     description: "Fair, reproducible cross-engine benchmark for graph databases"
@@ -103,6 +100,7 @@ nfpms:
 
 scoops:
   - name: graph-bench
+    ids: [graph-bench]
     repository:
       owner: tamnd
       name: scoop-bucket
@@ -111,37 +109,19 @@ scoops:
     description: "Fair, reproducible cross-engine benchmark for graph databases"
     license: "Apache-2.0"
 
-dockers:
-  - image_templates:
-      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-amd64"
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title=graph-bench"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.source=https://github.com/tamnd/graph-bench"
-      - "--label=org.opencontainers.image.licenses=Apache-2.0"
-    goarch: amd64
-  - image_templates:
-      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-arm64"
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title=graph-bench"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.source=https://github.com/tamnd/graph-bench"
-      - "--label=org.opencontainers.image.licenses=Apache-2.0"
-    goarch: arm64
-
-docker_manifests:
-  - name_template: "ghcr.io/tamnd/graph-bench:{{ .Tag }}"
-    image_templates:
-      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-amd64"
-      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-arm64"
-  - name_template: "ghcr.io/tamnd/graph-bench:latest"
-    image_templates:
-      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-amd64"
-      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-arm64"
+dockers_v2:
+  - id: graph-bench-linux
+    ids: [graph-bench]
+    images:
+      - "ghcr.io/tamnd/graph-bench"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: graph-bench
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.source: "https://github.com/tamnd/graph-bench"
+      org.opencontainers.image.licenses: Apache-2.0
 
 release:
   github:
