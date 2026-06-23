@@ -90,6 +90,12 @@ type WorkloadQuery struct {
 	// mandatory; a missing native text is a blank matrix cell, not a failure.
 	Texts map[Dialect]string
 
+	// PoolKey, when non-empty, names the key in the dataset's params.json that
+	// holds this query's curated parameter pool. The harness loads the pool at
+	// run time, auto-curating if params.json is absent. Queries with a PoolKey
+	// and a runtime-loaded pool use that pool; Params is the static fallback.
+	PoolKey string
+
 	// Params is the parameter source: either a fixed set or a draw from the
 	// dataset's curated pool. See ParamSource.
 	Params ParamSource

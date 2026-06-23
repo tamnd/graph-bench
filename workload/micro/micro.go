@@ -68,8 +68,9 @@ var microER = &workload.Workload{
 // seed, count the neighbors. It isolates the single-expand operation and is the
 // atom of traversal.
 var khop1Query = &workload.WorkloadQuery{
-	ID:    "micro-khop1",
-	Class: target.Traversal,
+	ID:      "micro-khop1",
+	Class:   target.Traversal,
+	PoolKey: khopKey,
 	Texts: map[workload.Dialect]string{
 		workload.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
 	},
@@ -97,8 +98,9 @@ var khop1Query = &workload.WorkloadQuery{
 // hops from the seed. It exercises the engine's double-expand and distinct
 // deduplication.
 var khop2Query = &workload.WorkloadQuery{
-	ID:    "micro-khop2",
-	Class: target.Traversal,
+	ID:      "micro-khop2",
+	Class:   target.Traversal,
+	PoolKey: khopKey,
 	Texts: map[workload.Dialect]string{
 		workload.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
 	},
@@ -124,8 +126,9 @@ var khop2Query = &workload.WorkloadQuery{
 
 // khop3Query is the three-hop expansion, the third depth in the k-hop sweep.
 var khop3Query = &workload.WorkloadQuery{
-	ID:    "micro-khop3",
-	Class: target.Traversal,
+	ID:      "micro-khop3",
+	Class:   target.Traversal,
+	PoolKey: khopKey,
 	Texts: map[workload.Dialect]string{
 		workload.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
 	},
@@ -153,8 +156,9 @@ var khop3Query = &workload.WorkloadQuery{
 // reachable in one, two, or three hops. It exercises the engine's variable-length
 // operator and the frontier union.
 var varlenQuery = &workload.WorkloadQuery{
-	ID:    "micro-varlen",
-	Class: target.Traversal,
+	ID:      "micro-varlen",
+	Class:   target.Traversal,
+	PoolKey: khopKey,
 	Texts: map[workload.Dialect]string{
 		workload.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
 	},
@@ -181,8 +185,9 @@ var varlenQuery = &workload.WorkloadQuery{
 // spQuery is the single-pair shortest path: the length of the shortest directed
 // path from src to dst. A pair with no path has no row in the engine's answer.
 var spQuery = &workload.WorkloadQuery{
-	ID:    "micro-sp",
-	Class: target.Traversal,
+	ID:      "micro-sp",
+	Class:   target.Traversal,
+	PoolKey: spKey,
 	Texts: map[workload.Dialect]string{
 		// shortestPath in openCypher (undirected). For directed use -[:EDGE]->
 		// consistently; gr and the Bolt engines accept both.
