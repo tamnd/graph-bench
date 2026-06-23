@@ -154,7 +154,7 @@ func newRunCmd() *cobra.Command {
 	f.BoolVar(&publish, "publish", false, "append results to the lineage tree")
 	f.StringVar(&lineageDir, "lineage-dir", "results", "lineage tree root")
 	f.Float64Var(&rate, "rate", 0, "offered queries/second (0 = sequential)")
-	f.DurationVar(&warmup, "warmup", 5*time.Second, "warmup duration before measurement begins")
+	f.DurationVar(&warmup, "warmup", 0, "warmup duration before measurement begins (only effective with --rate; count-based runs skip warmup)")
 	f.DurationVar(&window, "window", 30*time.Second, "steady-state measurement window")
 	f.IntVar(&count, "count", 0, "fixed query count per query (overrides --window if > 0)")
 	f.IntSliceVar(&concurrency, "concurrency", nil, "concurrency sweep points")
