@@ -61,14 +61,15 @@ func (t *Target) Version(ctx context.Context) (string, error) {
 	return "devel", nil
 }
 
-// Capabilities reports what the gr adapter currently exposes. BulkCSVLoad is
-// false until the gr import bulk path is wired in M2; this adapter loads through
-// queries, which is honest about how the data gets in.
+// Capabilities reports what the gr adapter exposes. BulkCSVLoad is true: a
+// file-backed dataset is ingested through gr's four-pass loader, the same bulk
+// path gr import uses. A statements dataset (no directory) is still loaded by
+// issuing queries.
 func (t *Target) Capabilities() target.Capabilities {
 	return target.Capabilities{
 		Languages:      []target.Language{target.Cypher},
 		Transactions:   true,
-		BulkCSVLoad:    false,
+		BulkCSVLoad:    true,
 		Algorithms:     nil,
 		PersistentDisk: true,
 	}
@@ -83,7 +84,8 @@ func (t *Target) Setup(ctx context.Context, config target.Config) (target.Driver
 		db  *grdb.DB
 		err error
 	)
-	if path == "" || path == ":memory:" {
+	mem := path == "" || path == ":memory:"
+	if mem {
 		db, err = grdb.Open(":memory:.gr", grdb.Options{VFS: vfs.NewMem()})
 	} else {
 		db, err = grdb.Open(path, grdb.Options{})
@@ -91,15 +93,20 @@ func (t *Target) Setup(ctx context.Context, config target.Config) (target.Driver
 	if err != nil {
 		return nil, fmt.Errorf("gr: open %q: %w", path, err)
 	}
-	return &driver{db: db}, nil
+	return &driver{db: db, path: path, mem: mem}, nil
 }
 
-// Load builds the graph by running the dataset's statements in order. The bulk
-// CSV path supersedes this for large scales in M2.
+// Load ingests the dataset. A file-backed dataset (one with a directory of
+// canonical CSV files) goes through gr's four-pass bulk loader; a statements
+// dataset is built by running its statements in order. The bulk path is the
+// identity case the canonical layout was shaped for, so it does no translation.
 func (t *Target) Load(ctx context.Context, d target.Driver, ds target.Dataset) (target.LoadStats, error) {
 	drv, ok := d.(*driver)
 	if !ok {
 		return target.LoadStats{}, fmt.Errorf("gr: Load got a %T, want *driver", d)
+	}
+	if ds.Dir() != "" {
+		return t.loadCSV(ctx, drv, ds)
 	}
 	start := time.Now()
 	for i, stmt := range ds.Statements() {
@@ -133,9 +140,13 @@ func (t *Target) Teardown(ctx context.Context, d target.Driver) error {
 	return d.Close(ctx)
 }
 
-// driver is a live handle to an open gr database.
+// driver is a live handle to an open gr database. path and mem record how it was
+// opened, so the bulk CSV loader (which builds a fresh database file) knows
+// whether it can run and where to write.
 type driver struct {
-	db *grdb.DB
+	db   *grdb.DB
+	path string
+	mem  bool
 }
 
 var _ target.Driver = (*driver)(nil)
