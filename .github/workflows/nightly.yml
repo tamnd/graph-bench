@@ -1,0 +1,95 @@
+name: Nightly cross-engine matrix
+
+on:
+  schedule:
+    # Run at 02:00 UTC every day.
+    - cron: "0 2 * * *"
+  workflow_dispatch: # allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    name: cross-engine (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: neo4j
+            image: neo4j:5.26-community
+            bolt_uri: bolt://localhost:7687
+            env: NEO4J_AUTH=none
+          - engine: memgraph
+            image: memgraph/memgraph:2.19.0
+            bolt_uri: bolt://localhost:7687
+            env: ""
+
+    services:
+      engine:
+        image: ${{ matrix.image }}
+        env:
+          NEO4J_AUTH: ${{ matrix.engine == 'neo4j' && 'none' || '' }}
+        ports:
+          - "7687:7687"
+          - "7474:7474"
+        options: >-
+          --health-cmd "echo > /dev/tcp/localhost/7687 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: clone gr beside the repo
+        run: git clone --depth 1 https://github.com/tamnd/gr.git ../gr
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build (bolt tag)
+        run: go build -tags bolt ./...
+
+      - name: vet (bolt tag)
+        run: go vet -tags bolt ./...
+
+      - name: test (bolt tag, no container tests)
+        run: go test -tags bolt ./... -timeout 10m
+        env:
+          GRAPH_BENCH_SKIP_CONTAINER: "1"
+
+  bolt-build:
+    name: bolt build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: clone gr beside the repo
+        run: git clone --depth 1 https://github.com/tamnd/gr.git ../gr
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt (bolt tag)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Files not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: build (bolt tag)
+        run: go build -tags bolt ./...
+
+      - name: vet (bolt tag)
+        run: go vet -tags bolt ./...
+
+      - name: test (bolt tag)
+        run: go test -tags bolt ./... -timeout 10m
