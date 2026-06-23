@@ -46,11 +46,29 @@ jobs:
       - name: set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: set skip flags for optional publishers
+        id: skip
+        run: |
+          SKIP=""
+          if [ -z "${{ secrets.HOMEBREW_TAP_TOKEN }}" ]; then
+            SKIP="${SKIP},brew"
+          fi
+          if [ -z "${{ secrets.SCOOP_BUCKET_TOKEN }}" ]; then
+            SKIP="${SKIP},scoop"
+          fi
+          # Remove leading comma if present.
+          SKIP="${SKIP#,}"
+          if [ -n "$SKIP" ]; then
+            echo "args=release --clean --skip=${SKIP}" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=release --clean" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: ${{ steps.skip.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
