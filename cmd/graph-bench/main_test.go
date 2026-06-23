@@ -28,17 +28,6 @@ func TestRootCommandTree(t *testing.T) {
 // real errors (not the "not implemented" placeholder). Each verb is called with
 // no arguments so it hits the input-validation path, not the stub path.
 func TestVerbsImplemented(t *testing.T) {
-	cases := []struct {
-		verb    string
-		builder func() interface{ RunE(cmd interface{}, args []string) error }
-		wantErr string // substring that must appear in the error; "" means no error expected
-	}{
-		{"list", func() interface{ RunE(cmd interface{}, args []string) error } {
-			return nil // list with no args should succeed
-		}, ""},
-	}
-	_ = cases
-
 	// list with no args must succeed.
 	listCmd := newListCmd()
 	if err := listCmd.RunE(listCmd, nil); err != nil {

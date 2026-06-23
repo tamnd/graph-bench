@@ -15,8 +15,8 @@ import (
 // failure without printing an error message (the message is already printed).
 type gateExitCode int
 
-func (e gateExitCode) Error() string  { return fmt.Sprintf("gate: failed with exit code %d", int(e)) }
-func (e gateExitCode) ExitCode() int  { return int(e) }
+func (e gateExitCode) Error() string { return fmt.Sprintf("gate: failed with exit code %d", int(e)) }
+func (e gateExitCode) ExitCode() int { return int(e) }
 
 // Budget is a per-class p99 ceiling for the gate check. All units are
 // durations; a zero value for a class means the budget is unconstrained.
