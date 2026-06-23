@@ -11,6 +11,10 @@ import (
 	"github.com/tamnd/graph-bench/dataset"
 	"github.com/tamnd/graph-bench/dataset/gen"
 	"github.com/tamnd/graph-bench/dataset/ldbc"
+	"github.com/tamnd/graph-bench/workload"
+	_ "github.com/tamnd/graph-bench/workload/lsqb"
+	_ "github.com/tamnd/graph-bench/workload/micro"
+	_ "github.com/tamnd/graph-bench/workload/snb"
 )
 
 // newGenerateCmd builds the generate verb: it materializes a synthetic dataset
@@ -63,6 +67,7 @@ func newGenerateCmd() *cobra.Command {
 	f.BoolVar(&cfg.ComputeInvariants, "compute-invariants", false, "compute optional ground-truth invariants")
 
 	cmd.AddCommand(newGeneratePinCmd())
+	cmd.AddCommand(newGenerateCurateCmd())
 	return cmd
 }
 
@@ -126,6 +131,45 @@ func newGeneratePinCmd() *cobra.Command {
 	f.StringVar(&url, "url", "", "primary download URL (stored in the pin, not downloaded)")
 	f.StringVar(&mirror, "mirror", "", "fallback download URL")
 	f.StringVar(&out, "out", "-", "output path for the pin JSON (- prints to stdout)")
+	return cmd
+}
+
+// newGenerateCurateCmd builds the generate curate subcommand. It pre-computes
+// the curated parameter pools for a dataset (params.json beside manifest.json)
+// so the run command does not have to do it on the first run against each
+// dataset. Curation is idempotent; running it again with the same seed is safe.
+func newGenerateCurateCmd() *cobra.Command {
+	var (
+		dsPath string
+		seed   int64
+	)
+	cmd := &cobra.Command{
+		Use:   "curate",
+		Short: "Pre-compute curated parameter pools for a dataset",
+		Long: "generate curate reads a materialized dataset directory and writes\n" +
+			"params.json beside manifest.json with curated parameter pools for\n" +
+			"every registered workload family. Curation is idempotent; repeating\n" +
+			"it with the same seed is safe and produces the same output.\n" +
+			"The run command curates automatically, but running curate explicitly\n" +
+			"on large datasets avoids the one-time cost on the first benchmark run.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if dsPath == "" {
+				return fmt.Errorf("generate curate: --dataset-path is required")
+			}
+			ds, err := dataset.Open(dsPath)
+			if err != nil {
+				return fmt.Errorf("generate curate: open dataset %s: %w", dsPath, err)
+			}
+			if err := workload.Curate(ds, seed); err != nil {
+				return fmt.Errorf("generate curate: %w", err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "curated %s (seed=%d)\n", dsPath, seed)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&dsPath, "dataset-path", "", "path to a materialized dataset directory (required)")
+	f.Int64Var(&seed, "seed", 1, "PRNG seed for sampling; use the same seed as --curate-seed in run")
 	return cmd
 }
 
