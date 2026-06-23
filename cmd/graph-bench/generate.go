@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/tamnd/graph-bench/dataset"
 	"github.com/tamnd/graph-bench/dataset/gen"
+	"github.com/tamnd/graph-bench/dataset/ldbc"
 )
 
 // newGenerateCmd builds the generate verb: it materializes a synthetic dataset
@@ -60,6 +62,70 @@ func newGenerateCmd() *cobra.Command {
 	f.Float64SliceVar(&initiator, "initiator", nil, "RMAT initiator A,B,C,D (rmat); default is the Graph500 values")
 	f.BoolVar(&cfg.ComputeInvariants, "compute-invariants", false, "compute optional ground-truth invariants")
 
+	cmd.AddCommand(newGeneratePinCmd())
+	return cmd
+}
+
+// newGeneratePinCmd builds the generate pin subcommand. It computes a pin JSON
+// from a locally downloaded .tar.zst archive: hash the archive, extract it,
+// read the manifest, compute the content checksum, and write the pin file.
+// Run this once after downloading a new LDBC dataset; commit the result to
+// dataset/ldbc/pins/.
+func newGeneratePinCmd() *cobra.Command {
+	var (
+		archive string
+		name    string
+		scale   string
+		url     string
+		mirror  string
+		out     string
+	)
+	cmd := &cobra.Command{
+		Use:   "pin",
+		Short: "Compute a pin JSON from a local .tar.zst LDBC archive",
+		Long: "generate pin hashes a local LDBC .tar.zst archive, extracts it to a temp\n" +
+			"directory, reads the dataset manifest, and writes a pin JSON file with the\n" +
+			"archive checksum and content checksum filled in. Commit the result to\n" +
+			"dataset/ldbc/pins/<name>.json.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if archive == "" {
+				return fmt.Errorf("generate pin: --archive is required")
+			}
+			if name == "" {
+				return fmt.Errorf("generate pin: --name is required (e.g. snb-sf1)")
+			}
+			if scale == "" {
+				return fmt.Errorf("generate pin: --scale is required (e.g. SF1)")
+			}
+			pin, err := ldbc.ComputePin(cmd.Context(), archive, name, scale, url, mirror)
+			if err != nil {
+				return err
+			}
+			data, err := json.MarshalIndent(pin, "", "  ")
+			if err != nil {
+				return err
+			}
+			if out == "" || out == "-" {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\n", data)
+				return nil
+			}
+			if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(out, append(data, '\n'), 0o644); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", out)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&archive, "archive", "", "path to the .tar.zst archive to hash and inspect")
+	f.StringVar(&name, "name", "", "pin name, e.g. snb-sf1 (becomes the JSON filename)")
+	f.StringVar(&scale, "scale", "", "LDBC scale label, e.g. SF1")
+	f.StringVar(&url, "url", "", "primary download URL (stored in the pin, not downloaded)")
+	f.StringVar(&mirror, "mirror", "", "fallback download URL")
+	f.StringVar(&out, "out", "-", "output path for the pin JSON (- prints to stdout)")
 	return cmd
 }
 
