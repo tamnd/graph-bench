@@ -1,0 +1,110 @@
+{
+  "Stats": {
+    "1": {
+      "Class": 1,
+      "Count": 250,
+      "Errors": 0,
+      "P50": 170103334,
+      "P90": 276289792,
+      "P95": 290872000,
+      "P99": 303653042,
+      "Max": 305857834,
+      "Mean": 164373657,
+      "Throughput": 8.333333333333334
+    }
+  },
+  "ByQuery": {
+    "micro-khop1": {
+      "Class": 1,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 201941292,
+      "P90": 283259959,
+      "P95": 294497500,
+      "P99": 301184792,
+      "Max": 301184792,
+      "Mean": 185116094,
+      "Throughput": 1.6666666666666667
+    },
+    "micro-khop2": {
+      "Class": 1,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 192071917,
+      "P90": 272109167,
+      "P95": 277124250,
+      "P99": 304736542,
+      "Max": 304736542,
+      "Mean": 195032082,
+      "Throughput": 1.6666666666666667
+    },
+    "micro-khop3": {
+      "Class": 1,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 175559792,
+      "P90": 233092042,
+      "P95": 235656459,
+      "P99": 303653042,
+      "Max": 303653042,
+      "Mean": 185829436,
+      "Throughput": 1.6666666666666667
+    },
+    "micro-sp": {
+      "Class": 1,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 64865417,
+      "P90": 99954250,
+      "P95": 104959709,
+      "P99": 108287250,
+      "Max": 108287250,
+      "Mean": 65550768,
+      "Throughput": 1.6666666666666667
+    },
+    "micro-varlen": {
+      "Class": 1,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 237652584,
+      "P90": 290007209,
+      "P95": 297844667,
+      "P99": 305857834,
+      "Max": 305857834,
+      "Mean": 190339903,
+      "Throughput": 1.6666666666666667
+    }
+  },
+  "Cold": null,
+  "Load": {
+    "Duration": 49364291,
+    "BytesOnDisk": 1060864,
+    "Nodes": 10000,
+    "Edges": 19800
+  },
+  "Sweep": null,
+  "Condition": {
+    "Engine": "gr",
+    "EngineVersion": "(devel)",
+    "Plane": "inproc",
+    "Config": null,
+    "Tuned": false,
+    "HarnessVersion": "",
+    "HarnessCommit": "",
+    "Dataset": "grid-100x100",
+    "Scale": "SF1",
+    "DatasetChecksum": "sha256:fd000c2a1c8fe54f57761318492dd1c481374ae74f58a88cebffb272b5b79337",
+    "Workload": "micro-grid",
+    "Params": null,
+    "Cache": "warm",
+    "OfferedRate": 0,
+    "Concurrency": null,
+    "Hardware": "",
+    "OS": "darwin/arm64",
+    "GoVersion": "go1.26.4",
+    "Repetitions": 50,
+    "Seed": 0,
+    "Warmup": "",
+    "Timestamp": "2026-06-23T17:22:20.209659Z"
+  }
+}
