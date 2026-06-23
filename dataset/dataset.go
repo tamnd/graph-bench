@@ -77,10 +77,11 @@ func (s *Set) RelFiles(typ string) ([]string, []target.Column, error) {
 	return s.filesAndHeader(rs.Files)
 }
 
-// Params returns the curated parameter set for a workload. Parameter curation
-// (spec doc 04 section 5) lands with the workload milestone; until then a
-// dataset carries no curated parameters and this returns nil.
-func (s *Set) Params(workload string) (target.Params, error) { return nil, nil }
+// Params returns the curated parameter pool for a named key, read from
+// params.json beside the dataset. An absent file or an unknown key returns nil.
+func (s *Set) Params(key string) ([]target.Params, error) {
+	return readParamsPool(filepath.Join(s.dir, "params.json"), key)
+}
 
 // Statements returns no statements: a materialized dataset is loaded from its
 // CSV files, not by issuing queries.

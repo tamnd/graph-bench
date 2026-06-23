@@ -241,10 +241,12 @@ type Dataset interface {
 	NodeFiles(label string) ([]string, []Column, error)
 	RelFiles(typ string) ([]string, []Column, error)
 
-	// Params returns the curated parameter set for a workload on this dataset,
-	// so a workload runs the identical parameters on every engine. It returns
-	// nil for a workload with no curated parameters.
-	Params(workload string) (Params, error)
+	// Params returns the curated parameter pool for a named pool key on this
+	// dataset. The pool is a slice of parameter sets in the deterministic order
+	// curation produced; a PoolSource cycles through it so every engine runs the
+	// same draws (doc 04 section 5). It returns nil when the dataset carries no
+	// pool under that key (un-curated dataset or unknown key).
+	Params(key string) ([]Params, error)
 
 	// Statements returns openCypher statements that build the graph, for engines
 	// loaded by issuing queries and for small test datasets. It is empty for a
