@@ -27,20 +27,20 @@ func newRunCmd() *cobra.Command {
 	var (
 		wlName      string
 		engines     []string
-		scale        string
-		cache        string
-		format       string
-		outFile      string
-		publish      bool
-		rate         float64
-		concurrency  []int
-		lineageDir   string
-		warmup       time.Duration
-		window       time.Duration
-		count        int
-		datasetPath  string
-		datasetsDir  string
-		curateSeed   int64
+		scale       string
+		cache       string
+		format      string
+		outFile     string
+		publish     bool
+		rate        float64
+		concurrency []int
+		lineageDir  string
+		warmup      time.Duration
+		window      time.Duration
+		count       int
+		datasetPath string
+		datasetsDir string
+		curateSeed  int64
 	)
 
 	cmd := &cobra.Command{
