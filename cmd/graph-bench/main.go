@@ -53,14 +53,6 @@ func newRootCmd() *cobra.Command {
 	return root
 }
 
-func newGenerateCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "generate",
-		Short: "Generate or fetch a pinned, deterministic dataset",
-		RunE:  notImplemented("generate"),
-	}
-}
-
 func newRunCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",

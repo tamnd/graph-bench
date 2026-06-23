@@ -24,12 +24,17 @@ func TestRootCommandTree(t *testing.T) {
 	}
 }
 
-// TestVerbsAreStubs confirms the unimplemented verbs report clearly rather than
-// pretending to succeed, which would hide that no work happened.
+// implementedVerbs are the verbs wired to real work; the rest are still stubs.
+// generate landed with the dataset milestone.
+var implementedVerbs = map[string]bool{"generate": true}
+
+// TestVerbsAreStubs confirms the not-yet-implemented verbs report clearly rather
+// than pretending to succeed, which would hide that no work happened. Verbs that
+// have been implemented are exempt and checked elsewhere.
 func TestVerbsAreStubs(t *testing.T) {
 	root := newRootCmd()
 	for _, c := range root.Commands() {
-		if c.RunE == nil {
+		if c.RunE == nil || implementedVerbs[c.Name()] {
 			continue
 		}
 		err := c.RunE(c, nil)
@@ -40,6 +45,22 @@ func TestVerbsAreStubs(t *testing.T) {
 		if !strings.Contains(err.Error(), "not implemented") {
 			t.Errorf("verb %q error = %q, want it to say not implemented", c.Name(), err)
 		}
+	}
+}
+
+// TestGenerateRequiresGen confirms the generate verb is wired (not a stub) and
+// reports the missing required flag rather than silently doing nothing.
+func TestGenerateRequiresGen(t *testing.T) {
+	cmd := newGenerateCmd()
+	err := cmd.RunE(cmd, nil)
+	if err == nil {
+		t.Fatal("generate with no --gen returned nil, want a required-flag error")
+	}
+	if strings.Contains(err.Error(), "not implemented") {
+		t.Errorf("generate is still a stub: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--gen") {
+		t.Errorf("generate error = %q, want it to mention --gen", err)
 	}
 }
 
