@@ -51,7 +51,7 @@ jobs:
         run: |
           SKIP=""
           if [ -z "${{ secrets.HOMEBREW_TAP_TOKEN }}" ]; then
-            SKIP="${SKIP},brew"
+            SKIP="${SKIP},homebrew"
           fi
           if [ -z "${{ secrets.SCOOP_BUCKET_TOKEN }}" ]; then
             SKIP="${SKIP},scoop"
