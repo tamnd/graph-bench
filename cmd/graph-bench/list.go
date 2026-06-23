@@ -60,24 +60,22 @@ func listWorkloads(cmd *cobra.Command) error {
 }
 
 func listEngines(cmd *cobra.Command) error {
-	// The known engines are the in-process adapters plus the Bolt adapters (if
-	// built with -tags bolt). We print a static list; at run time the adapters
-	// are resolved by name from the target registry.
-	engines := []struct {
-		name  string
-		plane string
-		tag   string
-	}{
-		{"gr", "inproc", "always"},
-		{"gr-bolt", "bolt", "-tags bolt"},
-		{"neo4j", "bolt", "-tags bolt"},
-		{"memgraph", "bolt", "-tags bolt"},
-	}
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%-12s  %-8s  %s\n", "engine", "plane", "build tag")
-	fmt.Fprintf(w, "%-12s  %-8s  %s\n", "------", "-----", "---------")
-	for _, e := range engines {
-		fmt.Fprintf(w, "%-12s  %-8s  %s\n", e.name, e.plane, e.tag)
+	if len(targetRegistry) == 0 {
+		fmt.Fprintln(w, "no engine adapters registered")
+		return nil
+	}
+	// Collect and sort by name for stable output.
+	names := make([]string, 0, len(targetRegistry))
+	for n := range targetRegistry {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	fmt.Fprintf(w, "%-14s  %-8s\n", "engine", "plane")
+	fmt.Fprintf(w, "%-14s  %-8s\n", "------", "-----")
+	for _, n := range names {
+		t := targetRegistry[n]
+		fmt.Fprintf(w, "%-14s  %-8s\n", n, t.Plane().String())
 	}
 	return nil
 }
