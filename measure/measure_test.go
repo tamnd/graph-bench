@@ -74,7 +74,7 @@ func TestSummarizeBasic(t *testing.T) {
 	}
 	window := 4 * time.Second
 
-	stats := summarize(samples, window)
+	stats, _ := summarize(samples, window)
 
 	tr, ok := stats[target.Traversal]
 	if !ok {
@@ -123,7 +123,7 @@ func TestSummarizeErrorsExcludedFromLatency(t *testing.T) {
 		{Class: target.Write, Latency: ms(1000), Err: errFoo}, // error sample
 		{Class: target.Write, Latency: ms(6)},
 	}
-	stats := summarize(samples, time.Second)
+	stats, _ := summarize(samples, time.Second)
 	w, ok := stats[target.Write]
 	if !ok {
 		t.Fatal("no Write stat")
@@ -150,7 +150,7 @@ func TestSummarizeZeroWindow(t *testing.T) {
 		{Class: target.Traversal, Latency: ms(1)},
 		{Class: target.Traversal, Latency: ms(2)},
 	}
-	stats := summarize(samples, 0)
+	stats, _ := summarize(samples, 0)
 	if stats[target.Traversal].Throughput != 0 {
 		t.Errorf("Throughput = %v with zero window, want 0", stats[target.Traversal].Throughput)
 	}
@@ -164,7 +164,7 @@ func TestSummarizeAllErrors(t *testing.T) {
 		{Class: target.Analytical, Err: errFoo},
 		{Class: target.Analytical, Err: errFoo},
 	}
-	stats := summarize(samples, time.Second)
+	stats, _ := summarize(samples, time.Second)
 	a, ok := stats[target.Analytical]
 	if !ok {
 		t.Fatal("no Analytical stat")

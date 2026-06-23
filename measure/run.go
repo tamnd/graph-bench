@@ -13,11 +13,16 @@ import (
 // its bound parameters. Build-equivalent work (parameter selection, dialect
 // resolution) is done when the schedule is built so firing an Op is a pure
 // Driver.Run with no selection work on the hot path.
+//
+// QueryID is the workload query id (e.g. "snb-is2", "lsqb-q5") that produced
+// this op. It propagates into Sample.QueryID so the result carries per-query
+// statistics alongside the per-class rollup.
 type Op struct {
-	Offset time.Duration
-	Class  target.Class
-	Query  target.Query
-	Params target.Params
+	Offset  time.Duration
+	Class   target.Class
+	QueryID string
+	Query   target.Query
+	Params  target.Params
 }
 
 // Options tunes a run. The fields mirror benchload/harness.go's structure,
@@ -160,7 +165,7 @@ func Run(ctx context.Context, d target.Driver, ops []Op, opt Options) Result {
 			defer wg.Done()
 			p.acquire()
 			defer p.release()
-			s := Sample{Class: o.Class}
+			s := Sample{Class: o.Class, QueryID: o.QueryID}
 			qctx, cancel := context.WithTimeout(ctx, opt.timeout())
 			defer cancel()
 			res, err := d.Run(qctx, o.Query, o.Params)
@@ -183,7 +188,8 @@ drain:
 			steady = append(steady, samples[i])
 		}
 	}
-	return Result{Stats: summarize(steady, opt.window())}
+	byClass, byQuery := summarize(steady, opt.window())
+	return Result{Stats: byClass, ByQuery: byQuery}
 }
 
 // drainAndClose streams the result to count its rows and then releases it, so
