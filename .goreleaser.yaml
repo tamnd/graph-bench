@@ -1,0 +1,152 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: graph-bench
+    main: ./cmd/graph-bench
+    binary: graph-bench
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: graph-bench
+    builds: [graph-bench]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+signs:
+  - cmd: cosign
+    env:
+      - COSIGN_EXPERIMENTAL=1
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - --yes
+    artifacts: checksum
+    output: true
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+brews:
+  - name: graph-bench
+    repository:
+      owner: tamnd
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://graph-bench.tamnd.com"
+    description: "Fair, reproducible cross-engine benchmark for graph databases"
+    license: "Apache-2.0"
+    install: |
+      bin.install "graph-bench"
+    test: |
+      system "#{bin}/graph-bench", "--version"
+
+nfpms:
+  - id: graph-bench
+    builds: [graph-bench]
+    package_name: graph-bench
+    homepage: "https://graph-bench.tamnd.com"
+    description: "Fair, reproducible cross-engine benchmark for graph databases"
+    license: "Apache-2.0"
+    maintainer: "Duc-Tam Nguyen <tamnd@liteio.dev>"
+    formats:
+      - deb
+      - rpm
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/graph-bench/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/graph-bench/README.md
+
+scoops:
+  - name: graph-bench
+    repository:
+      owner: tamnd
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
+    homepage: "https://graph-bench.tamnd.com"
+    description: "Fair, reproducible cross-engine benchmark for graph databases"
+    license: "Apache-2.0"
+
+dockers:
+  - image_templates:
+      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-amd64"
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title=graph-bench"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/tamnd/graph-bench"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+    goarch: amd64
+  - image_templates:
+      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-arm64"
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title=graph-bench"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/tamnd/graph-bench"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+    goarch: arm64
+
+docker_manifests:
+  - name_template: "ghcr.io/tamnd/graph-bench:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-amd64"
+      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/tamnd/graph-bench:latest"
+    image_templates:
+      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-amd64"
+      - "ghcr.io/tamnd/graph-bench:{{ .Tag }}-arm64"
+
+release:
+  github:
+    owner: tamnd
+    name: graph-bench
+  draft: false
+  prerelease: auto
+  name_template: "{{ .Tag }}"
