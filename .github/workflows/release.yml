@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write # for cosign keyless signing
+
+jobs:
+  goreleaser:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: clone gr beside the repo
+        run: git clone --depth 1 https://github.com/tamnd/gr.git ../gr
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: install syft (for SBOM)
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: set up QEMU (for arm64 cross-build)
+        uses: docker/setup-qemu-action@v3
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
