@@ -1,0 +1,14 @@
+# Build output
+/graph-bench
+/dist/
+
+# Generated and downloaded datasets, cached between runs
+/datasets/
+/testdata/cache/
+
+# Local run output and lineage scratch
+/runs/
+*.out
+
+# Editor and OS noise
+.DS_Store
