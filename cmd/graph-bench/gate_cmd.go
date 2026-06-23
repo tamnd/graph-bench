@@ -47,8 +47,9 @@ func newGateCmd() *cobra.Command {
 		writeBudget      time.Duration
 		analyticalBudget time.Duration
 
-		// Regression flag: p99 may not regress beyond this factor vs the stored baseline.
+		// Regression flags.
 		regressionFactor float64
+		baselineFile     string
 	)
 
 	cmd := &cobra.Command{
@@ -130,13 +131,52 @@ func newGateCmd() *cobra.Command {
 				return gateExitCode(2)
 			}
 
-			// Regression check vs baseline is a stub; the baseline comparison
-			// lands when the lineage has enough historical data to make it
-			// meaningful. The flag is wired so scripts can set it now and the
-			// gate will enforce it once implemented.
-			if regressionFactor > 0 && regressionFactor != 1.0 {
+			// Regression check: compare current p99 against baseline, fail if
+			// any class p99 has grown by more than regressionFactor.
+			if baselineFile != "" && regressionFactor > 0 && regressionFactor != 1.0 {
+				bf, err := os.Open(baselineFile)
+				if err != nil {
+					return fmt.Errorf("gate: open baseline %s: %w", baselineFile, err)
+				}
+				baseline, parseErr := report.ParseJSON(bf)
+				bf.Close()
+				if parseErr != nil {
+					return fmt.Errorf("gate: parse baseline %s: %w", baselineFile, parseErr)
+				}
+				// Index baseline by engine name for O(1) lookup.
+				baseIdx := map[string]report.EngineResult{}
+				for _, b := range latestPerEngine(baseline) {
+					baseIdx[b.Name] = b
+				}
+				for _, er := range results {
+					b, ok := baseIdx[er.Name]
+					if !ok {
+						continue
+					}
+					for cl, stat := range er.Result.Stats {
+						bstat, ok := b.Result.Stats[cl]
+						if !ok || bstat.P99 == 0 {
+							continue
+						}
+						ratio := float64(stat.P99) / float64(bstat.P99)
+						if ratio > regressionFactor {
+							violations = append(violations, fmt.Sprintf(
+								"  %s %s regression: current p99=%s baseline=%s ratio=%.2fx (limit %.2fx)",
+								er.Name, cl, stat.P99, bstat.P99, ratio, regressionFactor,
+							))
+						}
+					}
+				}
+				if len(violations) > 0 {
+					fmt.Fprintf(cmd.ErrOrStderr(), "gate: %d regression violation(s):\n", len(violations))
+					for _, v := range violations {
+						fmt.Fprintln(cmd.ErrOrStderr(), v)
+					}
+					return gateExitCode(2)
+				}
+			} else if regressionFactor > 0 && regressionFactor != 1.0 && baselineFile == "" {
 				fmt.Fprintf(cmd.ErrOrStderr(),
-					"gate: --regression-factor is declared (%.2f) but baseline comparison is not yet wired; skipping\n",
+					"gate: --regression-factor %.2f requires --baseline to compare against; skipping regression check\n",
 					regressionFactor)
 			}
 
@@ -157,5 +197,6 @@ func newGateCmd() *cobra.Command {
 	f.DurationVar(&writeBudget, "write-budget", 0, "p99 ceiling for Write class (0=unconstrained)")
 	f.DurationVar(&analyticalBudget, "analytical-budget", 0, "p99 ceiling for Analytical class (0=unconstrained)")
 	f.Float64Var(&regressionFactor, "regression-factor", 1.1, "max allowed p99 growth vs baseline (1.0=no regression)")
+	f.StringVar(&baselineFile, "baseline", "", "JSON results file to compare current p99 against (required for --regression-factor to take effect)")
 	return cmd
 }
