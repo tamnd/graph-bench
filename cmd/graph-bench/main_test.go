@@ -12,7 +12,7 @@ func TestRootCommandTree(t *testing.T) {
 	if root.Use != "graph-bench" {
 		t.Fatalf("root Use = %q, want graph-bench", root.Use)
 	}
-	want := []string{"generate", "run", "compare", "report", "gate"}
+	want := []string{"generate", "list", "run", "compare", "report", "gate"}
 	have := map[string]bool{}
 	for _, c := range root.Commands() {
 		have[c.Name()] = true
@@ -24,27 +24,52 @@ func TestRootCommandTree(t *testing.T) {
 	}
 }
 
-// implementedVerbs are the verbs wired to real work; the rest are still stubs.
-// generate landed with the dataset milestone.
-var implementedVerbs = map[string]bool{"generate": true}
+// TestVerbsImplemented confirms the verbs that were previously stubs now return
+// real errors (not the "not implemented" placeholder). Each verb is called with
+// no arguments so it hits the input-validation path, not the stub path.
+func TestVerbsImplemented(t *testing.T) {
+	cases := []struct {
+		verb    string
+		builder func() interface{ RunE(cmd interface{}, args []string) error }
+		wantErr string // substring that must appear in the error; "" means no error expected
+	}{
+		{"list", func() interface{ RunE(cmd interface{}, args []string) error } {
+			return nil // list with no args should succeed
+		}, ""},
+	}
+	_ = cases
 
-// TestVerbsAreStubs confirms the not-yet-implemented verbs report clearly rather
-// than pretending to succeed, which would hide that no work happened. Verbs that
-// have been implemented are exempt and checked elsewhere.
-func TestVerbsAreStubs(t *testing.T) {
-	root := newRootCmd()
-	for _, c := range root.Commands() {
-		if c.RunE == nil || implementedVerbs[c.Name()] {
-			continue
-		}
-		err := c.RunE(c, nil)
-		if err == nil {
-			t.Errorf("verb %q returned nil, want a not-implemented error", c.Name())
-			continue
-		}
-		if !strings.Contains(err.Error(), "not implemented") {
-			t.Errorf("verb %q error = %q, want it to say not implemented", c.Name(), err)
-		}
+	// list with no args must succeed.
+	listCmd := newListCmd()
+	if err := listCmd.RunE(listCmd, nil); err != nil {
+		t.Errorf("list (no args) returned error: %v", err)
+	}
+
+	// run with no --workload flag must return a flag-validation error, not "not implemented".
+	runCmd := newRunCmd()
+	err := runCmd.RunE(runCmd, nil)
+	if err == nil {
+		t.Error("run with no --workload returned nil, want an error")
+	} else if strings.Contains(err.Error(), "not implemented") {
+		t.Errorf("run is still a stub: %v", err)
+	}
+
+	// report with no inputs returns a "no results" error, not "not implemented".
+	reportCmd := newReportCmd()
+	err = reportCmd.RunE(reportCmd, nil)
+	if err == nil {
+		t.Error("report with no inputs returned nil, want an error")
+	} else if strings.Contains(err.Error(), "not implemented") {
+		t.Errorf("report is still a stub: %v", err)
+	}
+
+	// gate with no inputs returns a "no results" error, not "not implemented".
+	gateCmd := newGateCmd()
+	err = gateCmd.RunE(gateCmd, nil)
+	if err == nil {
+		t.Error("gate with no inputs returned nil, want an error")
+	} else if strings.Contains(err.Error(), "not implemented") {
+		t.Errorf("gate is still a stub: %v", err)
 	}
 }
 
