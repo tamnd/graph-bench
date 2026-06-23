@@ -4,6 +4,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/tamnd/graph-bench/target"
 	"github.com/tamnd/graph-bench/workload"
 )
 
@@ -76,7 +77,10 @@ func BuildMixedSchedule(wl *workload.Workload, dialect workload.Dialect, totalCo
 			if round >= sl.count {
 				continue
 			}
-			params := sl.q.Params.Next()
+			var params target.Params
+			if sl.q.Params != nil {
+				params = sl.q.Params.Next()
+			}
 			q, p, ok := sl.q.Resolve(dialect, nil)
 			if !ok {
 				// Query has no text for this dialect; skip it.
@@ -110,7 +114,10 @@ func BuildIsolatedOps(q *workload.WorkloadQuery, dialect workload.Dialect, count
 	}
 	ops := make([]Op, 0, count)
 	for i := 0; i < count; i++ {
-		params := q.Params.Next()
+		var params target.Params
+		if q.Params != nil {
+			params = q.Params.Next()
+		}
 		ops = append(ops, Op{
 			Class:   q.Class,
 			QueryID: q.ID,

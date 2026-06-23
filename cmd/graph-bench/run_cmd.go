@@ -22,8 +22,7 @@ import (
 // runs the chosen workload against each engine, and writes the results in the
 // chosen format. The --publish flag additionally appends each result to the
 // append-only lineage under results/. See doc 08 section 1.1 for the full
-// contract. Engine adapters are resolved at startup; this slice ships the CLI
-// wiring and the measurement loop, not the adapters themselves.
+// contract.
 func newRunCmd() *cobra.Command {
 	var (
 		wlName      string
@@ -39,6 +38,8 @@ func newRunCmd() *cobra.Command {
 		warmup      time.Duration
 		window      time.Duration
 		count       int
+		datasetPath string
+		datasetsDir string
 	)
 
 	cmd := &cobra.Command{
@@ -47,10 +48,10 @@ func newRunCmd() *cobra.Command {
 		Long: "run executes a named workload (--workload) against one or more engines " +
 			"(--engines, comma-separated or repeated flags) and emits the result in the " +
 			"chosen format (--format). " +
-			"With --publish the result is also appended to the lineage tree (--lineage-dir) " +
-			"as an append-only JSON record. " +
-			"Engine adapters must be registered; the in-process gr adapter is always available; " +
-			"Bolt adapters require -tags bolt at build time.",
+			"The gr in-process adapter is always available; Bolt adapters require -tags bolt. " +
+			"With --publish the result is also appended to the lineage tree (--lineage-dir). " +
+			"Dataset resolution: use --dataset-path for an explicit path, --datasets-dir to " +
+			"search a directory, or let the command auto-generate a synthetic dataset.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Validate and resolve the workload.
 			if wlName == "" {
@@ -61,10 +62,10 @@ func newRunCmd() *cobra.Command {
 				return fmt.Errorf("run: unknown workload %q; run 'graph-bench list workloads' to see registered workloads", wlName)
 			}
 
-			// Resolve engine list.
-			resolved, err := resolveEngines(engines)
-			if err != nil {
-				return err
+			// Flatten engine list.
+			flat := flattenEngines(engines)
+			if len(flat) == 0 {
+				flat = []string{"gr"}
 			}
 
 			// Validate cache flag.
@@ -95,10 +96,12 @@ func newRunCmd() *cobra.Command {
 
 			// Build the measurement options.
 			opts := measure.Options{
-				Rate:        rate,
-				Warmup:      warmup,
-				Duration:    window,
-				Count:       count,
+				Rate:   rate,
+				Warmup: warmup,
+				Count:  count,
+			}
+			if window > 0 {
+				opts.Duration = window
 			}
 			if len(concurrency) > 0 {
 				opts.Concurrency = concurrency[0]
@@ -106,31 +109,14 @@ func newRunCmd() *cobra.Command {
 
 			// Run against each engine.
 			var results []report.EngineResult
-			for _, eng := range resolved {
-				r, runErr := runWorkload(cmd, wl, eng, scale, cache, opts)
+			ctx := cmd.Context()
+			for _, eng := range flat {
+				er, runErr := executeRun(ctx, eng, wl, datasetPath, datasetsDir, scale, cache, opts, lineageDir, publish)
 				if runErr != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "run: engine %s: %v\n", eng.Name(), runErr)
+					fmt.Fprintf(cmd.ErrOrStderr(), "run: engine %s: %v\n", eng, runErr)
 					continue
 				}
-				er := report.EngineResult{
-					Name:    eng.Name(),
-					Plane:   eng.Plane(),
-					Version: r.Condition.EngineVersion,
-					Result:  r,
-				}
 				results = append(results, er)
-
-				// Publish to lineage if requested.
-				if publish {
-					base := lineageDir
-					if base == "" {
-						base = "results"
-					}
-					path := report.RecordPath(base, er, time.Now())
-					if appendErr := report.Append(path, er); appendErr != nil {
-						fmt.Fprintf(cmd.ErrOrStderr(), "run: lineage append %s: %v\n", path, appendErr)
-					}
-				}
 			}
 
 			if len(results) == 0 {
@@ -160,55 +146,27 @@ func newRunCmd() *cobra.Command {
 
 	f := cmd.Flags()
 	f.StringVar(&wlName, "workload", "", "workload name (required); see 'list workloads'")
-	f.StringArrayVar(&engines, "engines", nil, "engines to run (comma-separated or repeated); default is gr (in-process)")
-	f.StringVar(&scale, "scale", "SF1", "scale factor for the dataset")
+	f.StringArrayVar(&engines, "engines", nil, "engines to run (comma-separated or repeated); default is gr")
+	f.StringVar(&scale, "scale", "SF1", "scale factor label for the condition stamp")
 	f.StringVar(&cache, "cache", "warm", "cache condition: warm|cold|both")
 	f.StringVar(&format, "format", "table", "output format: table|json|markdown|csv")
 	f.StringVar(&outFile, "out", "", "output file (default: stdout)")
 	f.BoolVar(&publish, "publish", false, "append results to the lineage tree")
 	f.StringVar(&lineageDir, "lineage-dir", "results", "lineage tree root")
-	f.Float64Var(&rate, "rate", 0, "offered queries/second (0 = maximum throughput)")
+	f.Float64Var(&rate, "rate", 0, "offered queries/second (0 = sequential)")
 	f.DurationVar(&warmup, "warmup", 5*time.Second, "warmup duration before measurement begins")
 	f.DurationVar(&window, "window", 30*time.Second, "steady-state measurement window")
-	f.IntVar(&count, "count", 0, "fixed query count (overrides --window if > 0)")
+	f.IntVar(&count, "count", 0, "fixed query count per query (overrides --window if > 0)")
 	f.IntSliceVar(&concurrency, "concurrency", nil, "concurrency sweep points")
+	f.StringVar(&datasetPath, "dataset-path", "", "path to an existing materialized dataset directory")
+	f.StringVar(&datasetsDir, "datasets-dir", "datasets", "directory of pre-generated datasets; searched by manifest name")
 
 	_ = cmd.MarkFlagRequired("workload")
 	return cmd
 }
 
-// runWorkload runs a workload against one engine and returns the measured Result.
-// This is a placeholder that returns a descriptive not-implemented error; the
-// real implementation lands when the adapter interface and the measurement harness
-// are fully wired in M8. The flag parsing, lineage append, and rendering all work
-// now; only the actual engine execution is deferred.
-func runWorkload(
-	cmd *cobra.Command,
-	wl *workload.Workload,
-	eng Engine,
-	scale, cache string,
-	opts measure.Options,
-) (measure.Result, error) {
-	return measure.Result{}, fmt.Errorf(
-		"engine execution not yet wired for %s; import the adapter package and call eng.Run()",
-		eng.Name(),
-	)
-}
-
-// Engine is the minimal interface the run command requires from an engine
-// adapter. The full target.Target interface (with Run, Begin, Close,
-// Capabilities, Version) is defined in the target package; this thin shim
-// lets the CLI compile without importing it here. Adapter packages satisfy
-// this interface at init() registration time.
-type Engine interface {
-	Name() string
-	Plane() string
-}
-
-// resolveEngines resolves the engine list from the flag value. A nil or empty
-// list returns the default gr in-process adapter.
-func resolveEngines(names []string) ([]Engine, error) {
-	// Flatten comma-separated entries.
+// flattenEngines splits comma-separated engine names from the flag slice.
+func flattenEngines(names []string) []string {
 	var flat []string
 	for _, n := range names {
 		for _, part := range strings.Split(n, ",") {
@@ -218,37 +176,5 @@ func resolveEngines(names []string) ([]Engine, error) {
 			}
 		}
 	}
-	if len(flat) == 0 {
-		flat = []string{"gr"}
-	}
-	var out []Engine
-	for _, name := range flat {
-		eng, ok := lookupEngine(name)
-		if !ok {
-			return nil, fmt.Errorf("run: unknown engine %q; run 'graph-bench list engines' to see available engines", name)
-		}
-		out = append(out, eng)
-	}
-	return out, nil
-}
-
-// engineRegistry holds the registered engine adapters. Adapter packages call
-// RegisterEngine in their init() to add themselves; the run command looks them
-// up here. This is a simplified in-package registry; the full target registry
-// (target.Register) is the canonical one and is imported by each adapter.
-var engineRegistry = map[string]Engine{}
-
-// RegisterEngine adds an adapter to the local registry. Called from adapter
-// init() functions. Panics on a duplicate name (programming error).
-func RegisterEngine(e Engine) {
-	if _, dup := engineRegistry[e.Name()]; dup {
-		panic("graph-bench: duplicate engine registration: " + e.Name())
-	}
-	engineRegistry[e.Name()] = e
-}
-
-// lookupEngine returns the named engine from the registry, or false.
-func lookupEngine(name string) (Engine, bool) {
-	e, ok := engineRegistry[name]
-	return e, ok
+	return flat
 }
