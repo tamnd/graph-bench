@@ -213,18 +213,104 @@ type LoadStats struct {
 	Edges       int64
 }
 
-// Dataset is the data a Target loads. The full dataset package (spec doc 04)
-// implements the canonical CSV layout and the bulk-load accessors; this
-// interface is the minimum the load path needs. Statements is the query-based
-// load fallback for an engine without a bulk CSV path, and the path the
-// in-process gr adapter uses until the CSV loader lands.
+// Dataset is a materialized, checksum-verified dataset in the canonical CSV
+// layout. The dataset package constructs it; an adapter consumes it in Load.
+// Both synthetic and LDBC datasets present as a Dataset. The schema and manifest
+// types it returns live in this package so the contract is self-contained; the
+// dataset package builds them.
 type Dataset interface {
-	// Name is the stable dataset identifier, for example "micro-tiny" or "snb-sf1".
+	// Name and Checksum identify the dataset for the result stamp.
 	Name() string
+	Checksum() string
 
-	// Statements returns the openCypher statements that build the graph, in
-	// order, for engines loaded by issuing queries.
+	// Dir is the absolute path to the dataset directory (the one holding nodes/,
+	// rels/, and manifest.json). An engine's bulk loader that takes a path is
+	// pointed here. It is empty for a statements-only dataset.
+	Dir() string
+
+	// Manifest is the parsed manifest: counts, schema, seed, version, encoding.
+	Manifest() *Manifest
+
+	// Schema is the per-label and per-type description an adapter needs to build
+	// load commands. It is Manifest().Schema for a materialized dataset.
+	Schema() Schema
+
+	// NodeFiles returns, for a label, the canonical node file paths (all shards,
+	// in order) and the parsed typed header. RelFiles is the analog for a
+	// relationship type.
+	NodeFiles(label string) ([]string, []Column, error)
+	RelFiles(typ string) ([]string, []Column, error)
+
+	// Params returns the curated parameter set for a workload on this dataset,
+	// so a workload runs the identical parameters on every engine. It returns
+	// nil for a workload with no curated parameters.
+	Params(workload string) (Params, error)
+
+	// Statements returns openCypher statements that build the graph, for engines
+	// loaded by issuing queries and for small test datasets. It is empty for a
+	// dataset loaded from its CSV files.
 	Statements() []string
+}
+
+// Manifest is the authority for what a dataset is: the reproduction recipe, the
+// encoding conventions, the totals, the schema, and the content checksum. It
+// mirrors the manifest.json in a dataset directory (spec doc 04 section 1.5).
+type Manifest struct {
+	Name             string         `json:"name"`
+	Kind             string         `json:"kind"` // "synthetic" or "ldbc"
+	Generator        string         `json:"generator,omitempty"`
+	GeneratorVersion int            `json:"generatorVersion,omitempty"`
+	Seed             int64          `json:"seed"`
+	Params           map[string]any `json:"params,omitempty"`
+	CreatedReference string         `json:"createdReference,omitempty"`
+	ListDelimiter    string         `json:"listDelimiter"`
+	Null             string         `json:"null"`
+	Checksum         string         `json:"checksum"`
+	NodeCount        int64          `json:"nodeCount"`
+	EdgeCount        int64          `json:"edgeCount"`
+	Schema           Schema         `json:"schema"`
+	Invariants       Invariants     `json:"invariants"`
+}
+
+// Invariants are known ground-truth quantities a generator can carry, used as
+// cheap validation fixtures. A nil pointer means the generator does not compute
+// that invariant for these parameters.
+type Invariants struct {
+	NodeCount     *int64 `json:"nodeCount,omitempty"`
+	EdgeCount     *int64 `json:"edgeCount,omitempty"`
+	TriangleCount *int64 `json:"triangleCount,omitempty"`
+	Diameter      *int64 `json:"diameter,omitempty"`
+}
+
+// Schema mirrors the manifest's schema block: the labels with their files and
+// typed properties, and the relationship types with their endpoints.
+type Schema struct {
+	Nodes         map[string]NodeSchema `json:"nodes"`
+	Relationships map[string]RelSchema  `json:"relationships"`
+}
+
+// NodeSchema describes one node label's files and columns.
+type NodeSchema struct {
+	Files      []string `json:"file"`
+	ID         string   `json:"id"`
+	Properties []Column `json:"properties"`
+	Labels     []string `json:"labels"`
+}
+
+// RelSchema describes one relationship type's files, columns, and endpoints.
+type RelSchema struct {
+	Files      []string `json:"file"`
+	Properties []Column `json:"properties"`
+	Start      string   `json:"start"`
+	End        string   `json:"end"`
+}
+
+// Column is one typed column in a canonical CSV header. Name is empty for the
+// structural columns (:ID, :LABEL, :TYPE, :START_ID, :END_ID); Type carries the
+// type token.
+type Column struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 // Answer is the engine-independent expected result a query is validated against.

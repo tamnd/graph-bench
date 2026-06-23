@@ -8,17 +8,14 @@ import (
 )
 
 // tinyDataset is a minimal Dataset: a handful of nodes and edges built through
-// openCypher statements. It stands in for the dataset package until M2.
-type tinyDataset struct{}
-
-func (tinyDataset) Name() string { return "micro-tiny" }
-
-func (tinyDataset) Statements() []string {
-	return []string{
+// openCypher statements. The gr in-process adapter loads through statements, so
+// this exercises its real load path without needing a materialized CSV dataset.
+func tinyDataset() target.Dataset {
+	return target.NewStatements("micro-tiny", []string{
 		`CREATE (a:Person {name: 'Alice', age: 30})`,
 		`CREATE (b:Person {name: 'Bob', age: 25})`,
 		`MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)`,
-	}
+	})
 }
 
 // TestSetupLoadRunTeardown is the M1 milestone: a measurable query against gr in
@@ -41,7 +38,7 @@ func TestSetupLoadRunTeardown(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tg.Teardown(ctx, drv) })
 
-	stats, err := tg.Load(ctx, drv, tinyDataset{})
+	stats, err := tg.Load(ctx, drv, tinyDataset())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -96,7 +93,7 @@ func TestRunReturnsNode(t *testing.T) {
 		t.Fatalf("Setup: %v", err)
 	}
 	t.Cleanup(func() { _ = tg.Teardown(ctx, drv) })
-	if _, err := tg.Load(ctx, drv, tinyDataset{}); err != nil {
+	if _, err := tg.Load(ctx, drv, tinyDataset()); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 
