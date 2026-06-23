@@ -128,4 +128,3 @@ func validateWritePostCondition(created, deleted, actual int64) error {
 func ValidatePostCondition(created, deleted, actual int64) error {
 	return validateWritePostCondition(created, deleted, actual)
 }
-
