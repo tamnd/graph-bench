@@ -189,3 +189,33 @@ func All() []*Workload {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
+
+// Bounded returns a synthetic Workload containing only the queries from the
+// registered "micro-grid" workload that exercise bounded classes (PointRead,
+// Traversal, Subgraph, Write). It is what TestSmokeGate selects: the bounded
+// read queries on a synthetic grid dataset, fast and low-variance, with no SNB
+// dataset required. It returns nil when micro-grid is not in the registry (the
+// caller must import _ "github.com/tamnd/graph-bench/workload/micro" to ensure
+// registration).
+func Bounded() *Workload {
+	w, ok := registry["micro-grid"]
+	if !ok {
+		return nil
+	}
+	// Filter to bounded queries only (exclude any Write-class queries that happen
+	// to be included in the workload). For micro-grid all queries are Traversal,
+	// but this is defensive.
+	var qs []*WorkloadQuery
+	for _, q := range w.Queries {
+		switch q.Class {
+		case target.PointRead, target.Traversal, target.Subgraph, target.Write:
+			qs = append(qs, q)
+		}
+	}
+	return &Workload{
+		Name:    "bounded",
+		Title:   "Bounded smoke-gate subset (micro-grid read queries)",
+		Dataset: w.Dataset,
+		Queries: qs,
+	}
+}
