@@ -47,7 +47,7 @@ func (d *StatementsDataset) RelFiles(typ string) ([]string, []Column, error) {
 }
 
 // Params returns nil: a statements dataset carries no curated parameters.
-func (d *StatementsDataset) Params(workload string) (Params, error) { return nil, nil }
+func (d *StatementsDataset) Params(key string) ([]Params, error) { return nil, nil }
 
 // Statements returns the build statements in order.
 func (d *StatementsDataset) Statements() []string { return d.stmts }
