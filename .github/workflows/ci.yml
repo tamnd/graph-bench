@@ -13,9 +13,15 @@ jobs:
     name: smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      # gr is a local replace (../gr); clone it beside this repo so the module
+      # resolves. The checkout action refuses paths outside the workspace, so a
+      # plain clone is used. gr is public, so no token is needed.
+      - name: clone gr beside the repo
+        run: git clone --depth 1 https://github.com/tamnd/gr.git ../gr
+
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
