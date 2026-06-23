@@ -18,8 +18,13 @@ import (
 // measured from the intended arrival time (coordinated-omission correction);
 // a non-nil Err means the query failed and the sample is counted in Errors
 // but excluded from the latency percentiles.
+//
+// QueryID is the workload query id (e.g. "snb-is2", "lsqb-q5"). It is empty
+// for ad-hoc op slices built without a workload query. The per-query report
+// uses it to aggregate ByQuery; the gate and per-class report use only Class.
 type Sample struct {
 	Class   target.Class
+	QueryID string
 	Latency time.Duration
 	Rows    int
 	Err     error
@@ -44,12 +49,14 @@ type Stat struct {
 }
 
 // Result is the complete outcome of one measured run: per-class statistics,
-// cold-cache first-access statistics (F5), load stats, the latency-under-load
-// curve, and the full condition stamp. Warmup samples are already excluded from
-// Stats; every figure is from the steady-state window only. Result serializes
-// to JSON for the lineage (doc 08) and is the input the gate (doc 07) checks.
+// per-query statistics, cold-cache first-access statistics (F5), load stats,
+// the latency-under-load curve, and the full condition stamp. Warmup samples
+// are already excluded from Stats; every figure is from the steady-state window
+// only. Result serializes to JSON for the lineage (doc 08) and is the input
+// the gate (doc 07) checks.
 type Result struct {
 	Stats     map[target.Class]Stat // per-class latency distribution + throughput
+	ByQuery   map[string]Stat       // per-query-id latency; populated when Sample.QueryID is set
 	Cold      map[target.Class]Stat // cold-cache first-access (F5); empty for warm-only runs
 	Load      target.LoadStats      // load time and on-disk size (section 1)
 	Sweep     []SweepPoint          // latency-under-load curve (section 6.4)
@@ -124,42 +131,60 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 	return sorted[rank-1]
 }
 
-// summarize turns raw steady-state samples into per-class statistics. A sample
-// with a non-nil Err counts toward Count and Errors but is excluded from the
-// latency slice, so the percentiles describe completed queries only: a query
-// that did not complete has no honest latency to record. Throughput is
-// successful queries per second over window; zero when window is zero.
-func summarize(samples []Sample, window time.Duration) map[target.Class]Stat {
-	byClass := map[target.Class][]Sample{}
+// summarizeGroup turns a raw sample slice into a Stat. A non-nil Err counts
+// toward Count and Errors but is excluded from the percentile slice, so the
+// percentiles describe completed queries only. Throughput is successful queries
+// per second over window; zero when window is zero.
+func summarizeGroup(class target.Class, group []Sample, window time.Duration) Stat {
+	stat := Stat{Class: class, Count: len(group)}
+	lat := make([]time.Duration, 0, len(group))
+	var sum time.Duration
+	for _, s := range group {
+		if s.Err != nil {
+			stat.Errors++
+			continue
+		}
+		lat = append(lat, s.Latency)
+		sum += s.Latency
+	}
+	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
+	stat.P50 = percentile(lat, 0.50)
+	stat.P90 = percentile(lat, 0.90)
+	stat.P95 = percentile(lat, 0.95)
+	stat.P99 = percentile(lat, 0.99)
+	if n := len(lat); n > 0 {
+		stat.Max = lat[n-1]
+		stat.Mean = sum / time.Duration(n)
+		if window > 0 {
+			stat.Throughput = float64(n) / window.Seconds()
+		}
+	}
+	return stat
+}
+
+// summarize turns raw steady-state samples into per-class and per-query-id
+// statistics. A sample with a non-nil Err counts toward Count and Errors but
+// is excluded from the latency slice. Throughput is successful queries per
+// second over window; zero when window is zero.
+func summarize(samples []Sample, window time.Duration) (byClass map[target.Class]Stat, byQuery map[string]Stat) {
+	classBuckets := map[target.Class][]Sample{}
+	queryBuckets := map[string][]Sample{}
 	for _, s := range samples {
-		byClass[s.Class] = append(byClass[s.Class], s)
-	}
-	out := make(map[target.Class]Stat, len(byClass))
-	for class, group := range byClass {
-		stat := Stat{Class: class, Count: len(group)}
-		lat := make([]time.Duration, 0, len(group))
-		var sum time.Duration
-		for _, s := range group {
-			if s.Err != nil {
-				stat.Errors++
-				continue
-			}
-			lat = append(lat, s.Latency)
-			sum += s.Latency
+		classBuckets[s.Class] = append(classBuckets[s.Class], s)
+		if s.QueryID != "" {
+			queryBuckets[s.QueryID] = append(queryBuckets[s.QueryID], s)
 		}
-		sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
-		stat.P50 = percentile(lat, 0.50)
-		stat.P90 = percentile(lat, 0.90)
-		stat.P95 = percentile(lat, 0.95)
-		stat.P99 = percentile(lat, 0.99)
-		if n := len(lat); n > 0 {
-			stat.Max = lat[n-1]
-			stat.Mean = sum / time.Duration(n)
-			if window > 0 {
-				stat.Throughput = float64(n) / window.Seconds()
-			}
-		}
-		out[class] = stat
 	}
-	return out
+	byClass = make(map[target.Class]Stat, len(classBuckets))
+	for class, group := range classBuckets {
+		byClass[class] = summarizeGroup(class, group, window)
+	}
+	if len(queryBuckets) > 0 {
+		byQuery = make(map[string]Stat, len(queryBuckets))
+		for qid, group := range queryBuckets {
+			// Use the class of the first sample for the query-level Stat.
+			byQuery[qid] = summarizeGroup(group[0].Class, group, window)
+		}
+	}
+	return byClass, byQuery
 }
