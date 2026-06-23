@@ -82,8 +82,16 @@ func executeRun(
 	}
 	_ = loadStart
 
+	// Load curated parameter pools for any query that declares a PoolKey.
+	// Auto-curates params.json if absent and the dataset has a directory.
+	paramSources, err := loadParamSources(ctx, wl, ds)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "run: load curated params: %v (queries will run without seeded params)\n", err)
+		paramSources = nil
+	}
+
 	// Build the op schedule.
-	ops, err := buildOps(wl, opts)
+	ops, err := buildOps(wl, opts, paramSources)
 	if err != nil {
 		return report.EngineResult{}, fmt.Errorf("build ops: %w", err)
 	}
@@ -118,10 +126,9 @@ func executeRun(
 	return er, nil
 }
 
-// buildOps builds the measurement op slice for a workload. For workloads with a
-// Mix it builds a mixed interleaved schedule; for pure isolation workloads it
-// builds isolated ops for each query in sequence.
-func buildOps(wl *workload.Workload, opts measure.Options) ([]measure.Op, error) {
+// buildOps builds the measurement op slice for a workload. paramSources overrides
+// each query's Params field by query ID; a nil map falls back to q.Params.
+func buildOps(wl *workload.Workload, opts measure.Options, paramSources map[string]workload.ParamSource) ([]measure.Op, error) {
 	var ops []measure.Op
 	if len(wl.Mix) > 0 {
 		ops = measure.BuildMixedSchedule(wl, workload.Cypher, opts.Count, opts.Rate, opts.Warmup)
@@ -131,11 +138,92 @@ func buildOps(wl *workload.Workload, opts measure.Options) ([]measure.Op, error)
 			if count <= 0 {
 				count = 100
 			}
-			ops = append(ops, measure.BuildIsolatedOps(q, workload.Cypher, count)...)
+			ps := paramSources[q.ID]
+			if ps == nil {
+				ps = q.Params
+			}
+			ops = append(ops, buildQueryOps(q, count, ps)...)
 		}
 		ops = measure.BuildSchedule(ops, opts.Rate, opts.Warmup)
 	}
 	return ops, nil
+}
+
+// buildQueryOps builds count isolated ops for one query, drawing params from ps.
+// It mirrors BuildIsolatedOps but accepts an external ParamSource so the caller
+// can supply the curated pool without mutating the global WorkloadQuery.
+func buildQueryOps(q *workload.WorkloadQuery, count int, ps workload.ParamSource) []measure.Op {
+	if count <= 0 {
+		return nil
+	}
+	query, _, ok := q.Resolve(workload.Cypher, nil)
+	if !ok {
+		return nil
+	}
+	ops := make([]measure.Op, 0, count)
+	for i := 0; i < count; i++ {
+		var params target.Params
+		if ps != nil {
+			params = ps.Next()
+		}
+		ops = append(ops, measure.Op{
+			Class:   q.Class,
+			QueryID: q.ID,
+			Query:   query,
+			Params:  params,
+		})
+	}
+	return ops
+}
+
+// loadParamSources loads the curated parameter pools for all queries in the
+// workload that declare a PoolKey. If the dataset has a directory but no
+// params.json, it runs workload.Curate first (idempotent). Returns a map from
+// query ID to ParamSource; missing or unreadable pools produce no entry.
+func loadParamSources(ctx context.Context, wl *workload.Workload, ds target.Dataset) (map[string]workload.ParamSource, error) {
+	_ = ctx
+	// Check if any query needs a curated pool.
+	needsPool := false
+	for _, q := range wl.Queries {
+		if q.PoolKey != "" {
+			needsPool = true
+			break
+		}
+	}
+	if !needsPool {
+		return nil, nil
+	}
+
+	// Auto-curate if the dataset has a directory (file-backed, not a statements set).
+	if ds.Dir() != "" {
+		if err := workload.Curate(ds, 1); err != nil {
+			return nil, fmt.Errorf("curate %s: %w", ds.Name(), err)
+		}
+	}
+
+	// Load each query's pool, caching by PoolKey so each JSON read happens once.
+	cachedPools := map[string]workload.ParamSource{}
+	result := map[string]workload.ParamSource{}
+	for _, q := range wl.Queries {
+		if q.PoolKey == "" {
+			continue
+		}
+		if ps, ok := cachedPools[q.PoolKey]; ok {
+			if ps != nil {
+				result[q.ID] = ps
+			}
+			continue
+		}
+		pool, err := ds.Params(q.PoolKey)
+		if err != nil || len(pool) == 0 {
+			cachedPools[q.PoolKey] = nil
+			continue
+		}
+		ps := workload.NewPool(pool)
+		cachedPools[q.PoolKey] = ps
+		result[q.ID] = ps
+	}
+	return result, nil
 }
 
 // resolveDataset finds or generates the dataset for the workload. Priority:
