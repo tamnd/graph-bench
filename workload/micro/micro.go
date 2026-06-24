@@ -189,9 +189,12 @@ var spQuery = &workload.WorkloadQuery{
 	Class:   target.Traversal,
 	PoolKey: spKey,
 	Texts: map[workload.Dialect]string{
-		// shortestPath in openCypher (undirected). For directed use -[:EDGE]->
-		// consistently; gr and the Bolt engines accept both.
+		// shortestPath() in openCypher (Neo4j dialect); gr and the Bolt engines accept it.
 		workload.Cypher: `MATCH p = shortestPath((a:Node {id: $src})-[:EDGE*]->(b:Node {id: $dst})) RETURN length(p) AS d`,
+		// Kuzu does not implement shortestPath(). It uses variable-length paths with
+		// the SHORTEST keyword. The upper bound must be omitted (Kuzu caps bounded
+		// variable-length rels at 30; unbounded 1.. removes that limit).
+		workload.KuzuCypher: `MATCH (a:Node {id: $src})-[r:EDGE* SHORTEST 1..]->(b:Node {id: $dst}) RETURN length(r) AS d`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {

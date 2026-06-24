@@ -92,7 +92,7 @@ func executeRun(
 	}
 
 	// Build the op schedule.
-	ops, err := buildOps(wl, opts, paramSources)
+	ops, err := buildOps(wl, engineName, opts, paramSources)
 	if err != nil {
 		return report.EngineResult{}, fmt.Errorf("build ops: %w", err)
 	}
@@ -129,10 +129,11 @@ func executeRun(
 
 // buildOps builds the measurement op slice for a workload. paramSources overrides
 // each query's Params field by query ID; a nil map falls back to q.Params.
-func buildOps(wl *workload.Workload, opts measure.Options, paramSources map[string]workload.ParamSource) ([]measure.Op, error) {
+func buildOps(wl *workload.Workload, engineName string, opts measure.Options, paramSources map[string]workload.ParamSource) ([]measure.Op, error) {
+	d := dialectFor(engineName)
 	var ops []measure.Op
 	if len(wl.Mix) > 0 {
-		ops = measure.BuildMixedSchedule(wl, workload.Cypher, opts.Count, opts.Rate, opts.Warmup)
+		ops = measure.BuildMixedSchedule(wl, d, opts.Count, opts.Rate, opts.Warmup)
 	} else {
 		for _, q := range wl.Queries {
 			count := opts.Count
@@ -143,23 +144,39 @@ func buildOps(wl *workload.Workload, opts measure.Options, paramSources map[stri
 			if ps == nil {
 				ps = q.Params
 			}
-			ops = append(ops, buildQueryOps(q, count, ps)...)
+			ops = append(ops, buildQueryOps(q, d, count, ps)...)
 		}
 		ops = measure.BuildSchedule(ops, opts.Rate, opts.Warmup)
 	}
 	return ops, nil
 }
 
+// dialectFor maps an engine name to the workload dialect it speaks. Most engines
+// speak standard openCypher; Kuzu-family engines (ladybug) speak a Kuzu variant
+// that differs in a few constructs (notably shortestPath is not supported).
+func dialectFor(engineName string) workload.Dialect {
+	switch engineName {
+	case "ladybug":
+		return workload.KuzuCypher
+	default:
+		return workload.Cypher
+	}
+}
+
 // buildQueryOps builds count isolated ops for one query, drawing params from ps.
 // It mirrors BuildIsolatedOps but accepts an external ParamSource so the caller
 // can supply the curated pool without mutating the global WorkloadQuery.
-func buildQueryOps(q *workload.WorkloadQuery, count int, ps workload.ParamSource) []measure.Op {
+func buildQueryOps(q *workload.WorkloadQuery, d workload.Dialect, count int, ps workload.ParamSource) []measure.Op {
 	if count <= 0 {
 		return nil
 	}
-	query, _, ok := q.Resolve(workload.Cypher, nil)
+	query, _, ok := q.Resolve(d, nil)
 	if !ok {
-		return nil
+		// Fall back to Cypher if the engine's preferred dialect has no text for this query.
+		query, _, ok = q.Resolve(workload.Cypher, nil)
+		if !ok {
+			return nil
+		}
 	}
 	ops := make([]measure.Op, 0, count)
 	for i := 0; i < count; i++ {

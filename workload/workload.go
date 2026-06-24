@@ -145,6 +145,10 @@ const (
 	// SQL is the text for SQLite: a recursive common table expression, the
 	// naive-relational floor.
 	SQL
+	// KuzuCypher is the text for Kuzu-family engines (LadybugDB, Kuzu): openCypher
+	// with Kuzu extensions. Kuzu does not implement shortestPath(); it uses a
+	// variable-length path syntax with the SHORTEST keyword instead.
+	KuzuCypher
 )
 
 // String returns the dialect's stable name for stamps and reports.
@@ -158,6 +162,8 @@ func (d Dialect) String() string {
 		return "age"
 	case SQL:
 		return "sql"
+	case KuzuCypher:
+		return "kuzu-cypher"
 	default:
 		return "unknown"
 	}

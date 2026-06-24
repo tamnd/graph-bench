@@ -1,0 +1,74 @@
+{
+  "Stats": {
+    "2": {
+      "Class": 2,
+      "Count": 100,
+      "Errors": 0,
+      "P50": 9807454375,
+      "P90": 19781342959,
+      "P95": 21012846125,
+      "P99": 21679366875,
+      "Max": 21836882959,
+      "Mean": 10693246934,
+      "Throughput": 3.3333333333333335
+    }
+  },
+  "ByQuery": {
+    "micro-triangle": {
+      "Class": 2,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 7779130834,
+      "P90": 21012846125,
+      "P95": 21499453000,
+      "P99": 21836882959,
+      "Max": 21836882959,
+      "Mean": 9127649127,
+      "Throughput": 1.6666666666666667
+    },
+    "micro-triangle-undirected": {
+      "Class": 2,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 12950324209,
+      "P90": 18298027584,
+      "P95": 20230235292,
+      "P99": 20737837167,
+      "Max": 20737837167,
+      "Mean": 12258844741,
+      "Throughput": 1.6666666666666667
+    }
+  },
+  "Cold": null,
+  "Load": {
+    "Duration": 1296588292,
+    "BytesOnDisk": -1,
+    "Nodes": 10000,
+    "Edges": 99770
+  },
+  "Sweep": null,
+  "Condition": {
+    "Engine": "neo4j",
+    "EngineVersion": "Neo4j/2026.05.0",
+    "Plane": "bolt",
+    "Config": null,
+    "Tuned": false,
+    "HarnessVersion": "",
+    "HarnessCommit": "",
+    "Dataset": "er-n10000-p0.001",
+    "Scale": "SF1",
+    "DatasetChecksum": "sha256:ba0384b04ab433a32359403db5fc9f1d8879ec607ffd18ad239f7e732931cfe6",
+    "Workload": "micro-er",
+    "Params": null,
+    "Cache": "warm",
+    "OfferedRate": 0,
+    "Concurrency": null,
+    "Hardware": "",
+    "OS": "darwin/arm64",
+    "GoVersion": "go1.26.4",
+    "Repetitions": 50,
+    "Seed": 0,
+    "Warmup": "",
+    "Timestamp": "2026-06-24T12:09:31.850838Z"
+  }
+}
