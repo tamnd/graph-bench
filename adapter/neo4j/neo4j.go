@@ -250,11 +250,25 @@ func insertBatch(ctx context.Context, d *neoDriver, rows []string, cols []target
 	return int64(len(rows)), nil
 }
 
-// buildUnwindCypher builds a UNWIND [...] AS row CREATE/MERGE statement for a
-// batch of CSV rows. Returns "" for an empty batch.
+// buildUnwindCypher builds a UNWIND [...] AS row CREATE statement for a batch
+// of CSV rows. Returns "" for an empty batch.
+//
+// For nodes: property columns (Name != "") go into the row map; the :ID column
+// becomes the node's id property. Result: UNWIND [...] AS row CREATE (n:Label) SET n = row.
+// For rels: :START_ID and :END_ID are embedded as __s/__e integer values;
+// other structural columns (:TYPE) are skipped. MATCH locates the endpoints.
 func buildUnwindCypher(rows []string, cols []target.Column, typeOrLabel string, isNode bool) string {
 	if len(rows) == 0 {
 		return ""
+	}
+	sidIdx, eidIdx := -1, -1
+	for j, col := range cols {
+		switch col.Type {
+		case "START_ID":
+			sidIdx = j
+		case "END_ID":
+			eidIdx = j
+		}
 	}
 	var sb strings.Builder
 	sb.WriteString("UNWIND [")
@@ -265,28 +279,43 @@ func buildUnwindCypher(rows []string, cols []target.Column, typeOrLabel string, 
 		fields := strings.Split(row, ",")
 		sb.WriteString("{")
 		first := true
-		for j, col := range cols {
-			if col.Name == "" {
-				continue // structural column (:ID, :LABEL, etc.)
-			}
+		writeKV := func(k, v, typ string) {
 			if !first {
 				sb.WriteString(",")
 			}
 			first = false
+			sb.WriteString(k)
+			sb.WriteString(":")
+			switch typ {
+			case "ID", "START_ID", "END_ID", "INT64", "INT32", "LONG", "INT", "INTEGER", "DOUBLE", "FLOAT":
+				sb.WriteString(v)
+			default:
+				sb.WriteString(`"`)
+				sb.WriteString(strings.ReplaceAll(v, `"`, `\"`))
+				sb.WriteString(`"`)
+			}
+		}
+		if !isNode {
+			// Embed endpoint IDs as __s and __e for the MATCH clause.
+			sid, eid := "0", "0"
+			if sidIdx >= 0 && sidIdx < len(fields) {
+				sid = fields[sidIdx]
+			}
+			if eidIdx >= 0 && eidIdx < len(fields) {
+				eid = fields[eidIdx]
+			}
+			writeKV("__s", sid, "INT64")
+			writeKV("__e", eid, "INT64")
+		}
+		for j, col := range cols {
+			if col.Name == "" {
+				continue // structural (:LABEL, :TYPE, :START_ID, :END_ID)
+			}
 			val := ""
 			if j < len(fields) {
 				val = fields[j]
 			}
-			sb.WriteString(col.Name)
-			sb.WriteString(":")
-			switch col.Type {
-			case "int", "long", "integer", "double", "float":
-				sb.WriteString(val)
-			default:
-				sb.WriteString("\"")
-				sb.WriteString(strings.ReplaceAll(val, `"`, `\"`))
-				sb.WriteString("\"")
-			}
+			writeKV(col.Name, val, col.Type)
 		}
 		sb.WriteString("}")
 	}
@@ -294,7 +323,11 @@ func buildUnwindCypher(rows []string, cols []target.Column, typeOrLabel string, 
 	if isNode {
 		fmt.Fprintf(&sb, " CREATE (n:%s) SET n = row", typeOrLabel)
 	} else {
-		fmt.Fprintf(&sb, " MERGE (a {id: row.id}) MERGE (b {id: row.end_id}) CREATE (a)-[r:%s]->(b) SET r = row", typeOrLabel)
+		// The schema for our synthetic datasets has a single node label "Node".
+		// Row carries __s and __e (the endpoint IDs) plus any rel properties.
+		fmt.Fprintf(&sb,
+			" MATCH (a:Node {id: row.__s}) MATCH (b:Node {id: row.__e}) CREATE (a)-[r:%s]->(b)",
+			typeOrLabel)
 	}
 	return sb.String()
 }
