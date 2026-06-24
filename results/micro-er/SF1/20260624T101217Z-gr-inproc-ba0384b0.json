@@ -1,0 +1,74 @@
+{
+  "Stats": {
+    "2": {
+      "Class": 2,
+      "Count": 60,
+      "Errors": 0,
+      "P50": 26622898792,
+      "P90": 53390203334,
+      "P95": 55960508000,
+      "P99": 59213646167,
+      "Max": 59213646167,
+      "Mean": 27535909383,
+      "Throughput": 2
+    }
+  },
+  "ByQuery": {
+    "micro-triangle": {
+      "Class": 2,
+      "Count": 30,
+      "Errors": 0,
+      "P50": 10008513334,
+      "P90": 55119823375,
+      "P95": 56768200959,
+      "P99": 59213646167,
+      "Max": 59213646167,
+      "Mean": 25677552907,
+      "Throughput": 1
+    },
+    "micro-triangle-undirected": {
+      "Class": 2,
+      "Count": 30,
+      "Errors": 0,
+      "P50": 27816550959,
+      "P90": 47929615084,
+      "P95": 50984378709,
+      "P99": 57585439917,
+      "Max": 57585439917,
+      "Mean": 29394265860,
+      "Throughput": 1
+    }
+  },
+  "Cold": null,
+  "Load": {
+    "Duration": 224986709,
+    "BytesOnDisk": 4558848,
+    "Nodes": 10000,
+    "Edges": 99770
+  },
+  "Sweep": null,
+  "Condition": {
+    "Engine": "gr",
+    "EngineVersion": "(devel)",
+    "Plane": "inproc",
+    "Config": null,
+    "Tuned": false,
+    "HarnessVersion": "",
+    "HarnessCommit": "",
+    "Dataset": "er-n10000-p0.001",
+    "Scale": "SF1",
+    "DatasetChecksum": "sha256:ba0384b04ab433a32359403db5fc9f1d8879ec607ffd18ad239f7e732931cfe6",
+    "Workload": "micro-er",
+    "Params": null,
+    "Cache": "warm",
+    "OfferedRate": 0,
+    "Concurrency": null,
+    "Hardware": "",
+    "OS": "darwin/arm64",
+    "GoVersion": "go1.26.4",
+    "Repetitions": 30,
+    "Seed": 0,
+    "Warmup": "",
+    "Timestamp": "2026-06-24T10:12:17.033771Z"
+  }
+}
