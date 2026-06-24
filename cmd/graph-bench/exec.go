@@ -50,13 +50,13 @@ func executeRun(
 	// need a disk path for the gr bulk loader. Use a temp file for the DB.
 	cfg := target.Config{}
 	var dbTempDir string
-	if ds.Dir() != "" && engineName == "gr" {
+	if ds.Dir() != "" && tgt.Plane() == target.InProc {
 		tmp, err := os.MkdirTemp("", "graph-bench-db-*")
 		if err != nil {
 			return report.EngineResult{}, fmt.Errorf("%s: temp db dir: %w", engineName, err)
 		}
 		dbTempDir = tmp
-		cfg.Values = map[string]string{"path": tmp + "/gr.db"}
+		cfg.Values = map[string]string{"path": tmp + "/graph-bench.db"}
 	}
 	drv, err := tgt.Setup(ctx, cfg)
 	if err != nil {
