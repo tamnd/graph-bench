@@ -12,6 +12,8 @@ import (
 	"github.com/tamnd/graph-bench/dataset/gen"
 	"github.com/tamnd/graph-bench/dataset/ldbc"
 	"github.com/tamnd/graph-bench/workload"
+	_ "github.com/tamnd/graph-bench/workload/graph500"
+	_ "github.com/tamnd/graph-bench/workload/graphalytics"
 	_ "github.com/tamnd/graph-bench/workload/lsqb"
 	_ "github.com/tamnd/graph-bench/workload/micro"
 	_ "github.com/tamnd/graph-bench/workload/snb"

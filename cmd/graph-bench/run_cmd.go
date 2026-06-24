@@ -13,6 +13,8 @@ import (
 	"github.com/tamnd/graph-bench/workload"
 
 	// Import workload families so their init() functions register them.
+	_ "github.com/tamnd/graph-bench/workload/graph500"
+	_ "github.com/tamnd/graph-bench/workload/graphalytics"
 	_ "github.com/tamnd/graph-bench/workload/lsqb"
 	_ "github.com/tamnd/graph-bench/workload/micro"
 	_ "github.com/tamnd/graph-bench/workload/snb"

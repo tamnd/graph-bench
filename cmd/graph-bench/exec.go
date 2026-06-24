@@ -337,9 +337,10 @@ func autoGenDataset(ctx context.Context, dsName string) (*dataset.Set, error) {
 // not the benchmark-grade sizes; they exist so 'graph-bench run' works
 // without a pre-generated dataset for workloads that say what they need.
 var syntheticDefaults = map[string]gen.Config{
-	"grid": {Kind: "grid", Rows: 100, Cols: 100, Seed: 1},
-	"er":   {Kind: "er", N: 10000, P: 0.001, Seed: 1},
-	"rmat": {Kind: "rmat", Scale: 14, EdgeFactor: 16, Seed: 1},
+	"grid":     {Kind: "grid", Rows: 100, Cols: 100, Seed: 1},
+	"er":       {Kind: "er", N: 10000, P: 0.001, Seed: 1},
+	"rmat":     {Kind: "rmat", Scale: 14, EdgeFactor: 16, Seed: 1},
+	"powerlaw": {Kind: "powerlaw", N: 5000, Gamma: 2.5, MinDeg: 1, MaxDeg: 500, Seed: 1},
 }
 
 // buildCondition fills in the Condition stamp for a result.
