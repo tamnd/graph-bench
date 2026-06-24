@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 
 	"github.com/tamnd/graph-bench/target"
 )
@@ -201,6 +202,80 @@ func (g *Graph) ShortestPath(src, dst string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// HasNode reports whether the dataset contains a node with the given id token. It
+// is the reference for the point lookup (micro-point) and its negative variant
+// (micro-point-miss): the lookup returns one row when the id exists and zero rows
+// when it does not.
+func (g *Graph) HasNode(id string) bool {
+	_, ok := g.index[id]
+	return ok
+}
+
+// ShortestPathUndirected returns the length of the shortest path from src to dst
+// treating every edge as undirected (the union of out- and in-neighbors at each
+// step), and ok=false when dst is unreachable or either id is unknown. It is the
+// reference for bidirectional shortest path (micro-sp-bidir): the same length a
+// meet-in-the-middle search finds, computed here by a plain breadth-first walk so
+// the reference is obviously correct regardless of how the engine grows its two
+// frontiers.
+func (g *Graph) ShortestPathUndirected(src, dst string) (int, bool) {
+	s, sok := g.index[src]
+	d, dok := g.index[dst]
+	if !sok || !dok {
+		return 0, false
+	}
+	if s == d {
+		return 0, true
+	}
+	dist := make([]int, len(g.ids))
+	for i := range dist {
+		dist[i] = -1
+	}
+	dist[s] = 0
+	queue := []int{s}
+	for len(queue) > 0 {
+		u := queue[0]
+		queue = queue[1:]
+		// Undirected: follow both out- and in-edges.
+		for _, v := range g.out[u] {
+			if dist[v] == -1 {
+				dist[v] = dist[u] + 1
+				if v == d {
+					return dist[v], true
+				}
+				queue = append(queue, v)
+			}
+		}
+		for _, v := range g.in[u] {
+			if dist[v] == -1 {
+				dist[v] = dist[u] + 1
+				if v == d {
+					return dist[v], true
+				}
+				queue = append(queue, v)
+			}
+		}
+	}
+	return 0, false
+}
+
+// ScanIDStats returns the count of nodes and the sum of their numeric id values
+// over the whole graph, the reference for the property scan and aggregate
+// (micro-scan). The synthetic generators emit a dense numeric id, so the scan
+// aggregates that id column: the engine's count(n) matches the node count and its
+// avg(n.id) matches sum/count. A node whose id token is not a base-10 integer is
+// counted but contributes zero to the sum, which never happens on the synthetic
+// datasets this query runs against.
+func (g *Graph) ScanIDStats() (count int64, sum int64) {
+	for _, id := range g.ids {
+		count++
+		if v, err := strconv.ParseInt(id, 10, 64); err == nil {
+			sum += v
+		}
+	}
+	return count, sum
 }
 
 // DirectedTriangles counts distinct directed 3-cycles a->b->c->a over the whole
