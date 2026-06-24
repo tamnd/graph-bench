@@ -1,0 +1,74 @@
+{
+  "Stats": {
+    "2": {
+      "Class": 2,
+      "Count": 100,
+      "Errors": 0,
+      "P50": 367196250,
+      "P90": 673125417,
+      "P95": 711572042,
+      "P99": 740466417,
+      "Max": 748788375,
+      "Mean": 373862137,
+      "Throughput": 3.3333333333333335
+    }
+  },
+  "ByQuery": {
+    "micro-triangle": {
+      "Class": 2,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 426215167,
+      "P90": 697248583,
+      "P95": 719331375,
+      "P99": 748788375,
+      "Max": 748788375,
+      "Mean": 352403799,
+      "Throughput": 1.6666666666666667
+    },
+    "micro-triangle-undirected": {
+      "Class": 2,
+      "Count": 50,
+      "Errors": 0,
+      "P50": 352435583,
+      "P90": 649640667,
+      "P95": 689114208,
+      "P99": 732958125,
+      "Max": 732958125,
+      "Mean": 395320474,
+      "Throughput": 1.6666666666666667
+    }
+  },
+  "Cold": null,
+  "Load": {
+    "Duration": 0,
+    "BytesOnDisk": 0,
+    "Nodes": 10000,
+    "Edges": 99770
+  },
+  "Sweep": null,
+  "Condition": {
+    "Engine": "gr-bolt",
+    "EngineVersion": "Neo4j/5.23.0",
+    "Plane": "bolt",
+    "Config": null,
+    "Tuned": false,
+    "HarnessVersion": "",
+    "HarnessCommit": "",
+    "Dataset": "er-n10000-p0.001",
+    "Scale": "SF1",
+    "DatasetChecksum": "sha256:ba0384b04ab433a32359403db5fc9f1d8879ec607ffd18ad239f7e732931cfe6",
+    "Workload": "micro-er",
+    "Params": null,
+    "Cache": "warm",
+    "OfferedRate": 0,
+    "Concurrency": null,
+    "Hardware": "",
+    "OS": "darwin/arm64",
+    "GoVersion": "go1.26.4",
+    "Repetitions": 50,
+    "Seed": 0,
+    "Warmup": "",
+    "Timestamp": "2026-06-24T12:34:45.811613Z"
+  }
+}

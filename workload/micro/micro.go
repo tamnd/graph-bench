@@ -192,9 +192,9 @@ var spQuery = &workload.WorkloadQuery{
 		// shortestPath() in openCypher (Neo4j dialect); gr and the Bolt engines accept it.
 		workload.Cypher: `MATCH p = shortestPath((a:Node {id: $src})-[:EDGE*]->(b:Node {id: $dst})) RETURN length(p) AS d`,
 		// Kuzu does not implement shortestPath(). It uses variable-length paths with
-		// the SHORTEST keyword: (a)-[r:EDGE* SHORTEST 1..]->(b). The SHORTEST modifier
-		// selects the shortest among all paths rather than expanding all reachable ones.
-		workload.KuzuCypher: `MATCH (a:Node {id: $src}), (b:Node {id: $dst}), p = (a)-[:EDGE* SHORTEST 1..10000]->(b) RETURN length(p) AS d`,
+		// the SHORTEST keyword. The upper bound must be omitted (Kuzu caps bounded
+		// variable-length rels at 30; unbounded 1.. removes that limit).
+		workload.KuzuCypher: `MATCH (a:Node {id: $src})-[r:EDGE* SHORTEST 1..]->(b:Node {id: $dst}) RETURN length(r) AS d`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {

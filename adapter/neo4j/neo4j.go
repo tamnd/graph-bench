@@ -35,7 +35,9 @@ import (
 // when it cannot be found. Priority:
 //  1. cfg.Values["import_dir"] — explicit override from the run config.
 //  2. JAVA_HOME env-scoped neo4j-admin server home + /import — standard neo4j layout.
-//  3. /opt/homebrew/var/neo4j/import — homebrew default on macOS.
+//  3. /opt/homebrew/var/neo4j/import — homebrew default on macOS (var tree).
+//  4. /opt/homebrew/Cellar/neo4j/*/libexec/import — homebrew default (libexec tree,
+//     which is what server.directories.import=import actually resolves to).
 //
 // The directory must exist and be writable; a found but unwritable path is
 // treated as not found so the caller falls back to UNWIND batching.
@@ -50,9 +52,22 @@ func detectImportDir(cfg target.Config) string {
 			return dir
 		}
 	}
-	// Homebrew default on macOS.
+	// Homebrew default (var tree).
 	if isWritableDir("/opt/homebrew/var/neo4j/import") {
 		return "/opt/homebrew/var/neo4j/import"
+	}
+	// Homebrew default (libexec tree): server.directories.import=import is relative
+	// to NEO4J_HOME which points at the Cellar libexec directory.
+	if entries, err := os.ReadDir("/opt/homebrew/Cellar/neo4j"); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			dir := "/opt/homebrew/Cellar/neo4j/" + e.Name() + "/libexec/import"
+			if isWritableDir(dir) {
+				return dir
+			}
+		}
 	}
 	return ""
 }
@@ -161,7 +176,25 @@ func (t *neoTarget) Load(ctx context.Context, d target.Driver, ds target.Dataset
 	start := time.Now()
 	var nodes, edges int64
 
-	// Load nodes first, then relationships.
+	// Wipe any data from previous runs. Neo4j persists across connections, so
+	// without this each run accumulates stale nodes and edges.
+	wipeRes, wipeErr := drv.Run(ctx, target.Query{Class: target.Write, Text: "MATCH (n) DETACH DELETE n"}, nil)
+	if wipeErr == nil {
+		for wipeRes.Next() {
+		}
+		wipeRes.Close()
+	}
+
+	// Resolve the import directory once. Query neo4j for the runtime value so we
+	// always use the same path as the server (not a heuristic guess).
+	importDir := queryImportDir(ctx, drv)
+	if importDir == "" {
+		importDir = detectImportDir(drv.cfg)
+	}
+
+	// Load nodes first, then create an index on id, then load edges.
+	// The index is critical: without it, each MATCH (n:Label {id: x}) in the
+	// relationship load is a full scan, making 20k-edge loads take minutes.
 	schema := ds.Schema()
 	for label := range schema.Nodes {
 		files, cols, err := ds.NodeFiles(label)
@@ -169,11 +202,19 @@ func (t *neoTarget) Load(ctx context.Context, d target.Driver, ds target.Dataset
 			return target.LoadStats{}, fmt.Errorf("neo4j: node files %s: %w", label, err)
 		}
 		for _, f := range files {
-			n, err := loadCSVFile(ctx, drv, f, cols, label, true)
+			n, err := loadCSVFile(ctx, drv, f, cols, label, true, importDir)
 			if err != nil {
 				return target.LoadStats{}, fmt.Errorf("neo4j: load nodes %s from %s: %w", label, filepath.Base(f), err)
 			}
 			nodes += n
+		}
+		// Create a range index on id so relationship MATCHes are O(log N).
+		idxCypher := fmt.Sprintf("CREATE INDEX IF NOT EXISTS FOR (n:%s) ON (n.id)", label)
+		idxRes, idxErr := drv.Run(ctx, target.Query{Class: target.Write, Text: idxCypher}, nil)
+		if idxErr == nil {
+			for idxRes.Next() {
+			}
+			idxRes.Close()
 		}
 	}
 	for relType := range schema.Relationships {
@@ -182,7 +223,7 @@ func (t *neoTarget) Load(ctx context.Context, d target.Driver, ds target.Dataset
 			return target.LoadStats{}, fmt.Errorf("neo4j: rel files %s: %w", relType, err)
 		}
 		for _, f := range files {
-			n, err := loadCSVFile(ctx, drv, f, cols, relType, false)
+			n, err := loadCSVFile(ctx, drv, f, cols, relType, false, importDir)
 			if err != nil {
 				return target.LoadStats{}, fmt.Errorf("neo4j: load rels %s from %s: %w", relType, filepath.Base(f), err)
 			}
@@ -190,6 +231,27 @@ func (t *neoTarget) Load(ctx context.Context, d target.Driver, ds target.Dataset
 		}
 	}
 	return target.LoadStats{Duration: time.Since(start), Nodes: nodes, Edges: edges, BytesOnDisk: -1}, nil
+}
+
+
+// queryImportDir asks the running neo4j for the value of server.directories.import.
+// Returns the trimmed absolute path, or empty string on any failure.
+func queryImportDir(ctx context.Context, d *neoDriver) string {
+	q := target.Query{Text: "CALL dbms.listConfig() YIELD name, value WHERE name = 'server.directories.import' RETURN value"}
+	res, err := d.Run(ctx, q, nil)
+	if err != nil {
+		return ""
+	}
+	defer res.Close()
+	if res.Next() {
+		row := res.Row()
+		if len(row) > 0 {
+			if s, ok := row[0].(string); ok && s != "" && isWritableDir(s) {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // Teardown closes the Bolt pool.
@@ -245,12 +307,13 @@ func (t *neoTx) Rollback(ctx context.Context) error {
 	return err
 }
 
-// loadCSVFile loads one dataset CSV file into Neo4j. It uses LOAD CSV when the
-// Neo4j import directory is accessible from the harness filesystem (fast: one
-// server-side file read, one transaction), and falls back to UNWIND batching
-// when it is not (slow: one round trip per 500 rows, full data over the wire).
-func loadCSVFile(ctx context.Context, d *neoDriver, path string, cols []target.Column, typeOrLabel string, isNode bool) (int64, error) {
-	if importDir := detectImportDir(d.cfg); importDir != "" {
+// loadCSVFile loads one dataset CSV file into Neo4j. importDir is the resolved
+// neo4j import directory from the caller (Load queries it once via queryImportDir).
+// When importDir is non-empty, it uses LOAD CSV (fast: one server-side file read,
+// one transaction). When empty it falls back to UNWIND batching (slow: one round
+// trip per 500 rows, full data over the wire).
+func loadCSVFile(ctx context.Context, d *neoDriver, path string, cols []target.Column, typeOrLabel string, isNode bool, importDir string) (int64, error) {
+	if importDir != "" {
 		return loadCSVLocalFile(ctx, d, path, cols, typeOrLabel, isNode, importDir)
 	}
 	return loadCSVUnwind(ctx, d, path, cols, typeOrLabel, isNode)
@@ -379,24 +442,26 @@ func loadCSVLocalFile(ctx context.Context, d *neoDriver, path string, cols []tar
 
 // buildLoadCSVCypher builds the LOAD CSV WITH HEADERS FROM ... query for one
 // file. It coerces __id/__s/__e from string to integer and maps named property
-// columns by their type.
+// columns by their type. No CALL IN TRANSACTIONS wrapper: our benchmark
+// datasets are small enough to load in one autocommit transaction, and
+// CALL IN TRANSACTIONS requires an implicit session which the bolt pool
+// does not provide by default.
 func buildLoadCSVCypher(basename string, cols []target.Column, typeOrLabel string, isNode bool) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "LOAD CSV WITH HEADERS FROM 'file:///%s' AS row\n", basename)
-	sb.WriteString("CALL {\n  WITH row\n")
 	if isNode {
-		fmt.Fprintf(&sb, "  CREATE (n:%s {id: toInteger(row.__id)", typeOrLabel)
+		fmt.Fprintf(&sb, "CREATE (n:%s {id: toInteger(row.__id)", typeOrLabel)
 		for _, col := range cols {
 			if col.Name == "" {
 				continue
 			}
 			fmt.Fprintf(&sb, ", %s: %s", col.Name, coerceExpr("row."+col.Name, col.Type))
 		}
-		sb.WriteString("})\n")
+		sb.WriteString("})")
 	} else {
-		fmt.Fprintf(&sb, "  MATCH (a:Node {id: toInteger(row.__s)})\n")
-		fmt.Fprintf(&sb, "  MATCH (b:Node {id: toInteger(row.__e)})\n")
-		sb.WriteString("  CREATE (a)-[r:")
+		fmt.Fprintf(&sb, "MATCH (a:Node {id: toInteger(row.__s)})\n")
+		fmt.Fprintf(&sb, "MATCH (b:Node {id: toInteger(row.__e)})\n")
+		sb.WriteString("CREATE (a)-[r:")
 		sb.WriteString(typeOrLabel)
 		sb.WriteString(" {")
 		first := true
@@ -410,9 +475,8 @@ func buildLoadCSVCypher(basename string, cols []target.Column, typeOrLabel strin
 			first = false
 			fmt.Fprintf(&sb, "%s: %s", col.Name, coerceExpr("row."+col.Name, col.Type))
 		}
-		sb.WriteString("}]->(b)\n")
+		sb.WriteString("}]->(b)")
 	}
-	sb.WriteString("} IN TRANSACTIONS OF 10000 ROWS")
 	return sb.String()
 }
 

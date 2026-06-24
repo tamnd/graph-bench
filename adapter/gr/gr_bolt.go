@@ -144,6 +144,17 @@ func (t *boltTx) Rollback(ctx context.Context) error {
 func loadDatasetViaBolt(ctx context.Context, d *boltDriver, ds target.Dataset) (target.LoadStats, error) {
 	schema := ds.Schema()
 	var stats target.LoadStats
+
+	// Wipe any stale data from prior runs.
+	wipeRes, wipeErr := d.Run(ctx, target.Query{Class: target.Write, Text: "MATCH (n) DETACH DELETE n"}, nil)
+	if wipeErr == nil {
+		for wipeRes.Next() {
+		}
+		wipeRes.Close()
+	}
+
+	// Load nodes, then create an index on id before loading edges. Without the
+	// index each MATCH (n:Label {id: x}) in the edge load is a full scan.
 	for label := range schema.Nodes {
 		files, cols, err := ds.NodeFiles(label)
 		if err != nil {
@@ -155,6 +166,13 @@ func loadDatasetViaBolt(ctx context.Context, d *boltDriver, ds target.Dataset) (
 				return stats, fmt.Errorf("gr-bolt: load nodes %s: %w", label, err)
 			}
 			stats.Nodes += n
+		}
+		idxCypher := fmt.Sprintf("CREATE INDEX IF NOT EXISTS FOR (n:%s) ON (n.id)", label)
+		idxRes, idxErr := d.Run(ctx, target.Query{Class: target.Write, Text: idxCypher}, nil)
+		if idxErr == nil {
+			for idxRes.Next() {
+			}
+			idxRes.Close()
 		}
 	}
 	for relType := range schema.Relationships {
@@ -203,6 +221,20 @@ func boltBatch(ctx context.Context, d *boltDriver, rows []string, cols []target.
 	if len(rows) == 0 {
 		return 0, nil
 	}
+
+	// Find structural column indices.
+	idIdx, sidIdx, eidIdx := -1, -1, -1
+	for j, col := range cols {
+		switch col.Type {
+		case "ID":
+			idIdx = j
+		case "START_ID":
+			sidIdx = j
+		case "END_ID":
+			eidIdx = j
+		}
+	}
+
 	var sb strings.Builder
 	sb.WriteString("UNWIND [")
 	for i, row := range rows {
@@ -212,36 +244,60 @@ func boltBatch(ctx context.Context, d *boltDriver, rows []string, cols []target.
 		fields := strings.Split(row, ",")
 		sb.WriteString("{")
 		first := true
-		for j, col := range cols {
-			if col.Name == "" {
-				continue
-			}
+		writeKV := func(k, v string, numeric bool) {
 			if !first {
 				sb.WriteString(",")
 			}
 			first = false
+			sb.WriteString(k)
+			sb.WriteString(":")
+			if numeric {
+				sb.WriteString(v)
+			} else {
+				sb.WriteString(`"`)
+				sb.WriteString(strings.ReplaceAll(v, `"`, `\"`))
+				sb.WriteString(`"`)
+			}
+		}
+		if isNode {
+			id := "0"
+			if idIdx >= 0 && idIdx < len(fields) {
+				id = fields[idIdx]
+			}
+			writeKV("id", id, true)
+		} else {
+			sid, eid := "0", "0"
+			if sidIdx >= 0 && sidIdx < len(fields) {
+				sid = fields[sidIdx]
+			}
+			if eidIdx >= 0 && eidIdx < len(fields) {
+				eid = fields[eidIdx]
+			}
+			writeKV("__s", sid, true)
+			writeKV("__e", eid, true)
+		}
+		for j, col := range cols {
+			if col.Name == "" {
+				continue
+			}
 			val := ""
 			if j < len(fields) {
 				val = fields[j]
 			}
-			sb.WriteString(col.Name)
-			sb.WriteString(":")
+			numeric := false
 			switch col.Type {
-			case "int", "long", "integer":
-				sb.WriteString(val)
-			default:
-				sb.WriteString("\"")
-				sb.WriteString(strings.ReplaceAll(val, `"`, `\"`))
-				sb.WriteString("\"")
+			case "ID", "INT64", "INT32", "LONG", "INT", "INTEGER", "DOUBLE", "FLOAT", "FLOAT64":
+				numeric = true
 			}
+			writeKV(col.Name, val, numeric)
 		}
 		sb.WriteString("}")
 	}
 	sb.WriteString("] AS row")
 	if isNode {
-		fmt.Fprintf(&sb, " CREATE (n:%s) SET n = row", typeOrLabel)
+		fmt.Fprintf(&sb, " CREATE (n:%s {id: row.id})", typeOrLabel)
 	} else {
-		fmt.Fprintf(&sb, " MERGE (a {id: row.id}) MERGE (b {id: row.end_id}) CREATE (a)-[r:%s]->(b) SET r = row", typeOrLabel)
+		fmt.Fprintf(&sb, " MATCH (a:Node {id: row.__s}) MATCH (b:Node {id: row.__e}) CREATE (a)-[r:%s]->(b)", typeOrLabel)
 	}
 	q := target.Query{Class: target.Write, Text: sb.String()}
 	res, err := d.Run(ctx, q, nil)
