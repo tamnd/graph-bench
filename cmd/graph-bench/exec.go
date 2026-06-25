@@ -58,6 +58,9 @@ func executeRun(
 		dbTempDir = tmp
 		cfg.Values = map[string]string{"path": tmp + "/graph-bench.db"}
 	}
+	// Snapshot allocator counters before Setup so the run's memory cost (load
+	// plus queries) is measured from a clean baseline.
+	memStart := measure.SnapshotMem()
 	drv, err := tgt.Setup(ctx, cfg)
 	if err != nil {
 		if dbTempDir != "" {
@@ -103,6 +106,12 @@ func executeRun(
 	// Run the measurement.
 	result := measure.Run(ctx, drv, ops, opts)
 	result.Load = loadStats
+	// Capture the memory and disk cost beside the latency: allocator deltas
+	// since memStart, the on-disk dataset size, and the engine's load footprint.
+	result.Resource = measure.CaptureResource(
+		memStart, measure.SnapshotMem(),
+		measure.DirSizeBytes(ds.Dir()), loadStats.BytesOnDisk,
+	)
 	result.Condition = buildCondition(tgt, wl, ds, scale, cache, version, opts)
 
 	er := report.EngineResult{
