@@ -167,6 +167,11 @@ func dialectFor(engineName string) workload.Dialect {
 	switch engineName {
 	case "ladybug":
 		return workload.KuzuCypher
+	case "gr", "gr-bolt":
+		// gr speaks openCypher plus its algo_* algorithm functions; the GrCypher
+		// texts override only the analytical queries and everything else falls back
+		// to the shared Cypher text.
+		return workload.GrCypher
 	default:
 		return workload.Cypher
 	}

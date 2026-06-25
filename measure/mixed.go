@@ -81,7 +81,7 @@ func BuildMixedSchedule(wl *workload.Workload, dialect workload.Dialect, totalCo
 			if sl.q.Params != nil {
 				params = sl.q.Params.Next()
 			}
-			q, p, ok := sl.q.Resolve(dialect, nil)
+			q, p, ok := sl.q.ResolveRun(dialect, nil)
 			if !ok {
 				// Query has no text for this dialect; skip it.
 				continue
@@ -108,7 +108,7 @@ func BuildIsolatedOps(q *workload.WorkloadQuery, dialect workload.Dialect, count
 	if count <= 0 {
 		return nil
 	}
-	query, _, ok := q.Resolve(dialect, nil)
+	query, _, ok := q.ResolveRun(dialect, nil)
 	if !ok {
 		return nil
 	}
