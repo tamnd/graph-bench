@@ -73,6 +73,10 @@ func (t *Target) loadCSV(ctx context.Context, drv *driver, ds target.Dataset) (t
 	}
 	drv.db = db
 
+	if err := createIDIndexes(ctx, db, ds); err != nil {
+		return target.LoadStats{}, err
+	}
+
 	stats := l.Stats()
 	out := target.LoadStats{
 		Duration: dur,
@@ -83,6 +87,35 @@ func (t *Target) loadCSV(ctx context.Context, drv *driver, ds target.Dataset) (t
 		out.BytesOnDisk = info.SizeBytes
 	}
 	return out, nil
+}
+
+// createIDIndexes builds a label-property index on each node label's id column,
+// the same index a real deployment of any engine stands up before serving point
+// lookups and id-anchored traversals. Without it every MATCH (n:Label {id:...})
+// is a full label scan, which dominates the point-read and traversal classes and
+// measures the absence of an index rather than the engine. The id property name
+// comes from the dataset schema; a label with no declared id is skipped. The
+// index is created IF NOT EXISTS so a reload over an existing database is safe.
+func createIDIndexes(ctx context.Context, db *grdb.DB, ds target.Dataset) error {
+	for _, label := range sortedKeys(keysOfNodes(ds.Schema().Nodes)) {
+		idProp := ds.Schema().Nodes[label].ID
+		if idProp == "" {
+			continue
+		}
+		stmt := fmt.Sprintf("CREATE INDEX IF NOT EXISTS FOR (n:%s) ON (n.%s)", label, idProp)
+		res, err := db.Run(ctx, stmt, nil)
+		if err != nil {
+			return fmt.Errorf("gr: create id index on %s(%s): %w", label, idProp, err)
+		}
+		for res.Next() {
+		}
+		err = res.Err()
+		_ = res.Close()
+		if err != nil {
+			return fmt.Errorf("gr: create id index on %s(%s): %w", label, idProp, err)
+		}
+	}
+	return nil
 }
 
 // nodeSources builds one loader.NodeSource per node label from the dataset

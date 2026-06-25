@@ -81,7 +81,8 @@ var khop1Query = &workload.WorkloadQuery{
 	Class:   target.Traversal,
 	PoolKey: khopKey,
 	Texts: map[workload.Dialect]string{
-		workload.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
+		workload.Cypher:     `MATCH (a:Node {id: $seed})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
+		workload.KuzuCypher: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {
@@ -111,7 +112,8 @@ var khop2Query = &workload.WorkloadQuery{
 	Class:   target.Traversal,
 	PoolKey: khopKey,
 	Texts: map[workload.Dialect]string{
-		workload.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
+		workload.Cypher:     `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
+		workload.KuzuCypher: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {
@@ -139,7 +141,8 @@ var khop3Query = &workload.WorkloadQuery{
 	Class:   target.Traversal,
 	PoolKey: khopKey,
 	Texts: map[workload.Dialect]string{
-		workload.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
+		workload.Cypher:     `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
+		workload.KuzuCypher: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {
@@ -169,7 +172,8 @@ var varlenQuery = &workload.WorkloadQuery{
 	Class:   target.Traversal,
 	PoolKey: khopKey,
 	Texts: map[workload.Dialect]string{
-		workload.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
+		workload.Cypher:     `MATCH (a:Node {id: $seed})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
+		workload.KuzuCypher: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {
@@ -203,7 +207,7 @@ var spQuery = &workload.WorkloadQuery{
 		// Kuzu does not implement shortestPath(). It uses variable-length paths with
 		// the SHORTEST keyword. The upper bound must be omitted (Kuzu caps bounded
 		// variable-length rels at 30; unbounded 1.. removes that limit).
-		workload.KuzuCypher: `MATCH (a:Node {id: $src})-[r:EDGE* SHORTEST 1..]->(b:Node {id: $dst}) RETURN length(r) AS d`,
+		workload.KuzuCypher: `MATCH (a:Node {id: CAST($src AS INT64)})-[r:EDGE* SHORTEST 1..]->(b:Node {id: CAST($dst AS INT64)}) RETURN length(r) AS d`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {
@@ -244,7 +248,7 @@ var spBidirQuery = &workload.WorkloadQuery{
 		workload.Cypher: `MATCH p = shortestPath((a:Node {id: $src})-[:EDGE*]-(b:Node {id: $dst})) RETURN length(p) AS d`,
 		// Kuzu uses the SHORTEST keyword and an undirected pattern; the upper bound
 		// is omitted so Kuzu does not cap the search at 30 hops.
-		workload.KuzuCypher: `MATCH (a:Node {id: $src})-[r:EDGE* SHORTEST 1..]-(b:Node {id: $dst}) RETURN length(r) AS d`,
+		workload.KuzuCypher: `MATCH (a:Node {id: CAST($src AS INT64)})-[r:EDGE* SHORTEST 1..]-(b:Node {id: CAST($dst AS INT64)}) RETURN length(r) AS d`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {
@@ -279,7 +283,8 @@ var pointQuery = &workload.WorkloadQuery{
 	Class:   target.PointRead,
 	PoolKey: pointKey,
 	Texts: map[workload.Dialect]string{
-		workload.Cypher: `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
+		workload.Cypher:     `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
+		workload.KuzuCypher: `MATCH (n:Node {id: CAST($id AS INT64)}) RETURN n.id AS id`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {
@@ -316,7 +321,8 @@ var pointMissQuery = &workload.WorkloadQuery{
 	Class:   target.PointRead,
 	PoolKey: pointMissKey,
 	Texts: map[workload.Dialect]string{
-		workload.Cypher: `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
+		workload.Cypher:     `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
+		workload.KuzuCypher: `MATCH (n:Node {id: CAST($id AS INT64)}) RETURN n.id AS id`,
 	},
 	Reference: workload.RefStrategy{
 		Compute: func(ds target.Dataset, p target.Params) (*target.Answer, error) {

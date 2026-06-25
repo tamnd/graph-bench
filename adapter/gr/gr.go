@@ -122,6 +122,9 @@ func (t *Target) Load(ctx context.Context, d target.Driver, ds target.Dataset) (
 			return target.LoadStats{}, fmt.Errorf("gr: load statement %d: %w", i, err)
 		}
 	}
+	if err := createIDIndexes(ctx, drv.db, ds); err != nil {
+		return target.LoadStats{}, err
+	}
 	stats := target.LoadStats{Duration: time.Since(start)}
 	if info, err := drv.db.Info(); err == nil {
 		stats.BytesOnDisk = info.SizeBytes

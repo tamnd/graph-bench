@@ -190,6 +190,13 @@ type driver struct {
 	db   C.lbug_database
 	conn C.lbug_connection
 	path string
+	// prep caches one compiled prepared statement per query text. Kuzu's compile
+	// (parse, bind, plan) dominates the cost of a small query, so recompiling on
+	// every Run measures the planner rather than the engine; the measurement layer
+	// runs the same text hundreds of times with different bound params, which is
+	// exactly what a prepared statement is for. The cache is guarded by mu, which
+	// already serializes every Run on a driver.
+	prep map[string]*C.lbug_prepared_statement
 }
 
 var _ target.Driver = (*driver)(nil)
@@ -250,37 +257,25 @@ func (d *driver) runDirect(text string) (target.Result, error) {
 }
 
 func (d *driver) runPrepared(text string, params target.Params) (target.Result, error) {
-	cq := C.CString(text)
-	defer C.free(unsafe.Pointer(cq))
-	var stmt C.lbug_prepared_statement
-	if state := C.lbug_connection_prepare(&d.conn, cq, &stmt); state != C.LbugSuccess {
-		C.lbug_prepared_statement_destroy(&stmt)
-		return nil, fmt.Errorf("ladybug: prepare failed")
-	}
-	if !C.lbug_prepared_statement_is_success(&stmt) {
-		msg := C.lbug_prepared_statement_get_error_message(&stmt)
-		defer C.free(unsafe.Pointer(msg))
-		C.lbug_prepared_statement_destroy(&stmt)
-		return nil, fmt.Errorf("ladybug: prepare: %s", C.GoString(msg))
+	stmt, err := d.preparedStmt(text)
+	if err != nil {
+		return nil, err
 	}
 	for name, val := range params {
 		cname := C.CString(name)
-		if err := bindParam(&stmt, cname, val); err != nil {
+		if err := bindParam(stmt, cname, val); err != nil {
 			C.free(unsafe.Pointer(cname))
-			C.lbug_prepared_statement_destroy(&stmt)
 			return nil, fmt.Errorf("ladybug: bind %s: %w", name, err)
 		}
 		C.free(unsafe.Pointer(cname))
 	}
 	var res C.lbug_query_result
-	if state := C.lbug_connection_execute(&d.conn, &stmt, &res); state != C.LbugSuccess {
+	if state := C.lbug_connection_execute(&d.conn, stmt, &res); state != C.LbugSuccess {
 		msg := C.lbug_query_result_get_error_message(&res)
 		defer C.free(unsafe.Pointer(msg))
-		C.lbug_prepared_statement_destroy(&stmt)
 		C.lbug_query_result_destroy(&res)
 		return nil, fmt.Errorf("ladybug: execute: %s", C.GoString(msg))
 	}
-	C.lbug_prepared_statement_destroy(&stmt)
 	if !C.lbug_query_result_is_success(&res) {
 		msg := C.lbug_query_result_get_error_message(&res)
 		defer C.free(unsafe.Pointer(msg))
@@ -288,6 +283,32 @@ func (d *driver) runPrepared(text string, params target.Params) (target.Result, 
 		return nil, fmt.Errorf("ladybug: execute: %s", C.GoString(msg))
 	}
 	return newResult(res)
+}
+
+// preparedStmt returns the cached compiled statement for text, compiling and
+// caching it on the first call. The caller holds mu.
+func (d *driver) preparedStmt(text string) (*C.lbug_prepared_statement, error) {
+	if s, ok := d.prep[text]; ok {
+		return s, nil
+	}
+	stmt := new(C.lbug_prepared_statement)
+	cq := C.CString(text)
+	defer C.free(unsafe.Pointer(cq))
+	if state := C.lbug_connection_prepare(&d.conn, cq, stmt); state != C.LbugSuccess {
+		C.lbug_prepared_statement_destroy(stmt)
+		return nil, fmt.Errorf("ladybug: prepare failed")
+	}
+	if !C.lbug_prepared_statement_is_success(stmt) {
+		msg := C.lbug_prepared_statement_get_error_message(stmt)
+		defer C.free(unsafe.Pointer(msg))
+		C.lbug_prepared_statement_destroy(stmt)
+		return nil, fmt.Errorf("ladybug: prepare: %s", C.GoString(msg))
+	}
+	if d.prep == nil {
+		d.prep = make(map[string]*C.lbug_prepared_statement)
+	}
+	d.prep[text] = stmt
+	return stmt, nil
 }
 
 func bindParam(stmt *C.lbug_prepared_statement, cname *C.char, val target.Value) error {
@@ -325,6 +346,10 @@ func (d *driver) Begin(ctx context.Context, mode target.AccessMode) (target.Tx, 
 func (d *driver) Close(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	for _, stmt := range d.prep {
+		C.lbug_prepared_statement_destroy(stmt)
+	}
+	d.prep = nil
 	C.lbug_connection_destroy(&d.conn)
 	C.lbug_database_destroy(&d.db)
 	return nil

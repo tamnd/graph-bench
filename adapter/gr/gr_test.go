@@ -83,6 +83,69 @@ func TestSetupLoadRunTeardown(t *testing.T) {
 	}
 }
 
+// schemaDataset is a statements dataset that also declares a node schema, so the
+// load path runs createIDIndexes over it. Statements build the rows; the schema
+// names the label and its id property the index is built on.
+type schemaDataset struct {
+	target.Dataset
+	stmts  []string
+	schema target.Schema
+}
+
+func (d schemaDataset) Dir() string                { return "" }
+func (d schemaDataset) Schema() target.Schema      { return d.schema }
+func (d schemaDataset) Statements() []string       { return d.stmts }
+func (d schemaDataset) Name() string               { return "schema-tiny" }
+func (d schemaDataset) Checksum() string           { return "" }
+func (d schemaDataset) Manifest() *target.Manifest { return nil }
+func (d schemaDataset) Params(string) ([]target.Params, error) {
+	return nil, nil
+}
+func (d schemaDataset) NodeFiles(string) ([]string, []target.Column, error) {
+	return nil, nil, nil
+}
+func (d schemaDataset) RelFiles(string) ([]string, []target.Column, error) {
+	return nil, nil, nil
+}
+
+// TestLoadBuildsIDIndex checks the load path creates a label-property index on
+// each node label's id column. Without it every id-anchored lookup is a full
+// label scan, which is the difference between a point read measuring the engine
+// and measuring the absence of an index.
+func TestLoadBuildsIDIndex(t *testing.T) {
+	ctx := context.Background()
+	tg := New()
+	drv, err := tg.Setup(ctx, target.Config{})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = tg.Teardown(ctx, drv) })
+
+	ds := schemaDataset{
+		stmts: []string{`CREATE (:Node {id: '1'})`, `CREATE (:Node {id: '2'})`},
+		schema: target.Schema{Nodes: map[string]target.NodeSchema{
+			"Node": {ID: "id", Labels: []string{"Node"}},
+		}},
+	}
+	if _, err := tg.Load(ctx, drv, ds); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	ixs, err := drv.(*driver).db.Indexes()
+	if err != nil {
+		t.Fatalf("Indexes: %v", err)
+	}
+	found := false
+	for _, ix := range ixs {
+		if ix.Label == "Node" && len(ix.Props) == 1 && ix.Props[0] == "id" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no Node(id) index after load, got %+v", ixs)
+	}
+}
+
 // TestRunReturnsNode checks the graph-object mapping: a returned node arrives as
 // a target.Node with its labels and properties in the value model.
 func TestRunReturnsNode(t *testing.T) {

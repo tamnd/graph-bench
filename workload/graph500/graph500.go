@@ -60,7 +60,7 @@ MATCH p = shortestPath((root)-[:EDGE*]->(n:Node))
 RETURN n.id AS id, length(p) AS level ORDER BY id`,
 			// Kuzu reaches the level through a variable-length path with the SHORTEST
 			// keyword; the upper bound is omitted so the search is not capped at 30.
-			workload.KuzuCypher: `MATCH (root:Node {id: $source})
+			workload.KuzuCypher: `MATCH (root:Node {id: CAST($source AS INT64)})
 MATCH (root)-[r:EDGE* SHORTEST 1..]->(n:Node)
 RETURN n.id AS id, length(r) AS level ORDER BY id`,
 		},
