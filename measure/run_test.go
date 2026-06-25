@@ -167,6 +167,54 @@ func TestRunContextCancel(t *testing.T) {
 	_ = res
 }
 
+// TestRunCountModeIsServiceTime is the regression test for the measurement bug:
+// in count mode (no offered rate) the worker pool serializes ops, and timing
+// from the shared start would report each op's queue position, so p50 would
+// scale with the op count. With the dispatch-timed fix, p50 is the engine's
+// per-query service time and does not grow with --count. The driver sleeps a
+// fixed 2ms per call; whether 10 or 200 ops run, p50 must stay near 2ms.
+func TestRunCountModeIsServiceTime(t *testing.T) {
+	const perCall = 2 * time.Millisecond
+
+	run := func(n int) Stat {
+		d := &fakeDriver{latency: perCall}
+		// Count mode: no rate, default concurrency -> pool of 1, offsets all 0.
+		ops := makeOps(n, target.Traversal)
+		res := Run(context.Background(), d, ops, Options{Count: n})
+		if res.Latency != ServiceTimeLatency {
+			t.Fatalf("n=%d: Latency model = %q, want %q", n, res.Latency, ServiceTimeLatency)
+		}
+		return res.Stats[target.Traversal]
+	}
+
+	small := run(10)
+	large := run(200)
+
+	// Service time, not queue depth: p50 stays near the per-call latency even as
+	// the op count grows 20x. The pre-fix bug would put large.P50 near
+	// (200/2)*2ms = 200ms; a generous 10x-per-call ceiling still catches it.
+	ceiling := 10 * perCall
+	if large.P50 > ceiling {
+		t.Errorf("count=200 p50 = %v, want <= %v (queue depth leaking into latency)", large.P50, ceiling)
+	}
+	// And it must not scale with count: doubling-and-then-some, not 20x.
+	if small.P50 > 0 && large.P50 > 3*small.P50 {
+		t.Errorf("p50 scaled with count: count=10 p50=%v, count=200 p50=%v (ratio %.1fx)",
+			small.P50, large.P50, float64(large.P50)/float64(small.P50))
+	}
+}
+
+// TestRunRateModeIsOpenModel proves a rate-limited run stamps the open-model
+// clock, the complement of the count-mode service-time stamp above.
+func TestRunRateModeIsOpenModel(t *testing.T) {
+	d := &fakeDriver{}
+	ops := BuildSchedule(makeOps(5, target.Traversal), 1000, 0)
+	res := Run(context.Background(), d, ops, Options{Rate: 1000, Count: 5, Concurrency: 1})
+	if res.Latency != OpenModelLatency {
+		t.Errorf("Latency model = %q, want %q", res.Latency, OpenModelLatency)
+	}
+}
+
 // TestBuildScheduleOffsets checks that BuildSchedule assigns evenly-spaced
 // offsets based on the rate.
 func TestBuildScheduleOffsets(t *testing.T) {

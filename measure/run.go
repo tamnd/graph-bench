@@ -118,17 +118,32 @@ func BuildSchedule(ops []Op, rate float64, warmup time.Duration) []Op {
 	return ops
 }
 
-// Run fires every op against the driver on the open model and returns the
-// per-class steady-state summary. Each op is dispatched at its intended
-// arrival time regardless of whether earlier ops have completed, so in-flight
-// queries overlap exactly as the offered load dictates. Latency is measured
-// from the intended arrival, not from actual dispatch, so harness slippage and
-// engine queueing both land in the number. The context bounds the whole run;
-// cancelling it stops dispatching new ops and lets in-flight ops settle.
+// Run fires every op against the driver and returns the per-class steady-state
+// summary. The clock it measures against depends on the offered rate.
+//
+// With a rate (opt.Rate > 0) it is an open model: BuildSchedule has spaced the
+// arrivals, each op is dispatched at its intended arrival time regardless of
+// whether earlier ops have completed, and latency is measured from that intended
+// arrival, so harness slippage and engine queueing both land in the number
+// (coordinated-omission correction). This is the throughput-sweep number.
+//
+// Without a rate (opt.Rate <= 0, the count-mode default) there is no arrival
+// schedule: every op has Offset 0, so they are all "due" at the start and the
+// worker pool serializes them. Measuring from the shared start would then report
+// each op's position in that queue, not the engine's speed, and the reported p50
+// would scale with --count. So count mode measures from actual dispatch (after
+// the pool admits the op) to completion: the per-query service time, with the
+// queue excluded. Result.Latency records which clock was used.
+//
+// The context bounds the whole run; cancelling it stops dispatching new ops and
+// lets in-flight ops settle.
 func Run(ctx context.Context, d target.Driver, ops []Op, opt Options) Result {
 	p := newPool(opt.Concurrency)
 	samples := make([]Sample, len(ops))
 	measured := make([]bool, len(ops))
+	// serviceTime: with no offered rate the arrival schedule is meaningless and
+	// timing from intended would measure queue depth, so time from dispatch.
+	serviceTime := opt.Rate <= 0
 	var wg sync.WaitGroup
 
 	start := time.Now()
@@ -166,10 +181,18 @@ func Run(ctx context.Context, d target.Driver, ops []Op, opt Options) Result {
 			p.acquire()
 			defer p.release()
 			s := Sample{Class: o.Class, QueryID: o.QueryID}
+			// dispatch is the moment the pool admits this op. In count mode the
+			// queue ahead of it is not the engine's latency, so we start the clock
+			// here; in open-model mode we start from the intended arrival below.
+			dispatch := time.Now()
 			qctx, cancel := context.WithTimeout(ctx, opt.timeout())
 			defer cancel()
 			res, err := d.Run(qctx, o.Query, o.Params)
-			s.Latency = time.Since(intended) // measured from intended arrival
+			if serviceTime {
+				s.Latency = time.Since(dispatch)
+			} else {
+				s.Latency = time.Since(intended)
+			}
 			if err != nil {
 				s.Err = err
 				samples[idx] = s
@@ -189,7 +212,11 @@ drain:
 		}
 	}
 	byClass, byQuery := summarize(steady, opt.window())
-	return Result{Stats: byClass, ByQuery: byQuery}
+	model := OpenModelLatency
+	if serviceTime {
+		model = ServiceTimeLatency
+	}
+	return Result{Stats: byClass, ByQuery: byQuery, Latency: model}
 }
 
 // drainAndClose streams the result to count its rows and then releases it, so

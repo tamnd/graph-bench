@@ -14,9 +14,28 @@ import (
 	"github.com/tamnd/graph-bench/target"
 )
 
-// Sample is one scheduled query execution, successful or not. The Latency is
-// measured from the intended arrival time (coordinated-omission correction);
-// a non-nil Err means the query failed and the sample is counted in Errors
+// LatencyModel names which clock a run's latencies were measured against. A
+// report or gate uses it to refuse comparing a service-time number to an
+// open-model number, which are not the same quantity and must never be divided.
+type LatencyModel string
+
+const (
+	// ServiceTimeLatency is measured from actual dispatch, the moment the worker
+	// pool admits the op, to completion: the engine's per-query service time with
+	// no queueing in it. Count-mode runs (no offered rate) use it, because with no
+	// rate there is no arrival schedule to be late against, only a serialized
+	// queue whose depth would otherwise masquerade as latency.
+	ServiceTimeLatency LatencyModel = "service-time"
+	// OpenModelLatency is measured from the op's intended arrival, so time spent
+	// waiting for the engine to catch up under an offered rate lands in the number
+	// (coordinated-omission correction). Rate-limited runs use it.
+	OpenModelLatency LatencyModel = "open-model"
+)
+
+// Sample is one scheduled query execution, successful or not. Latency is
+// measured against the run's LatencyModel: from intended arrival for an
+// open-model (rate-limited) run, from actual dispatch for a count-mode run.
+// A non-nil Err means the query failed and the sample is counted in Errors
 // but excluded from the latency percentiles.
 //
 // QueryID is the workload query id (e.g. "snb-is2", "lsqb-q5"). It is empty
@@ -60,6 +79,7 @@ type Result struct {
 	Cold      map[target.Class]Stat // cold-cache first-access (F5); empty for warm-only runs
 	Load      target.LoadStats      // load time and on-disk size (section 1)
 	Sweep     []SweepPoint          // latency-under-load curve (section 6.4)
+	Latency   LatencyModel          // which clock the latencies were measured against
 	Condition Condition             // the full stamp (F9)
 }
 
