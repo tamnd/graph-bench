@@ -129,7 +129,12 @@ func nodeSources(ds target.Dataset) ([]loader.NodeSource, error) {
 		if err != nil {
 			return nil, err
 		}
-		srcs = append(srcs, loader.NodeSource{Label: label, Files: files})
+		// Keep the canonical :ID as a queryable property under its schema name
+		// (usually "id"). Without this the loader consumes :ID into gr's internal
+		// element id and drops it, so every MATCH (n:Label {id: ...}) and n.id
+		// read comes back empty and the native algorithms have no id to report.
+		// createIDIndexes below stands up the index on the same property name.
+		srcs = append(srcs, loader.NodeSource{Label: label, IDProperty: ds.Schema().Nodes[label].ID, Files: files})
 	}
 	return srcs, nil
 }
