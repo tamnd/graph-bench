@@ -233,7 +233,6 @@ func (t *neoTarget) Load(ctx context.Context, d target.Driver, ds target.Dataset
 	return target.LoadStats{Duration: time.Since(start), Nodes: nodes, Edges: edges, BytesOnDisk: -1}, nil
 }
 
-
 // queryImportDir asks the running neo4j for the value of server.directories.import.
 // Returns the trimmed absolute path, or empty string on any failure.
 func queryImportDir(ctx context.Context, d *neoDriver) string {
