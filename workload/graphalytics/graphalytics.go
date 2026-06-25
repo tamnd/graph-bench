@@ -5,17 +5,21 @@
 // its init so any binary that imports it (blank or otherwise) gets the
 // "graphalytics" workload in the registry.
 //
-// These are class Analytical and they are the deferred analytical tier: most
-// graph databases do not run them as queries, they run them as procedures (a CALL
-// in Cypher, the GDS library in Neo4j) or not at all. The seam is
-// Capabilities.Algorithms (doc 03 section 1.5): an engine that exposes an
-// algorithm runs the CALL text, an engine that does not shows a blank cell, which
-// is itself information. The Cypher texts here are representative GDS-style
-// procedure calls keyed by dialect, the per-engine procedure being the seam to
-// refine; the value the suite leans on is the engine-independent reference, an
-// LDBC-faithful implementation of each algorithm over the canonical CSV that two
-// engines validate against exactly (the determinism choices: distance-not-parent
-// BFS, smallest-label CDLP, smallest-member WCC labels).
+// These are class Analytical: most graph databases do not run them as queries,
+// they run them as procedures (a CALL in Cypher, the GDS library in Neo4j) or not
+// at all. The seam is the dialect-keyed text (doc 03 section 1.5): an engine that
+// exposes an algorithm runs its text, an engine that does not shows a blank cell,
+// which is itself information.
+//
+// gr runs all six natively through its algo_* functions (the GrCypher texts),
+// so its cells carry real numbers rather than a blank: the algorithm runs
+// in-engine over the loaded graph, not as a query the read planner could not
+// express. The shared Cypher texts are representative GDS-style procedure calls
+// for the Bolt engines that ship a procedure library. The value the suite leans
+// on either way is the engine-independent reference, an LDBC-faithful
+// implementation of each algorithm over the canonical CSV that every engine
+// validates against exactly (the determinism choices: distance-not-parent BFS,
+// smallest-label CDLP, smallest-member WCC labels).
 //
 // See notes/Spec/2060/bench/05-workloads.md section 8.2.
 package graphalytics
@@ -77,6 +81,8 @@ func bfsQuery() *workload.WorkloadQuery {
 WITH nodes(path) AS ns
 UNWIND range(0, size(ns) - 1) AS level
 RETURN ns[level].id AS id, level ORDER BY id`,
+			workload.GrCypher: `UNWIND algo_bfs('id', $source) AS row
+RETURN row.id AS id, row.level AS level ORDER BY id`,
 		},
 		Params: workload.NewFixed(target.Params{"source": source}),
 		Reference: workload.RefStrategy{
@@ -112,6 +118,8 @@ func pageRankQuery() *workload.WorkloadQuery {
 		Texts: map[workload.Dialect]string{
 			workload.Cypher: `CALL gds.pageRank.stream({nodeProjection: 'Node', relationshipProjection: 'EDGE', dampingFactor: 0.85}) YIELD nodeId, score
 MATCH (n) WHERE id(n) = nodeId RETURN n.id AS id, score ORDER BY id`,
+			workload.GrCypher: `UNWIND algo_pagerank('id', 0.85, 100) AS row
+RETURN row.id AS id, row.score AS score ORDER BY id`,
 		},
 		Params: workload.NewFixed(nil),
 		Reference: workload.RefStrategy{
@@ -148,6 +156,8 @@ MATCH (n) WHERE id(n) = nodeId
 WITH componentId, min(n.id) AS label, collect(n.id) AS members
 UNWIND members AS member
 RETURN member AS id, label AS component ORDER BY id`,
+			workload.GrCypher: `UNWIND algo_wcc('id') AS row
+RETURN row.id AS id, row.component AS component ORDER BY id`,
 		},
 		Params: workload.NewFixed(nil),
 		Reference: workload.RefStrategy{
@@ -172,6 +182,8 @@ func cdlpQuery() *workload.WorkloadQuery {
 		Texts: map[workload.Dialect]string{
 			workload.Cypher: `CALL gds.labelPropagation.stream({nodeProjection: 'Node', relationshipProjection: {EDGE: {orientation: 'UNDIRECTED'}}, maxIterations: 10}) YIELD nodeId, communityId
 MATCH (n) WHERE id(n) = nodeId RETURN n.id AS id, communityId AS community ORDER BY id`,
+			workload.GrCypher: `UNWIND algo_cdlp('id', 10) AS row
+RETURN row.id AS id, row.community AS community ORDER BY id`,
 		},
 		Params: workload.NewFixed(nil),
 		Reference: workload.RefStrategy{
@@ -195,6 +207,8 @@ func lccQuery() *workload.WorkloadQuery {
 		Texts: map[workload.Dialect]string{
 			workload.Cypher: `CALL gds.localClusteringCoefficient.stream({nodeProjection: 'Node', relationshipProjection: 'EDGE'}) YIELD nodeId, localClusteringCoefficient
 MATCH (n) WHERE id(n) = nodeId RETURN n.id AS id, localClusteringCoefficient AS coefficient ORDER BY id`,
+			workload.GrCypher: `UNWIND algo_lcc('id') AS row
+RETURN row.id AS id, row.coefficient AS coefficient ORDER BY id`,
 		},
 		Params: workload.NewFixed(nil),
 		Reference: workload.RefStrategy{
@@ -230,6 +244,8 @@ func ssspQuery() *workload.WorkloadQuery {
 		Texts: map[workload.Dialect]string{
 			workload.Cypher: `CALL gds.allShortestPaths.dijkstra.stream({nodeProjection: 'Node', relationshipProjection: 'EDGE', sourceNode: $source}) YIELD targetNode, totalCost
 MATCH (n) WHERE id(n) = targetNode RETURN n.id AS id, totalCost AS distance ORDER BY id`,
+			workload.GrCypher: `UNWIND algo_sssp('id', $source) AS row
+RETURN row.id AS id, row.distance AS distance ORDER BY id`,
 		},
 		Params: workload.NewFixed(target.Params{"source": source}),
 		Reference: workload.RefStrategy{
