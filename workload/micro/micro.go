@@ -1,7 +1,8 @@
 // Package micro registers the micro-benchmark workload family. It calls
 // workload.Register in its init so any binary that imports this package (blank
-// or otherwise) gets the "micro-grid" and "micro-er" workloads in the registry.
-// The harness imports it; tests import it for the workload catalog.
+// or otherwise) gets the "micro-grid", "micro-er", "micro-powerlaw", and
+// "micro-uniform" workloads in the registry. The harness imports it; tests
+// import it for the workload catalog.
 //
 // The micro benchmarks are the v1 layer that isolates one engine behavior per
 // query: one expand depth, one count, one scan, one write shape. They run on
@@ -13,7 +14,12 @@
 // engine-independent: k-hop, varlen, and shortest path (directed and
 // bidirectional) on the grid; directed and undirected triangle counts on ER; the
 // point lookup, its negative variant, and the scan-and-aggregate over the grid's
-// dense id column. Writes live in writes.go.
+// dense id column. The same traversal queries run again on the power-law and
+// uniform-degree generators (micro-powerlaw, micro-uniform) so the suite
+// contrasts skewed and flat degree with the query and node count held fixed, and
+// micro-powerlaw also carries the triangle counts so the worst-case-optimal-join
+// showcase runs on the skewed graph where the 2-path explosion is largest.
+// Writes live in writes.go.
 //
 // See notes/Spec/2060/bench/05-workloads.md section 2 for the full catalog.
 package micro
@@ -29,6 +35,8 @@ import (
 func init() {
 	workload.Register(microGrid)
 	workload.Register(microER)
+	workload.Register(microPowerLaw)
+	workload.Register(microUniform)
 }
 
 // Pool key constants matching what workload.Curate writes to params.json.
@@ -70,6 +78,62 @@ var microER = &workload.Workload{
 	Queries: []*workload.WorkloadQuery{
 		triangleDirectedQuery,
 		triangleUndirectedQuery,
+	},
+}
+
+// microPowerLaw runs the degree-sensitive micro family on a scale-free graph
+// whose out-degrees follow a power law, so a few hub nodes carry most of the
+// edges. It is the skewed half of the degree contrast doc 05 section 2.2 calls
+// for: the same k-hop, varlen, and shortest-path queries that run flat on the
+// grid here fan out by orders of magnitude depending on whether the seed lands on
+// a hub or a leaf, which is what the curated degree bands are built to expose. The
+// point lookup and its miss ride along as a degree-independent control: their cost
+// should read the same here as on the uniform graph, so a divergence flags an
+// index that is not actually degree-flat.
+//
+// It also carries the triangle counts, which doc 05 section 2.5 names the single
+// most important micro-benchmark for the worst-case-optimal-join thesis. The
+// power-law graph is exactly where the contrast bites: a binary-join plan
+// materializes every 2-path before filtering to triangles, and at a supernode the
+// 2-path intermediate blows up far past the triangle output, while a worst-case-
+// optimal join intersects the adjacency lists and stays bounded by the output. ER
+// (micro-er) gives the controlled-density triangle count; this gives the skewed
+// one where the join-algorithm choice shows.
+var microPowerLaw = &workload.Workload{
+	Name:    "micro-powerlaw",
+	Title:   "Micro-benchmarks on a power-law dataset (skewed-degree k-hop, shortest path, triangle counts)",
+	Dataset: "powerlaw",
+	Queries: []*workload.WorkloadQuery{
+		khop1Query,
+		khop2Query,
+		khop3Query,
+		varlenQuery,
+		spQuery,
+		spBidirQuery,
+		pointQuery,
+		pointMissQuery,
+		triangleDirectedQuery,
+		triangleUndirectedQuery,
+	},
+}
+
+// microUniform is the flat-degree counterpart: every node has roughly the same
+// out-degree, so the traversal family does the same amount of work regardless of
+// which seed it draws. Laid beside micro-powerlaw it isolates the cost of degree
+// skew itself, holding the query and the node count fixed and varying only the
+// shape of the degree distribution. It carries the shared k-hop, varlen, and point
+// subset so the two workloads line up row for row.
+var microUniform = &workload.Workload{
+	Name:    "micro-uniform",
+	Title:   "Micro-benchmarks on a uniform-degree dataset (flat-degree k-hop, varlen)",
+	Dataset: "uniform",
+	Queries: []*workload.WorkloadQuery{
+		khop1Query,
+		khop2Query,
+		khop3Query,
+		varlenQuery,
+		pointQuery,
+		pointMissQuery,
 	},
 }
 
