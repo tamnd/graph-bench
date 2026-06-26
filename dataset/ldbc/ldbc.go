@@ -132,6 +132,13 @@ func Fetch(ctx context.Context, pin *Pin, opts *FetchOptions) (*dataset.Set, err
 		return nil, fmt.Errorf("ldbc: extract: %w", err)
 	}
 
+	// A raw LDBC datagen archive has no canonical layout; repack it in place into
+	// nodes/rels + manifest.json before the manifest read below. A pre-repacked
+	// archive already carries a manifest and this is a no-op.
+	if _, err := repackUpstream(tmpDir, pin.Name); err != nil {
+		return nil, fmt.Errorf("ldbc: repack: %w", err)
+	}
+
 	// Read the manifest from the extracted directory and verify content checksum.
 	m, err := dataset.ReadManifest(tmpDir)
 	if err != nil {
@@ -339,6 +346,13 @@ func ComputePin(ctx context.Context, archivePath, name, scale, url, mirror strin
 
 	if err := extractTarZst(ctx, archivePath, tmpDir); err != nil {
 		return nil, fmt.Errorf("ldbc: extract: %w", err)
+	}
+
+	// Repack a raw LDBC datagen tree into the canonical layout in place, the same
+	// deterministic transform Fetch runs, so the pin records the content checksum
+	// over the repacked output. A pre-repacked archive is left untouched.
+	if _, err := repackUpstream(tmpDir, name); err != nil {
+		return nil, fmt.Errorf("ldbc: repack: %w", err)
 	}
 
 	// Read the manifest and compute the content checksum.
