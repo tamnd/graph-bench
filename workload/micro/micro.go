@@ -16,7 +16,9 @@
 // point lookup, its negative variant, and the scan-and-aggregate over the grid's
 // dense id column. The same traversal queries run again on the power-law and
 // uniform-degree generators (micro-powerlaw, micro-uniform) so the suite
-// contrasts skewed and flat degree with the query and node count held fixed.
+// contrasts skewed and flat degree with the query and node count held fixed, and
+// micro-powerlaw also carries the triangle counts so the worst-case-optimal-join
+// showcase runs on the skewed graph where the 2-path explosion is largest.
 // Writes live in writes.go.
 //
 // See notes/Spec/2060/bench/05-workloads.md section 2 for the full catalog.
@@ -79,7 +81,7 @@ var microER = &workload.Workload{
 	},
 }
 
-// microPowerLaw runs the degree-sensitive traversal family on a scale-free graph
+// microPowerLaw runs the degree-sensitive micro family on a scale-free graph
 // whose out-degrees follow a power law, so a few hub nodes carry most of the
 // edges. It is the skewed half of the degree contrast doc 05 section 2.2 calls
 // for: the same k-hop, varlen, and shortest-path queries that run flat on the
@@ -88,9 +90,18 @@ var microER = &workload.Workload{
 // point lookup and its miss ride along as a degree-independent control: their cost
 // should read the same here as on the uniform graph, so a divergence flags an
 // index that is not actually degree-flat.
+//
+// It also carries the triangle counts, which doc 05 section 2.5 names the single
+// most important micro-benchmark for the worst-case-optimal-join thesis. The
+// power-law graph is exactly where the contrast bites: a binary-join plan
+// materializes every 2-path before filtering to triangles, and at a supernode the
+// 2-path intermediate blows up far past the triangle output, while a worst-case-
+// optimal join intersects the adjacency lists and stays bounded by the output. ER
+// (micro-er) gives the controlled-density triangle count; this gives the skewed
+// one where the join-algorithm choice shows.
 var microPowerLaw = &workload.Workload{
 	Name:    "micro-powerlaw",
-	Title:   "Micro-benchmarks on a power-law dataset (skewed-degree k-hop, varlen, shortest path)",
+	Title:   "Micro-benchmarks on a power-law dataset (skewed-degree k-hop, shortest path, triangle counts)",
 	Dataset: "powerlaw",
 	Queries: []*workload.WorkloadQuery{
 		khop1Query,
@@ -101,6 +112,8 @@ var microPowerLaw = &workload.Workload{
 		spBidirQuery,
 		pointQuery,
 		pointMissQuery,
+		triangleDirectedQuery,
+		triangleUndirectedQuery,
 	},
 }
 

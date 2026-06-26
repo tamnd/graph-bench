@@ -456,7 +456,8 @@ func TestMicroDegreeSkewRegistered(t *testing.T) {
 	if pw.Dataset != "powerlaw" {
 		t.Errorf("micro-powerlaw.Dataset = %q, want %q", pw.Dataset, "powerlaw")
 	}
-	for _, id := range append(append([]string{}, shared...), "micro-sp", "micro-sp-bidir") {
+	pwExtra := []string{"micro-sp", "micro-sp-bidir", "micro-triangle", "micro-triangle-undirected"}
+	for _, id := range append(append([]string{}, shared...), pwExtra...) {
 		if _, ok := pw.Query(id); !ok {
 			t.Errorf("micro-powerlaw missing query %q", id)
 		}
@@ -530,6 +531,56 @@ func TestMicroPowerLawCurates(t *testing.T) {
 	// digits, not the rare hubs; lifting hub coverage is a curation follow-up.)
 	if hi <= lo {
 		t.Errorf("curated out-degrees did not span a range: [%d,%d]; degree banding collapsed", lo, hi)
+	}
+}
+
+// TestTrianglePowerLaw proves the triangle references run on the scale-free graph
+// and agree with the oracle. This is the WCOJ showcase doc 05 section 2.5 puts on
+// the power-law graph: the 2-path intermediate a binary join materializes is
+// largest here, so the count must be exact and oracle-checked regardless of how
+// the engine plans the join.
+func TestTrianglePowerLaw(t *testing.T) {
+	// A denser power-law graph than powerLawDS (MinDeg 2, not 1) so the undirected
+	// triangle count is comfortably non-zero; the WCOJ contrast needs real
+	// triangles to count, and a MinDeg-1 graph is mostly disconnected leaves.
+	dir := t.TempDir()
+	wr, err := dataset.NewWriter(dir)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	cfg := gen.Config{Kind: "powerlaw", N: 400, Gamma: 2.5, MinDeg: 2, MaxDeg: 80, Seed: 7}
+	if _, err := gen.Generate(context.Background(), cfg, wr); err != nil {
+		t.Fatalf("Generate powerlaw: %v", err)
+	}
+	ds, err := dataset.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	g, err := workload.LoadGraph(ds)
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+	w := mustLookup(t, "micro-powerlaw")
+
+	dirRef, err := mustQuery(t, w, "micro-triangle").Reference.Compute(ds, nil)
+	if err != nil {
+		t.Fatalf("micro-triangle reference: %v", err)
+	}
+	if got := dirRef.Rows[0][0].(int64); got != g.DirectedTriangles() {
+		t.Errorf("directed triangle reference = %d, oracle = %d", got, g.DirectedTriangles())
+	}
+
+	undRef, err := mustQuery(t, w, "micro-triangle-undirected").Reference.Compute(ds, nil)
+	if err != nil {
+		t.Fatalf("micro-triangle-undirected reference: %v", err)
+	}
+	if got := undRef.Rows[0][0].(int64); got != g.UndirectedTriangles() {
+		t.Errorf("undirected triangle reference = %d, oracle = %d", got, g.UndirectedTriangles())
+	}
+	// A scale-free graph with MinDeg >= 2 has real triangles; if the undirected
+	// count were zero the dataset would not exercise the WCOJ contrast at all.
+	if g.UndirectedTriangles() == 0 {
+		t.Error("power-law graph has no undirected triangles; the WCOJ showcase is vacuous")
 	}
 }
 
