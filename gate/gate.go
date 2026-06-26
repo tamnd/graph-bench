@@ -212,7 +212,10 @@ func measureEngine(ctx context.Context, eng target.Target, ds target.Dataset, sp
 // (or nil when the source is nil) and adds one scheduled op. The schedule is
 // then assigned evenly-spaced offsets at rate.
 func buildOps(ds target.Dataset, wl *workload.Workload, rate float64) ([]measure.Op, error) {
-	_ = ds // reserved for pool-keyed sources that read from the dataset
+	sources, err := curatedSources(ds, wl)
+	if err != nil {
+		return nil, err
+	}
 	var ops []measure.Op
 	for _, wq := range wl.Queries {
 		text, ok := wq.Texts[workload.Cypher]
@@ -225,7 +228,9 @@ func buildOps(ds target.Dataset, wl *workload.Workload, rate float64) ([]measure
 			Text:  text,
 		}
 		var params target.Params
-		if wq.Params != nil {
+		if src := sources[wq.ID]; src != nil {
+			params = src.Next()
+		} else if wq.Params != nil {
 			params = wq.Params.Next()
 		}
 		ops = append(ops, measure.Op{
@@ -236,6 +241,54 @@ func buildOps(ds target.Dataset, wl *workload.Workload, rate float64) ([]measure
 	}
 	measure.BuildSchedule(ops, rate, 0)
 	return ops, nil
+}
+
+// curatedSources curates the dataset and loads the parameter pool for every
+// query that declares a PoolKey, so the smoke gate fires the same parameterized
+// queries a real run does instead of sending an unbound $param the engine
+// rejects at the transport level. Without this the bounded workload's seed and
+// id parameters are nil and every parameterized query fails, which only the
+// CI-skipped failure check hid. A statements dataset (no directory) or an
+// unreadable pool yields no source for that query, and buildOps falls back to
+// the query's own Params.
+func curatedSources(ds target.Dataset, wl *workload.Workload) (map[string]workload.ParamSource, error) {
+	needsPool := false
+	for _, q := range wl.Queries {
+		if q.PoolKey != "" {
+			needsPool = true
+			break
+		}
+	}
+	if !needsPool {
+		return nil, nil
+	}
+	if ds.Dir() != "" {
+		if err := workload.Curate(ds, 1); err != nil {
+			return nil, fmt.Errorf("curate %s: %w", ds.Name(), err)
+		}
+	}
+	cached := map[string]workload.ParamSource{}
+	out := map[string]workload.ParamSource{}
+	for _, q := range wl.Queries {
+		if q.PoolKey == "" {
+			continue
+		}
+		if ps, ok := cached[q.PoolKey]; ok {
+			if ps != nil {
+				out[q.ID] = ps
+			}
+			continue
+		}
+		pool, err := ds.Params(q.PoolKey)
+		if err != nil || len(pool) == 0 {
+			cached[q.PoolKey] = nil
+			continue
+		}
+		ps := workload.NewPool(pool)
+		cached[q.PoolKey] = ps
+		out[q.ID] = ps
+	}
+	return out, nil
 }
 
 // DatasetPath returns a path suitable for caching a generated dataset next to
