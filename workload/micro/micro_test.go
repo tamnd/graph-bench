@@ -50,6 +50,46 @@ func erDS(t *testing.T) *dataset.Set {
 	return ds
 }
 
+// powerLawDS generates a small scale-free graph whose out-degrees follow a power
+// law, so the degree bands curation samples are genuinely skewed (a few hubs,
+// many leaves). N=400 with gamma 2.5 gives a clear spread without a slow oracle.
+func powerLawDS(t *testing.T) *dataset.Set {
+	t.Helper()
+	dir := t.TempDir()
+	w, err := dataset.NewWriter(dir)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	cfg := gen.Config{Kind: "powerlaw", N: 400, Gamma: 2.5, MinDeg: 1, MaxDeg: 80, Seed: 7}
+	if _, err := gen.Generate(context.Background(), cfg, w); err != nil {
+		t.Fatalf("Generate powerlaw: %v", err)
+	}
+	ds, err := dataset.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return ds
+}
+
+// uniformDS generates a small flat-degree graph where every node has the same
+// out-degree, the control against which the power-law skew is read.
+func uniformDS(t *testing.T) *dataset.Set {
+	t.Helper()
+	dir := t.TempDir()
+	w, err := dataset.NewWriter(dir)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if _, err := gen.Generate(context.Background(), gen.Config{Kind: "uniform", N: 400, Degree: 8, Seed: 7}, w); err != nil {
+		t.Fatalf("Generate uniform: %v", err)
+	}
+	ds, err := dataset.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return ds
+}
+
 // mustLookup retrieves a registered workload or fails immediately.
 func mustLookup(t *testing.T, name string) *workload.Workload {
 	t.Helper()
@@ -403,6 +443,135 @@ func TestScanGridWholeGraph(t *testing.T) {
 	}
 	if got := ref.Rows[0][1]; got != float64(12) {
 		t.Errorf("avgId = %v, want 12.0", got)
+	}
+}
+
+// TestMicroDegreeSkewRegistered proves the two degree-contrast workloads are in
+// the registry, name the power-law and uniform generators, and carry the shared
+// traversal subset that lets their rows be read side by side.
+func TestMicroDegreeSkewRegistered(t *testing.T) {
+	shared := []string{"micro-khop1", "micro-khop2", "micro-khop3", "micro-varlen", "micro-point", "micro-point-miss"}
+
+	pw := mustLookup(t, "micro-powerlaw")
+	if pw.Dataset != "powerlaw" {
+		t.Errorf("micro-powerlaw.Dataset = %q, want %q", pw.Dataset, "powerlaw")
+	}
+	for _, id := range append(append([]string{}, shared...), "micro-sp", "micro-sp-bidir") {
+		if _, ok := pw.Query(id); !ok {
+			t.Errorf("micro-powerlaw missing query %q", id)
+		}
+	}
+
+	uni := mustLookup(t, "micro-uniform")
+	if uni.Dataset != "uniform" {
+		t.Errorf("micro-uniform.Dataset = %q, want %q", uni.Dataset, "uniform")
+	}
+	for _, id := range shared {
+		if _, ok := uni.Query(id); !ok {
+			t.Errorf("micro-uniform missing query %q", id)
+		}
+	}
+	// The flat-degree control runs only the degree-comparable subset, not sp.
+	if _, ok := uni.Query("micro-sp"); ok {
+		t.Error("micro-uniform should not carry micro-sp (sp lives on grid and power-law)")
+	}
+}
+
+// TestMicroPowerLawCurates runs curation on the generated power-law graph and
+// checks the khop seeds resolve through the khop1 reference, which depends on the
+// seed being a real node. This exercises the whole path the degree-skew workload
+// relies on: generate, curate degree bands, draw a seed, compute the reference.
+func TestMicroPowerLawCurates(t *testing.T) {
+	ds := powerLawDS(t)
+	if err := workload.Curate(ds, 7); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	g, err := workload.LoadGraph(ds)
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+
+	khop, err := ds.Params("micro-khop")
+	if err != nil {
+		t.Fatalf("Params(micro-khop): %v", err)
+	}
+	if len(khop) == 0 {
+		t.Fatal("micro-khop pool is empty on the power-law graph")
+	}
+	q := mustQuery(t, mustLookup(t, "micro-powerlaw"), "micro-khop1")
+	lo, hi := 1<<30, 0
+	for i, p := range khop {
+		seed, ok := p["seed"].(string)
+		if !ok {
+			t.Fatalf("khop[%d] missing string seed: %v", i, p)
+		}
+		if !g.HasNode(seed) {
+			t.Errorf("khop[%d] seed %q is not a node", i, seed)
+		}
+		ref, err := q.Reference.Compute(ds, target.Params{"seed": seed})
+		if err != nil {
+			t.Fatalf("khop1 reference on seed %q: %v", seed, err)
+		}
+		if got := ref.Rows[0][0].(int64); int(got) != g.OutDegree(seed) {
+			t.Errorf("khop1(%q) = %d, want OutDegree %d", seed, got, g.OutDegree(seed))
+		}
+		d := g.OutDegree(seed)
+		if d < lo {
+			lo = d
+		}
+		if d > hi {
+			hi = d
+		}
+	}
+	// The degree bands must span a range on a skewed graph: the low band lands on
+	// the degree-1 leaves that dominate a power law, the high band on the heavier
+	// tail. A collapsed range would mean the banding picked from one degree only.
+	// (At gamma 2.5 the tail is thin, so the high band reaches the low single
+	// digits, not the rare hubs; lifting hub coverage is a curation follow-up.)
+	if hi <= lo {
+		t.Errorf("curated out-degrees did not span a range: [%d,%d]; degree banding collapsed", lo, hi)
+	}
+}
+
+// TestMicroUniformCurates is the flat-degree counterpart: curation on the uniform
+// graph yields valid khop seeds, and the spread of their out-degrees is narrow,
+// which is what makes it the control for the power-law skew.
+func TestMicroUniformCurates(t *testing.T) {
+	ds := uniformDS(t)
+	if err := workload.Curate(ds, 7); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	g, err := workload.LoadGraph(ds)
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+
+	khop, err := ds.Params("micro-khop")
+	if err != nil {
+		t.Fatalf("Params(micro-khop): %v", err)
+	}
+	if len(khop) == 0 {
+		t.Fatal("micro-khop pool is empty on the uniform graph")
+	}
+	lo, hi := 1<<30, 0
+	for i, p := range khop {
+		seed, ok := p["seed"].(string)
+		if !ok {
+			t.Fatalf("khop[%d] missing string seed: %v", i, p)
+		}
+		if !g.HasNode(seed) {
+			t.Errorf("khop[%d] seed %q is not a node", i, seed)
+		}
+		d := g.OutDegree(seed)
+		if d < lo {
+			lo = d
+		}
+		if d > hi {
+			hi = d
+		}
+	}
+	if hi != lo {
+		t.Errorf("uniform out-degree spread across curated seeds = [%d,%d]; expected flat (every node the same degree)", lo, hi)
 	}
 }
 
