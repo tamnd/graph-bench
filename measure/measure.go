@@ -8,6 +8,7 @@
 package measure
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -55,16 +56,19 @@ type Sample struct {
 // the measured window; zero for a single-client latency-only run or when
 // the window duration was not supplied.
 type Stat struct {
-	Class      target.Class
-	Count      int
-	Errors     int
-	P50        time.Duration
-	P90        time.Duration
-	P95        time.Duration
-	P99        time.Duration
-	Max        time.Duration
-	Mean       time.Duration
-	Throughput float64
+	Class         target.Class
+	Count         int
+	Errors        int
+	Min           time.Duration
+	P50           time.Duration
+	P90           time.Duration
+	P95           time.Duration
+	P99           time.Duration
+	Max           time.Duration
+	Mean          time.Duration
+	StdDev        time.Duration // population standard deviation of the latencies
+	Throughput    float64       // completed queries per second over the window
+	RowThroughput float64       // result rows per second over the window
 }
 
 // Result is the complete outcome of one measured run: per-class statistics,
@@ -78,6 +82,7 @@ type Result struct {
 	ByQuery   map[string]Stat       // per-query-id latency; populated when Sample.QueryID is set
 	Cold      map[target.Class]Stat // cold-cache first-access (F5); empty for warm-only runs
 	Load      target.LoadStats      // load time and on-disk size (section 1)
+	Resource  Resource              // memory and disk cost of the run (resource.go)
 	Sweep     []SweepPoint          // latency-under-load curve (section 6.4)
 	Latency   LatencyModel          // which clock the latencies were measured against
 	Condition Condition             // the full stamp (F9)
@@ -159,6 +164,7 @@ func summarizeGroup(class target.Class, group []Sample, window time.Duration) St
 	stat := Stat{Class: class, Count: len(group)}
 	lat := make([]time.Duration, 0, len(group))
 	var sum time.Duration
+	var rows int
 	for _, s := range group {
 		if s.Err != nil {
 			stat.Errors++
@@ -166,6 +172,7 @@ func summarizeGroup(class target.Class, group []Sample, window time.Duration) St
 		}
 		lat = append(lat, s.Latency)
 		sum += s.Latency
+		rows += s.Rows
 	}
 	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
 	stat.P50 = percentile(lat, 0.50)
@@ -173,13 +180,33 @@ func summarizeGroup(class target.Class, group []Sample, window time.Duration) St
 	stat.P95 = percentile(lat, 0.95)
 	stat.P99 = percentile(lat, 0.99)
 	if n := len(lat); n > 0 {
+		stat.Min = lat[0]
 		stat.Max = lat[n-1]
 		stat.Mean = sum / time.Duration(n)
+		stat.StdDev = stddev(lat, stat.Mean)
 		if window > 0 {
 			stat.Throughput = float64(n) / window.Seconds()
+			stat.RowThroughput = float64(rows) / window.Seconds()
 		}
 	}
 	return stat
+}
+
+// stddev returns the population standard deviation of the latency slice about
+// mean, as a duration. Fewer than two samples have zero deviation. It is the
+// spread beside the percentiles: a low p50 with a high stddev is a bimodal
+// engine, not a uniformly fast one.
+func stddev(lat []time.Duration, mean time.Duration) time.Duration {
+	if len(lat) < 2 {
+		return 0
+	}
+	m := float64(mean)
+	var sumSq float64
+	for _, d := range lat {
+		diff := float64(d) - m
+		sumSq += diff * diff
+	}
+	return time.Duration(math.Sqrt(sumSq / float64(len(lat))))
 }
 
 // summarize turns raw steady-state samples into per-class and per-query-id

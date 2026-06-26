@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"path/filepath"
 	"sort"
+	"strconv"
 
 	"github.com/tamnd/graph-bench/dataset"
 	"github.com/tamnd/graph-bench/target"
@@ -17,14 +18,19 @@ import (
 // per dataset per curation version; the harness reads params.json at run time
 // and does not re-curate on every run.
 //
-// Three pool keys are written:
+// Five pool keys are written:
 //
 //   - "micro-khop": seed nodes sampled in degree bands (low, mid, high, hub),
 //     so a k-hop expansion is measured at the easy case and the hard case and
 //     not just at a lucky middle.
 //   - "micro-sp": (src, dst) pairs sampled at chosen BFS distances (adjacent,
 //     mid-diameter, full-diameter where the graph is finite), so a shortest-path
-//     query is measured as a function of distance, not luck.
+//     query is measured as a function of distance, not luck. The bidirectional
+//     variant (micro-sp-bidir) draws from this same pool.
+//   - "micro-point": a flat sample of existing ids for the index probe, whose
+//     cost is degree-independent so no banding is needed.
+//   - "micro-point-miss": ids guaranteed absent from the graph for the negative
+//     lookup.
 //   - "micro-triangle": no parameters (the triangle count is over the whole graph),
 //     so the pool holds one empty set as a sentinel.
 
@@ -64,6 +70,12 @@ func Curate(ds target.Dataset, seed int64) error {
 		return fmt.Errorf("curate: sp pool: %w", err)
 	}
 	pools["micro-sp"] = sp
+
+	// The point lookup draws a flat sample of existing ids (its cost is index-only,
+	// degree-independent, so a flat sample is fair) and its negative variant draws
+	// ids guaranteed absent from the graph.
+	pools["micro-point"] = curatePoint(g, seed)
+	pools["micro-point-miss"] = curatePointMiss(g)
 
 	// The triangle workload takes no parameters: the count is over the whole
 	// graph, so the pool is one empty set, which makes the PoolSource cycle
@@ -206,6 +218,71 @@ func curateSP(g *Graph, seed int64) ([]target.Params, error) {
 		}
 	}
 	return pool, nil
+}
+
+// PointSamples is the number of existing ids drawn for the point-lookup pool and
+// the number of absent ids drawn for the negative variant. Sixteen is enough for
+// a PoolSource to cycle without repeating on short runs while keeping params.json
+// small.
+const PointSamples = 16
+
+// curatePoint draws a flat, deterministic spread of existing id tokens for the
+// point lookup. The cost of a point lookup is index-only and does not depend on
+// degree, so unlike the k-hop pool there is no degree banding: an even stride over
+// the id list is a fair sample of the index.
+func curatePoint(g *Graph, seed int64) []target.Params {
+	n := len(g.ids)
+	if n == 0 {
+		return nil
+	}
+	k := PointSamples
+	if k > n {
+		k = n
+	}
+	// Shuffle a copy of the indices deterministically and take the first k, so the
+	// sample is spread across the id space rather than clustered at the start.
+	rng := rand.New(rand.NewSource(seed ^ 0x10c0))
+	idxs := make([]int, n)
+	for i := range idxs {
+		idxs[i] = i
+	}
+	for i := 0; i < k; i++ {
+		j := i + rng.Intn(n-i)
+		idxs[i], idxs[j] = idxs[j], idxs[i]
+	}
+	pool := make([]target.Params, 0, k)
+	for _, idx := range idxs[:k] {
+		pool = append(pool, target.Params{"id": g.ids[idx]})
+	}
+	return pool
+}
+
+// curatePointMiss produces id tokens guaranteed absent from the graph, the
+// parameters for the negative lookup. The synthetic generators emit a dense
+// base-10 numeric id, so ids above the maximum present id are certain misses; the
+// routine still checks HasNode so a non-dense id space cannot smuggle a present id
+// into the miss pool.
+func curatePointMiss(g *Graph) []target.Params {
+	var maxID int64 = -1
+	for _, id := range g.ids {
+		if v, err := strconv.ParseInt(id, 10, 64); err == nil && v > maxID {
+			maxID = v
+		}
+	}
+	pool := make([]target.Params, 0, PointSamples)
+	next := maxID + 1
+	for len(pool) < PointSamples {
+		tok := strconv.FormatInt(next, 10)
+		next++
+		if g.HasNode(tok) {
+			continue
+		}
+		pool = append(pool, target.Params{"id": tok})
+		if next > maxID+int64(PointSamples)*4+8 {
+			break // safety bound; never reached on a dense id space
+		}
+	}
+	return pool
 }
 
 // bfsFrom returns the shortest-path distances from src to all reachable nodes in

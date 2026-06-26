@@ -58,6 +58,9 @@ func executeRun(
 		dbTempDir = tmp
 		cfg.Values = map[string]string{"path": tmp + "/graph-bench.db"}
 	}
+	// Snapshot allocator counters before Setup so the run's memory cost (load
+	// plus queries) is measured from a clean baseline.
+	memStart := measure.SnapshotMem()
 	drv, err := tgt.Setup(ctx, cfg)
 	if err != nil {
 		if dbTempDir != "" {
@@ -103,6 +106,12 @@ func executeRun(
 	// Run the measurement.
 	result := measure.Run(ctx, drv, ops, opts)
 	result.Load = loadStats
+	// Capture the memory and disk cost beside the latency: allocator deltas
+	// since memStart, the on-disk dataset size, and the engine's load footprint.
+	result.Resource = measure.CaptureResource(
+		memStart, measure.SnapshotMem(),
+		measure.DirSizeBytes(ds.Dir()), loadStats.BytesOnDisk,
+	)
 	result.Condition = buildCondition(tgt, wl, ds, scale, cache, version, opts)
 
 	er := report.EngineResult{
@@ -158,6 +167,11 @@ func dialectFor(engineName string) workload.Dialect {
 	switch engineName {
 	case "ladybug":
 		return workload.KuzuCypher
+	case "gr", "gr-bolt":
+		// gr speaks openCypher plus its algo_* algorithm functions; the GrCypher
+		// texts override only the analytical queries and everything else falls back
+		// to the shared Cypher text.
+		return workload.GrCypher
 	default:
 		return workload.Cypher
 	}
@@ -337,9 +351,10 @@ func autoGenDataset(ctx context.Context, dsName string) (*dataset.Set, error) {
 // not the benchmark-grade sizes; they exist so 'graph-bench run' works
 // without a pre-generated dataset for workloads that say what they need.
 var syntheticDefaults = map[string]gen.Config{
-	"grid": {Kind: "grid", Rows: 100, Cols: 100, Seed: 1},
-	"er":   {Kind: "er", N: 10000, P: 0.001, Seed: 1},
-	"rmat": {Kind: "rmat", Scale: 14, EdgeFactor: 16, Seed: 1},
+	"grid":     {Kind: "grid", Rows: 100, Cols: 100, Seed: 1},
+	"er":       {Kind: "er", N: 10000, P: 0.001, Seed: 1},
+	"rmat":     {Kind: "rmat", Scale: 14, EdgeFactor: 16, Seed: 1},
+	"powerlaw": {Kind: "powerlaw", N: 5000, Gamma: 2.5, MinDeg: 1, MaxDeg: 500, Seed: 1},
 }
 
 // buildCondition fills in the Condition stamp for a result.

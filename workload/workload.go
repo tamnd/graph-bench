@@ -149,6 +149,12 @@ const (
 	// with Kuzu extensions. Kuzu does not implement shortestPath(); it uses a
 	// variable-length path syntax with the SHORTEST keyword instead.
 	KuzuCypher
+	// GrCypher is the text for gr (in-process and over Bolt): openCypher plus gr's
+	// native extensions, notably the algo_* graph-algorithm functions that run the
+	// Graphalytics algorithms in-engine. gr speaks a superset of plain Cypher, so a
+	// query with no GrCypher text falls back to the shared Cypher entry; only the
+	// few queries with a gr-native form (the analytical algorithms) carry one.
+	GrCypher
 )
 
 // String returns the dialect's stable name for stamps and reports.
@@ -164,9 +170,28 @@ func (d Dialect) String() string {
 		return "sql"
 	case KuzuCypher:
 		return "kuzu-cypher"
+	case GrCypher:
+		return "gr-cypher"
 	default:
 		return "unknown"
 	}
+}
+
+// ResolveRun resolves the query for an engine's dialect with gr's Cypher
+// fallback: a GrCypher engine with no gr-native text for this query runs the
+// shared Cypher text, since gr speaks a superset of openCypher. Other dialects do
+// not fall back here (a missing text is their genuine blank cell). It is the
+// resolution the concurrent Mix path uses; the isolated path keeps its own
+// broader fallback for back-compat. ok is false when neither the dialect nor, for
+// gr, Cypher has a text.
+func (q *WorkloadQuery) ResolveRun(d Dialect, ref *target.Answer) (target.Query, target.Params, bool) {
+	if query, params, ok := q.Resolve(d, ref); ok {
+		return query, params, true
+	}
+	if d == GrCypher {
+		return q.Resolve(Cypher, ref)
+	}
+	return target.Query{}, nil, false
 }
 
 // registry holds the registered workloads by name.

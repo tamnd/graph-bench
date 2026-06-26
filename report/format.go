@@ -141,7 +141,7 @@ func renderMarkdown(m *Matrix, w io.Writer) error {
 // renderCSV writes one row per (engine, class) cell with explicit columns.
 func renderCSV(m *Matrix, w io.Writer) error {
 	cw := csv.NewWriter(w)
-	header := []string{"engine", "plane", "version", "column", "p50", "p99", "throughput", "cold_p99"}
+	header := []string{"engine", "plane", "version", "column", "min", "p50", "p99", "stddev", "throughput", "row_throughput", "cold_p99"}
 	if err := cw.Write(header); err != nil {
 		return err
 	}
@@ -156,9 +156,12 @@ func renderCSV(m *Matrix, w io.Writer) error {
 				r.Plane,
 				r.Version,
 				col,
+				fmtDur(c.Min),
 				fmtDur(c.P50),
 				fmtDur(c.Metric),
+				fmtDur(c.StdDev),
 				fmt.Sprintf("%.2f", c.Throughput),
+				fmt.Sprintf("%.2f", c.RowThroughput),
 				fmtDur(c.Cold),
 			}
 			if err := cw.Write(rec); err != nil {

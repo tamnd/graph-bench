@@ -284,6 +284,128 @@ func TestTriangleERPositive(t *testing.T) {
 	}
 }
 
+// TestMicroGridHasGapQueries proves the four v1 gap queries are registered in
+// micro-grid alongside the original five.
+func TestMicroGridHasGapQueries(t *testing.T) {
+	w := mustLookup(t, "micro-grid")
+	for _, id := range []string{"micro-sp-bidir", "micro-point", "micro-point-miss", "micro-scan"} {
+		if _, ok := w.Query(id); !ok {
+			t.Errorf("micro-grid missing query %q", id)
+		}
+	}
+}
+
+// TestCuratePointPools proves curation writes the point and point-miss pools and
+// that every miss id is genuinely absent from the graph.
+func TestCuratePointPools(t *testing.T) {
+	ds := gridDS(t)
+	if err := workload.Curate(ds, 77); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	g, err := workload.LoadGraph(ds)
+	if err != nil {
+		t.Fatalf("LoadGraph: %v", err)
+	}
+
+	pointPool, err := ds.Params("micro-point")
+	if err != nil {
+		t.Fatalf("Params(micro-point): %v", err)
+	}
+	if len(pointPool) == 0 {
+		t.Fatal("micro-point pool is empty")
+	}
+	for i, p := range pointPool {
+		id, ok := p["id"].(string)
+		if !ok {
+			t.Errorf("pointPool[%d] missing string id: %v", i, p)
+			continue
+		}
+		if !g.HasNode(id) {
+			t.Errorf("pointPool[%d] id %q is not in the graph", i, id)
+		}
+	}
+
+	missPool, err := ds.Params("micro-point-miss")
+	if err != nil {
+		t.Fatalf("Params(micro-point-miss): %v", err)
+	}
+	if len(missPool) == 0 {
+		t.Fatal("micro-point-miss pool is empty")
+	}
+	for i, p := range missPool {
+		id, ok := p["id"].(string)
+		if !ok {
+			t.Errorf("missPool[%d] missing string id: %v", i, p)
+			continue
+		}
+		if g.HasNode(id) {
+			t.Errorf("missPool[%d] id %q exists; should be a miss", i, id)
+		}
+	}
+}
+
+// TestPointGridHit checks the point lookup returns one row for an existing id on
+// the 5x5 grid.
+func TestPointGridHit(t *testing.T) {
+	ds := gridDS(t)
+	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-point")
+	ref, err := q.Reference.Compute(ds, target.Params{"id": "7"})
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	assertScalar(t, ref, int64(7))
+}
+
+// TestPointMissGridZero checks the negative lookup returns no row for an absent
+// id, and errors when handed a present id (a corrupt pool).
+func TestPointMissGridZero(t *testing.T) {
+	ds := gridDS(t)
+	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-point-miss")
+	ref, err := q.Reference.Compute(ds, target.Params{"id": "9999"})
+	if err != nil {
+		t.Fatalf("Compute(absent): %v", err)
+	}
+	if len(ref.Rows) != 0 {
+		t.Errorf("miss returned %d rows, want 0", len(ref.Rows))
+	}
+	if _, err := q.Reference.Compute(ds, target.Params{"id": "0"}); err == nil {
+		t.Error("Compute with a present id should error (corrupt miss pool), got nil")
+	}
+}
+
+// TestSPBidirGridReverse checks that the bidirectional shortest path from "24" to
+// "0" is 8: unreachable in the directed DAG (micro-sp) but reachable in 8 hops
+// when edges are undirected.
+func TestSPBidirGridReverse(t *testing.T) {
+	ds := gridDS(t)
+	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-sp-bidir")
+	ref, err := q.Reference.Compute(ds, target.Params{"src": "24", "dst": "0"})
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	assertScalar(t, ref, int64(8))
+}
+
+// TestScanGridWholeGraph checks the scan-and-aggregate over the 5x5 grid: 25
+// nodes with ids 0..24, so count=25 and avg=12.0.
+func TestScanGridWholeGraph(t *testing.T) {
+	ds := gridDS(t)
+	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-scan")
+	ref, err := q.Reference.Compute(ds, nil)
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if len(ref.Rows) != 1 || len(ref.Rows[0]) != 2 {
+		t.Fatalf("answer shape: want 1x2, got %v", ref.Rows)
+	}
+	if got := ref.Rows[0][0]; got != int64(25) {
+		t.Errorf("count = %v, want 25", got)
+	}
+	if got := ref.Rows[0][1]; got != float64(12) {
+		t.Errorf("avgId = %v, want 12.0", got)
+	}
+}
+
 // TestResolveDialectCarriesReference checks that Resolve for Cypher picks the
 // query text and carries the reference answer through unchanged.
 func TestResolveDialectCarriesReference(t *testing.T) {

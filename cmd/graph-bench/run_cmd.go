@@ -13,6 +13,8 @@ import (
 	"github.com/tamnd/graph-bench/workload"
 
 	// Import workload families so their init() functions register them.
+	_ "github.com/tamnd/graph-bench/workload/graph500"
+	_ "github.com/tamnd/graph-bench/workload/graphalytics"
 	_ "github.com/tamnd/graph-bench/workload/lsqb"
 	_ "github.com/tamnd/graph-bench/workload/micro"
 	_ "github.com/tamnd/graph-bench/workload/snb"
@@ -141,7 +143,16 @@ func newRunCmd() *cobra.Command {
 			}
 			conditions := conditionSummary(results)
 			m := report.Assemble(results, report.ColumnClass, conditions)
-			return report.Render(m, outFmt, out)
+			if err := report.Render(m, outFmt, out); err != nil {
+				return err
+			}
+			// The matrix is per-class latency; follow it with the per-engine
+			// memory and disk summary so a run shows cost beside speed.
+			if outFmt == report.FormatTable {
+				fmt.Fprintln(out)
+				return report.RenderResources(results, out)
+			}
+			return nil
 		},
 	}
 

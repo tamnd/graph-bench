@@ -47,11 +47,14 @@ const (
 // run or could not run that class (Capabilities returned false); the renderer
 // shows a blank or "n/a", not a zero.
 type Cell struct {
-	Metric     time.Duration // p99 (warm) -- the headline
-	P50        time.Duration // p50 (warm)
-	Throughput float64       // queries/second at the measured concurrency
-	Cold       time.Duration // p99 cold; zero when not measured (F5)
-	Empty      bool          // true when the engine did not run this class/query
+	Metric        time.Duration // p99 (warm) -- the headline
+	P50           time.Duration // p50 (warm)
+	Min           time.Duration // fastest warm sample
+	StdDev        time.Duration // warm latency spread
+	Throughput    float64       // queries/second at the measured concurrency
+	RowThroughput float64       // result rows/second at the measured concurrency
+	Cold          time.Duration // p99 cold; zero when not measured (F5)
+	Empty         bool          // true when the engine did not run this class/query
 }
 
 // Row is one engine in the matrix. Name is the engine's registered name,
@@ -168,7 +171,10 @@ func Assemble(results []EngineResult, mode ColumnMode, runConditions string) *Ma
 				} else {
 					c.Metric = warmStat.P99
 					c.P50 = warmStat.P50
+					c.Min = warmStat.Min
+					c.StdDev = warmStat.StdDev
 					c.Throughput = warmStat.Throughput
+					c.RowThroughput = warmStat.RowThroughput
 					if hasCold {
 						c.Cold = coldStat.P99
 					}
@@ -180,7 +186,10 @@ func Assemble(results []EngineResult, mode ColumnMode, runConditions string) *Ma
 				} else {
 					c.Metric = warmStat.P99
 					c.P50 = warmStat.P50
+					c.Min = warmStat.Min
+					c.StdDev = warmStat.StdDev
 					c.Throughput = warmStat.Throughput
+					c.RowThroughput = warmStat.RowThroughput
 				}
 			}
 			row.Cells[col] = c
