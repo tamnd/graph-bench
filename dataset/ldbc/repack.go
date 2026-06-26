@@ -1,6 +1,7 @@
 package ldbc
 
 import (
+	"compress/gzip"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -536,17 +537,35 @@ func forEachRow(entDir string, fn func(getter) error) error {
 		if err != nil {
 			return err
 		}
-		r := csv.NewReader(f)
+		// Higher scale factors ship the shards gzip-compressed (part-*.csv.gz);
+		// smaller ones leave them plain. Decompress transparently by suffix.
+		var src io.Reader = f
+		var gz *gzip.Reader
+		if strings.HasSuffix(p, ".gz") {
+			gz, err = gzip.NewReader(f)
+			if err != nil {
+				f.Close()
+				return fmt.Errorf("gunzip %s: %w", p, err)
+			}
+			src = gz
+		}
+		r := csv.NewReader(src)
 		r.Comma = '|'
 		r.FieldsPerRecord = -1
 		r.LazyQuotes = true
+		closeAll := func() {
+			if gz != nil {
+				gz.Close()
+			}
+			f.Close()
+		}
 		for {
 			rec, rerr := r.Read()
 			if rerr == io.EOF {
 				break
 			}
 			if rerr != nil {
-				f.Close()
+				closeAll()
 				return fmt.Errorf("read %s: %w", p, rerr)
 			}
 			if header == nil {
@@ -568,17 +587,20 @@ func forEachRow(entDir string, fn func(getter) error) error {
 				return row[i]
 			}
 			if err := fn(g); err != nil {
-				f.Close()
+				closeAll()
 				return err
 			}
 		}
-		f.Close()
+		closeAll()
 	}
 	return nil
 }
 
-// partFiles lists the part-*.csv shards of an entity directory in sorted name order,
-// skipping the dotfile .crc sidecars and the _SUCCESS marker Spark writes.
+// partFiles lists the part-* shards of an entity directory in sorted name order,
+// the plain .csv form smaller scale factors write and the gzip-compressed .csv.gz
+// form larger ones write, skipping the dotfile .crc sidecars and the _SUCCESS
+// marker Spark leaves. The sort is over the part numbers either way (the .gz suffix
+// does not reorder them), so the read order is deterministic.
 func partFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -590,7 +612,7 @@ func partFiles(dir string) ([]string, error) {
 		if e.IsDir() || strings.HasPrefix(n, ".") {
 			continue
 		}
-		if strings.HasPrefix(n, "part-") && strings.HasSuffix(n, ".csv") {
+		if strings.HasPrefix(n, "part-") && (strings.HasSuffix(n, ".csv") || strings.HasSuffix(n, ".csv.gz")) {
 			out = append(out, filepath.Join(dir, n))
 		}
 	}
