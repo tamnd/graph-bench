@@ -153,6 +153,20 @@ func newGateCmd() *cobra.Command {
 					if !ok {
 						continue
 					}
+					// Refuse to divide a service-time number by an open-model one:
+					// they are different quantities (the open-model number carries
+					// queueing the service-time number excludes), so a ratio across
+					// them is meaningless. Only guard when both are stamped; an
+					// unstamped older record (empty model) is let through for
+					// back-compat.
+					if er.Result.Latency != "" && b.Result.Latency != "" &&
+						er.Result.Latency != b.Result.Latency {
+						violations = append(violations, fmt.Sprintf(
+							"  %s latency-model mismatch: current=%s baseline=%s "+
+								"(cannot compare; re-run both at the same offered rate)",
+							er.Name, er.Result.Latency, b.Result.Latency))
+						continue
+					}
 					for cl, stat := range er.Result.Stats {
 						bstat, ok := b.Result.Stats[cl]
 						if !ok || bstat.P99 == 0 {

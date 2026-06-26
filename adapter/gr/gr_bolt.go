@@ -32,9 +32,9 @@ import (
 	"syscall"
 	"time"
 
+	neo4jlib "github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	grdb "github.com/tamnd/gr"
 	"github.com/tamnd/gr/loader"
-	neo4jlib "github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/tamnd/graph-bench/driver/bolt"
 	"github.com/tamnd/graph-bench/target"
 )

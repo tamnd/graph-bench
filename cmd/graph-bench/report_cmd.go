@@ -178,5 +178,14 @@ func conditionSummary(results []report.EngineResult) string {
 		}
 		s += "hw=" + c.Hardware
 	}
+	// Stamp which clock the latencies were measured against, so a reader of the
+	// table knows whether these are service times (count mode) or open-model
+	// latencies (rate-limited) and never compares the two across runs.
+	if model := results[0].Result.Latency; model != "" {
+		if s != "" {
+			s += " "
+		}
+		s += "latency=" + string(model)
+	}
 	return s
 }
