@@ -108,7 +108,7 @@ func q5() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q5"),
 	}
 }
 
@@ -141,7 +141,7 @@ func q7() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q7"),
 	}
 }
 
@@ -159,7 +159,7 @@ WHERE m1 <> m2
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q8"),
 	}
 }
 
@@ -186,21 +186,40 @@ RETURN count(*) AS cnt`,
 	}
 }
 
-// countRef returns a RefStrategy for LSQB count queries. Every LSQB query
-// returns a single integer row (count(*) AS cnt). Validation compares the
-// engine's returned count to the reference, with numeric coercion so an engine
+// countRef returns a RefStrategy for LSQB count queries with no independent
+// oracle yet. Every LSQB query returns a single integer row (count(*) AS cnt),
+// and validation compares the engine's count under numeric coercion so an engine
 // that returns the count as a float still validates.
 //
-// The Compute function is nil here (no independent oracle yet for cyclic counts
-// outside the engine). It is set to a CSV-based oracle in M7 proper when the
-// SNB data is available. For now validation is skipped when Compute is nil.
+// Compute is nil here, so validation is skipped. The tree-shaped joins (Q1-Q4)
+// and the dense composite queries (Q6, Q9) still carry no reference; they get a
+// CSV-based oracle once their counting routines are wired into CountOracle.
 func countRef() workload.RefStrategy {
 	return workload.RefStrategy{
 		Compare: workload.CompareSpec{
 			Ordered:   false,
 			CoerceNum: true, // some engines return count(*) as float64
 		},
-		// Compute is set per scale in the integration test once SNB data is present.
 		Compute: nil,
 	}
+}
+
+// countRefOracle returns a RefStrategy whose Compute runs the engine-independent
+// CountOracle for the given query id. It is used by the queries with a trusted
+// reference routine (the 3-clique, the four-cycle, the shared substructure), so
+// a run validates the engine's count against the CSV oracle rather than skipping
+// the check. The single count(*) AS cnt row is wrapped in the canonical answer.
+func countRefOracle(queryID string) workload.RefStrategy {
+	r := countRef()
+	r.Compute = func(ds target.Dataset, _ target.Params) (*target.Answer, error) {
+		n, err := CountOracle(queryID, ds)
+		if err != nil {
+			return nil, err
+		}
+		return &target.Answer{
+			Columns: []string{"cnt"},
+			Rows:    [][]target.Value{{n}},
+		}, nil
+	}
+	return r
 }
