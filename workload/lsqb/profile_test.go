@@ -163,6 +163,46 @@ func nodeCount(t *testing.T, drv target.Driver) int64 {
 	}
 }
 
+// TestExplainLSQBOnSF1 prints gr's plan for each selected LSQB query against the
+// cached SF1 database, with the cost model's estimated rows per operator. It runs
+// no query, so it is the cheap first look the profile-before-patching rule asks for
+// when a query is slow: the plan shape and the estimated cardinalities say whether
+// the join order is the problem before a multi-minute run confirms it. Filter with
+// GRAPH_BENCH_ONLY (e.g. GRAPH_BENCH_ONLY=q3).
+func TestExplainLSQBOnSF1(t *testing.T) {
+	if os.Getenv("GRAPH_BENCH_SF1") == "" {
+		t.Skip("set GRAPH_BENCH_SF1=1 to explain gr's LSQB plans on the real LDBC SF1 dataset")
+	}
+	ds := sf1Dataset(t)
+	pin, _ := ldbc.LoadPin("SF1")
+	wl, ok := workload.Lookup("lsqb")
+	if !ok {
+		t.Fatal("workload lsqb not registered")
+	}
+	drv, teardown := loadedGR(t, ds, pin.NodeCount)
+	defer teardown()
+
+	only := os.Getenv("GRAPH_BENCH_ONLY")
+	for _, q := range wl.Queries {
+		if only != "" && !strings.Contains(q.ID, only) {
+			continue
+		}
+		text := q.Texts[workload.Cypher]
+		res, err := drv.Run(context.Background(), target.Query{Text: "EXPLAIN " + text}, nil)
+		if err != nil {
+			t.Errorf("%s EXPLAIN: %v", q.ID, err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "\n=== %s plan ===\n", q.ID)
+		for res.Next() {
+			if line, ok := res.Row()[0].(string); ok {
+				fmt.Fprintln(os.Stderr, line)
+			}
+		}
+		_ = res.Close()
+	}
+}
+
 // TestProfileLSQBOnSF1 loads SF1 into gr (cached) and times every LSQB query,
 // writing a CPU profile of the query phase to lsqb-sf1-query.prof. It prints a
 // timing table so the slowest query is obvious. With GRAPH_BENCH_ORACLE set it
