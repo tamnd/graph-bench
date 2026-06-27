@@ -125,6 +125,7 @@ func nodeSources(ds target.Dataset) ([]loader.NodeSource, error) {
 	labels := sortedKeys(keysOfNodes(ds.Schema().Nodes))
 	srcs := make([]loader.NodeSource, 0, len(labels))
 	for _, label := range labels {
+		ns := ds.Schema().Nodes[label]
 		files, _, err := ds.NodeFiles(label)
 		if err != nil {
 			return nil, err
@@ -134,7 +135,19 @@ func nodeSources(ds target.Dataset) ([]loader.NodeSource, error) {
 		// element id and drops it, so every MATCH (n:Label {id: ...}) and n.id
 		// read comes back empty and the native algorithms have no id to report.
 		// createIDIndexes below stands up the index on the same property name.
-		srcs = append(srcs, loader.NodeSource{Label: label, IDProperty: ds.Schema().Nodes[label].ID, Files: files})
+		//
+		// But the loader stores the :ID it exposes as a string, and when the file
+		// already carries an explicit typed property of the schema id name (the LDBC
+		// repack emits an id:int column so {id: $param} matches the integer the
+		// queries pass), exposing :ID under that same name would write the key twice,
+		// the string clobbering the typed column. So skip IDProperty when an explicit
+		// id property exists and let the typed column be the sole id; the :ID is then
+		// consumed as gr's element id only, which is all the edge wiring needs.
+		idProp := ns.ID
+		if idProp != "" && hasProperty(ns, idProp) {
+			idProp = ""
+		}
+		srcs = append(srcs, loader.NodeSource{Label: label, IDProperty: idProp, Files: files})
 	}
 	return srcs, nil
 }
@@ -152,6 +165,18 @@ func relSources(ds target.Dataset) ([]loader.RelSource, error) {
 		srcs = append(srcs, loader.RelSource{Type: typ, Files: files})
 	}
 	return srcs, nil
+}
+
+// hasProperty reports whether a node schema lists a property column of the given
+// name, the signal that the file carries an explicit typed value under that name
+// rather than relying on the :ID exposure.
+func hasProperty(ns target.NodeSchema, name string) bool {
+	for _, c := range ns.Properties {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func keysOfNodes(m map[string]target.NodeSchema) []string {

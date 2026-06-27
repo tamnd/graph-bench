@@ -1,10 +1,9 @@
 {
   "name": "snb-sf1",
   "scale": "SF1",
-  "url": "https://repository.surfsara.nl/datasets/cwi/snb/files/interactive-v1-csv-composite-merged-fk/social_network-csv_composite-merged-fk-sf1.tar.zst",
-  "mirror": "https://ldbcouncil.org/ldbc_snb_datagen/social_network-csv_composite-merged-fk-sf1.tar.zst",
-  "archiveChecksum": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "checksum": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "nodeCount": 3181724,
-  "edgeCount": 17256769
+  "url": "https://datasets.ldbcouncil.org/bi-pre-audit/bi-sf1-composite-merged-fk.tar.zst",
+  "archiveChecksum": "sha256:a72938e244e6aa9d99632fcd5065e50c669ecf4d00f60bd162b266df4a7aba13",
+  "checksum": "sha256:fc3f468789a78fc12c951a85d0e879fa3b86a146ded5a6d9ad35a93ec9e50107",
+  "nodeCount": 2997352,
+  "edgeCount": 17196776
 }
