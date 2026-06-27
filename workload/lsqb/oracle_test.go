@@ -187,8 +187,19 @@ func TestCountOracleEndToEnd(t *testing.T) {
 		}
 	}
 
-	if _, err := CountOracle("lsqb-q1", ds); err == nil {
-		t.Error("lsqb-q1 should have no oracle yet")
+	// Every query id now has an oracle; one with no relevant edges in this fixture
+	// counts zero without error, and an unknown id still errors.
+	for _, id := range []string{"lsqb-q1", "lsqb-q2", "lsqb-q3", "lsqb-q4", "lsqb-q6", "lsqb-q9"} {
+		got, err := CountOracle(id, ds)
+		if err != nil {
+			t.Errorf("%s: %v", id, err)
+		}
+		if got != 0 {
+			t.Errorf("%s on the cyclic fixture: got %d, want 0", id, got)
+		}
+	}
+	if _, err := CountOracle("lsqb-q99", ds); err == nil {
+		t.Error("lsqb-q99 should have no oracle")
 	}
 }
 
