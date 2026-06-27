@@ -50,6 +50,13 @@ func (t *Target) loadCSV(ctx context.Context, drv *driver, ds target.Dataset) (t
 		}
 	}
 
+	// Size the build pager's pool to the input so the four-pass builder keeps the
+	// column and adjacency pages it is filling resident instead of evicting and
+	// re-faulting them (a quarter of the SF1 load went to pager eviction). The
+	// input CSV bytes are a proxy for the output size, close enough to size a pool
+	// that holds the working set under the same cap as the query pool.
+	buildPool := poolPagesFor(sourceBytes(nodeSrcs, relSrcs), poolCapBytesFrom(drv.config))
+
 	start := time.Now()
 	l := loader.New(loader.Options{
 		Nodes:         nodeSrcs,
@@ -60,14 +67,17 @@ func (t *Target) loadCSV(ctx context.Context, drv *driver, ds target.Dataset) (t
 		// A dangling relationship endpoint is dropped rather than failing the
 		// whole load, matching the loader's own default and the RMAT generator's
 		// kept-duplicates policy where an endpoint may be an isolated id.
-		OnDangling: loader.Skip,
+		OnDangling:   loader.Skip,
+		MaxPoolPages: buildPool,
 	})
 	if err := l.Run(drv.path); err != nil {
 		return target.LoadStats{}, fmt.Errorf("gr: bulk load %q: %w", ds.Name(), err)
 	}
 	dur := time.Since(start)
 
-	db, err := grdb.Open(drv.path, grdb.Options{})
+	// Reopen with a pool sized to the database that was just built (the file now
+	// exists at full size), so the queries that follow read from memory.
+	db, err := grdb.Open(drv.path, grdb.Options{MaxPoolPages: configuredPoolPages(drv.config, drv.path)})
 	if err != nil {
 		return target.LoadStats{}, fmt.Errorf("gr: reopen after bulk load: %w", err)
 	}
@@ -165,6 +175,27 @@ func relSources(ds target.Dataset) ([]loader.RelSource, error) {
 		srcs = append(srcs, loader.RelSource{Type: typ, Files: files})
 	}
 	return srcs, nil
+}
+
+// sourceBytes sums the on-disk size of every node and relationship input file, the
+// proxy the loader's pool is sized against. A file that cannot be stat'd is skipped
+// rather than failing the load; an undercount only sizes the pool a little small.
+func sourceBytes(nodes []loader.NodeSource, rels []loader.RelSource) int64 {
+	var total int64
+	add := func(files []string) {
+		for _, f := range files {
+			if fi, err := os.Stat(f); err == nil {
+				total += fi.Size()
+			}
+		}
+	}
+	for _, n := range nodes {
+		add(n.Files)
+	}
+	for _, r := range rels {
+		add(r.Files)
+	}
+	return total
 }
 
 // hasProperty reports whether a node schema lists a property column of the given
