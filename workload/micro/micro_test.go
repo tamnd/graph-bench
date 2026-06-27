@@ -279,8 +279,10 @@ func TestTriangleERPositive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadGraph: %v", err)
 	}
-	if got := g.DirectedTriangles(); got != n {
-		t.Errorf("oracle DirectedTriangles = %d, reference returned %d", got, n)
+	// The reference returns count(*), which is 3 matches per distinct directed
+	// triangle (one per rotation), so it is 3x the distinct oracle count.
+	if got := 3 * g.DirectedTriangles(); got != n {
+		t.Errorf("oracle 3*DirectedTriangles = %d, reference returned %d", got, n)
 	}
 }
 

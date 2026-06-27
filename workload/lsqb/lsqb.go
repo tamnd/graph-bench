@@ -44,7 +44,7 @@ func q1() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil), // no parameters: counts the whole graph
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q1"),
 	}
 }
 
@@ -60,7 +60,7 @@ func q2() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q2"),
 	}
 }
 
@@ -77,7 +77,7 @@ func q3() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q3"),
 	}
 }
 
@@ -93,7 +93,7 @@ func q4() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q4"),
 	}
 }
 
@@ -108,7 +108,7 @@ func q5() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q5"),
 	}
 }
 
@@ -126,7 +126,7 @@ func q6() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q6"),
 	}
 }
 
@@ -141,7 +141,7 @@ func q7() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q7"),
 	}
 }
 
@@ -159,7 +159,7 @@ WHERE m1 <> m2
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q8"),
 	}
 }
 
@@ -182,25 +182,40 @@ func q9() *workload.WorkloadQuery {
 RETURN count(*) AS cnt`,
 		},
 		Params:    workload.NewFixed(nil),
-		Reference: countRef(),
+		Reference: countRefOracle("lsqb-q9"),
 	}
 }
 
-// countRef returns a RefStrategy for LSQB count queries. Every LSQB query
-// returns a single integer row (count(*) AS cnt). Validation compares the
-// engine's returned count to the reference, with numeric coercion so an engine
-// that returns the count as a float still validates.
-//
-// The Compute function is nil here (no independent oracle yet for cyclic counts
-// outside the engine). It is set to a CSV-based oracle in M7 proper when the
-// SNB data is available. For now validation is skipped when Compute is nil.
+// countRef returns the base RefStrategy shared by every LSQB count query: each
+// returns a single integer row (count(*) AS cnt), compared under numeric
+// coercion so an engine that returns the count as a float still validates. Its
+// Compute is nil (validation skipped); countRefOracle layers the oracle on top.
+// Every LSQB query now wires countRefOracle, so none ship without a reference.
 func countRef() workload.RefStrategy {
 	return workload.RefStrategy{
 		Compare: workload.CompareSpec{
 			Ordered:   false,
 			CoerceNum: true, // some engines return count(*) as float64
 		},
-		// Compute is set per scale in the integration test once SNB data is present.
 		Compute: nil,
 	}
+}
+
+// countRefOracle returns a RefStrategy whose Compute runs the engine-independent
+// CountOracle for the given query id. Every LSQB query wires it, so a run
+// validates the engine's count against the CSV oracle rather than skipping the
+// check. The single count(*) AS cnt row is wrapped in the canonical answer.
+func countRefOracle(queryID string) workload.RefStrategy {
+	r := countRef()
+	r.Compute = func(ds target.Dataset, _ target.Params) (*target.Answer, error) {
+		n, err := CountOracle(queryID, ds)
+		if err != nil {
+			return nil, err
+		}
+		return &target.Answer{
+			Columns: []string{"cnt"},
+			Rows:    [][]target.Value{{n}},
+		}, nil
+	}
+	return r
 }
