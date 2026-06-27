@@ -392,7 +392,10 @@ var triangleDirectedQuery = &workload.WorkloadQuery{
 			if err != nil {
 				return nil, fmt.Errorf("micro-triangle reference: %w", err)
 			}
-			n := g.DirectedTriangles()
+			// count(*) over the directed 3-cycle pattern has no ordering
+			// constraint, so each distinct directed triangle is matched once per
+			// rotation (3 times: a->b->c, b->c->a, c->a->b). Verified against gr.
+			n := 3 * g.DirectedTriangles()
 			return &target.Answer{
 				Columns: []string{"n"},
 				Rows:    [][]target.Value{{n}},
