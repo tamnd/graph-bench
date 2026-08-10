@@ -315,7 +315,7 @@ func Run(ctx context.Context, sess engine.Session, ops []Op, opt Options) Result
 			// dispatch is the moment the pool admits this op. In count mode the
 			// queue ahead of it is not the engine's latency, so we start the clock
 			// here; in open-model mode we start from the intended arrival below.
-			dispatch := time.Now()
+			dispatch := tick()
 			res, err := sess.Exec(qctx, o.Op)
 			if err == nil {
 				// Drain before the clock stops so serialization cost is inside
@@ -323,7 +323,7 @@ func Run(ctx context.Context, sess engine.Session, ops []Op, opt Options) Result
 				s.Rows = drainAndClose(res)
 			}
 			if serviceTime {
-				s.Latency = time.Since(dispatch)
+				s.Latency = dispatch.elapsed()
 			} else {
 				s.Latency = time.Since(intended)
 			}

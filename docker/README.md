@@ -37,7 +37,7 @@ The Bolt adapters register under `-tags bolt`. Neo4j Community refuses a passwor
 
 ```
 NEO4J_PASS=benchbench go run -tags bolt ./cmd/graph-bench \
-    run --workload micro-grid --engines neo4j,memgraph --count 30
+    run --workload micro-read --engines neo4j,memgraph --count 30
 ```
 
 Memgraph ships with auth off, so its user and password default to empty.

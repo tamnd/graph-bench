@@ -45,13 +45,13 @@ func RunAnalytics(ctx context.Context, sess engine.Session, ops []engine.Op, rep
 			if err := ctx.Err(); err != nil {
 				return out, fmt.Errorf("analytics %s rep %d: %w", op.QueryID, r+1, err)
 			}
-			start := time.Now()
+			start := tick()
 			res, err := sess.Exec(ctx, op)
 			if err != nil {
 				return out, fmt.Errorf("analytics %s rep %d: %w", op.QueryID, r+1, err)
 			}
 			rows := drainAndClose(res)
-			d := time.Since(start)
+			d := start.elapsed()
 			if discardFirst && r == 0 {
 				continue
 			}

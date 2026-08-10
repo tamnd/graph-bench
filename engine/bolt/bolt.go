@@ -121,6 +121,28 @@ func (p *Pool) Run(ctx context.Context, op engine.Op) (engine.Result, error) {
 	return &streamResult{ctx: ctx, res: res, sess: sess}, nil
 }
 
+// RunDDL executes one schema statement in an autocommit write session
+// and drains it. Memgraph rejects index and constraint DDL inside an
+// explicit transaction ("Index manipulation is not allowed in
+// multicommand transactions"), so schema statements cannot go through
+// Run's write path.
+func (p *Pool) RunDDL(ctx context.Context, text string) error {
+	cfg := neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite}
+	if p.db != "" {
+		cfg.DatabaseName = p.db
+	}
+	sess := p.driver.NewSession(ctx, cfg)
+	defer func() { _ = sess.Close(ctx) }()
+	res, err := sess.Run(ctx, text, nil)
+	if err != nil {
+		return fmt.Errorf("bolt: run ddl: %w", err)
+	}
+	if _, err := res.Consume(ctx); err != nil {
+		return fmt.Errorf("bolt: run ddl: %w", err)
+	}
+	return nil
+}
+
 // Begin opens an explicit transaction. The returned Tx implements
 // engine.Tx; Commit/Rollback release the underlying session.
 func (p *Pool) Begin(ctx context.Context, mode engine.AccessMode) (*Tx, error) {
