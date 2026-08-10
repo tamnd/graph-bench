@@ -3,7 +3,7 @@ package gen
 // PRNG is the one source of randomness a generator is allowed to use. It is a
 // SplitMix64 generator implemented in this package on purpose: the standard
 // library's math/rand stream is explicitly not guaranteed stable across Go
-// versions, and bit-reproducibility (spec doc 04 section 3) requires a stream
+// versions, and bit-reproducibility (spec 05 §2) requires a stream
 // that is fixed forever. SplitMix64 is small, fast, well-distributed, and its
 // output for a given seed is a documented constant, so a dataset generated on
 // one machine and Go version reproduces byte-for-byte on another.

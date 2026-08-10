@@ -2,96 +2,60 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/tamnd/graph-bench/report"
 )
 
-// newReportCmd re-renders a previously-recorded JSON result or a lineage tree
-// in any of the four output formats. It reads from a file (--file) or from the
-// lineage tree (--lineage), with optional filters for workload, scale, and
-// engine. The --latest flag keeps only the newest record per engine when reading
-// from the lineage. See doc 08 section 1.2 for the verb's contract.
+// newReportCmd builds the report verb: it re-renders stored schema-3 result
+// documents (or a single file) as a comparison matrix in table, markdown, or
+// CSV form. Readers accept schema-2 (v1) records for continuity (spec 09 §2).
 func newReportCmd() *cobra.Command {
 	var (
 		inFile   string
-		lineage  string
-		workload string
+		dir      string
+		wlFilter string
 		scale    string
-		engine   string
+		engineF  string
 		latest   bool
 		format   string
 		outFile  string
-		mode     string
 	)
-
 	cmd := &cobra.Command{
 		Use:   "report",
-		Short: "Render a recorded run or comparison in a chosen format",
-		Long: "report reads a JSON results file (--file) or a lineage tree (--lineage) " +
-			"and renders it as a terminal table, Markdown, CSV, or JSON. " +
-			"When reading from the lineage you can filter by --workload, --scale, and --engine, " +
-			"and --latest keeps only the newest record per engine. " +
-			"--mode selects between class-level columns (class) and per-query columns (query).",
+		Short: "Render stored results as a comparison matrix",
+		Long: "report reads one JSON result document (--file) or a lineage directory " +
+			"(--results, filtered by --workload/--scale/--engine) and renders the " +
+			"matrix: class rollups first, per-query detail after, SKIP/FAIL cells " +
+			"with reasons, fidelity footer. --latest keeps only the newest record " +
+			"per engine.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Resolve the column mode.
-			var colMode report.ColumnMode
-			switch mode {
-			case "class", "":
-				colMode = report.ColumnClass
-			case "query":
-				colMode = report.ColumnQuery
-			default:
-				return fmt.Errorf("report: --mode must be 'class' or 'query', got %q", mode)
-			}
-
-			// Resolve the output format.
-			var fmt_ report.Format
-			switch format {
-			case "table", "":
-				fmt_ = report.FormatTable
-			case "json":
-				fmt_ = report.FormatJSON
-			case "markdown", "md":
-				fmt_ = report.FormatMarkdown
-			case "csv":
-				fmt_ = report.FormatCSV
-			default:
-				return fmt.Errorf("report: --format must be table|json|markdown|csv, got %q", format)
-			}
-
-			// Load the results.
-			var results []report.EngineResult
-			var loadErr error
+			var docs []*report.Document
 			if inFile != "" {
-				f, err := os.Open(inFile)
+				doc, err := report.Read(inFile)
 				if err != nil {
-					return fmt.Errorf("report: open %s: %w", inFile, err)
+					return fmt.Errorf("report: %w", err)
 				}
-				defer f.Close()
-				results, loadErr = report.ParseJSON(f)
+				docs = []*report.Document{doc}
 			} else {
-				base := lineage
-				if base == "" {
-					base = "results"
+				var err error
+				docs, err = readResults(dir, wlFilter, scale, engineF)
+				if err != nil {
+					return fmt.Errorf("report: %w", err)
 				}
-				results, loadErr = report.ReadLineage(base, workload, scale, engine)
 			}
-			if loadErr != nil {
-				return fmt.Errorf("report: load results: %w", loadErr)
-			}
-			if len(results) == 0 {
-				return fmt.Errorf("report: no results matched the given filters")
-			}
-
-			// Apply --latest: keep only the newest record per engine.
 			if latest {
-				results = latestPerEngine(results)
+				docs = latestPerEngine(docs)
 			}
-
-			// Open the output writer.
+			if len(docs) == 0 {
+				return fmt.Errorf("report: no results matched")
+			}
 			out := cmd.OutOrStdout()
 			if outFile != "" {
 				f, err := os.Create(outFile)
@@ -101,91 +65,82 @@ func newReportCmd() *cobra.Command {
 				defer f.Close()
 				out = f
 			}
-
-			// JSON is a special path that skips the matrix assembly.
-			if fmt_ == report.FormatJSON {
-				return report.RenderJSON(results, out)
-			}
-
-			// Build run conditions string from the first result's condition.
-			conditions := conditionSummary(results)
-
-			// Assemble and render.
-			m := report.Assemble(results, colMode, conditions)
-			return report.Render(m, fmt_, out)
+			return renderDocs(out, docs, format)
 		},
 	}
-
 	f := cmd.Flags()
-	f.StringVar(&inFile, "file", "", "JSON results file to render (from 'run --format json')")
-	f.StringVar(&lineage, "lineage", "", "lineage tree root (default: results/)")
-	f.StringVar(&workload, "workload", "", "filter by workload name")
-	f.StringVar(&scale, "scale", "", "filter by scale factor")
-	f.StringVar(&engine, "engine", "", "filter by engine name")
-	f.BoolVar(&latest, "latest", false, "keep only the newest record per engine")
-	f.StringVar(&format, "format", "table", "output format: table|json|markdown|csv")
+	f.StringVar(&inFile, "file", "", "single JSON result document to render")
+	f.StringVar(&dir, "results", "results", "lineage directory to read")
+	f.StringVar(&wlFilter, "workload", "", "filter by workload name")
+	f.StringVar(&scale, "scale", "", "filter by scale label")
+	f.StringVar(&engineF, "engine", "", "filter by engine name")
+	f.BoolVar(&latest, "latest", true, "keep only the newest record per engine")
+	f.StringVar(&format, "format", "table", "output format: table|markdown|csv")
 	f.StringVar(&outFile, "out", "", "output file (default: stdout)")
-	f.StringVar(&mode, "mode", "class", "column mode: class|query")
 	return cmd
 }
 
-// latestPerEngine returns one result per engine, keeping the one with the
-// latest Condition.Timestamp. When timestamps are equal (or zero) the last
-// one in slice order wins.
-func latestPerEngine(results []report.EngineResult) []report.EngineResult {
-	seen := map[string]int{} // engine name -> index in out
-	var out []report.EngineResult
-	for _, r := range results {
-		name := r.Name
+// renderDocs assembles the matrix and renders it in the chosen format.
+func renderDocs(out io.Writer, docs []*report.Document, format string) error {
+	m := report.NewMatrix(docs)
+	switch format {
+	case "table", "":
+		report.RenderTable(out, m)
+		return nil
+	case "markdown", "md":
+		report.RenderMarkdown(out, m)
+		return nil
+	case "csv":
+		return report.RenderCSV(out, m)
+	default:
+		return fmt.Errorf("--format must be table|markdown|csv, got %q", format)
+	}
+}
+
+// readResults walks a lineage directory and reads every parseable result
+// document, applying the given filters. Unparseable files are skipped (the
+// lineage may hold v1 records newer readers do not know).
+func readResults(dir, wl, scale, eng string) ([]*report.Document, error) {
+	var docs []*report.Document
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil //nolint:nilerr // missing subtrees are not fatal to a scan
+		}
+		doc, rerr := report.Read(path)
+		if rerr != nil {
+			return nil
+		}
+		if wl != "" && doc.Workload != wl {
+			return nil
+		}
+		if scale != "" && !strings.EqualFold(doc.Condition.Scale, scale) {
+			return nil
+		}
+		if eng != "" && doc.Condition.Engine != eng {
+			return nil
+		}
+		docs = append(docs, doc)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return docs, nil
+}
+
+// latestPerEngine keeps the newest document per engine name, by the
+// Condition's StartedAt stamp.
+func latestPerEngine(docs []*report.Document) []*report.Document {
+	seen := map[string]int{}
+	var out []*report.Document
+	for _, d := range docs {
+		name := d.Condition.Engine
 		if idx, ok := seen[name]; !ok {
 			seen[name] = len(out)
-			out = append(out, r)
-		} else {
-			if !r.Result.Condition.Timestamp.Before(out[idx].Result.Condition.Timestamp) {
-				out[idx] = r
-			}
+			out = append(out, d)
+		} else if !d.Condition.StartedAt.Before(out[idx].Condition.StartedAt) {
+			out[idx] = d
 		}
 	}
 	return out
-}
-
-// conditionSummary builds a one-line human-readable conditions string from the
-// first result's Condition stamp. Used in table and Markdown headers.
-func conditionSummary(results []report.EngineResult) string {
-	if len(results) == 0 {
-		return ""
-	}
-	c := results[0].Result.Condition
-	s := ""
-	if c.Workload != "" {
-		s += "workload=" + c.Workload
-	}
-	if c.Dataset != "" {
-		if s != "" {
-			s += " "
-		}
-		s += "dataset=" + c.Dataset
-	}
-	if c.Scale != "" {
-		if s != "" {
-			s += " "
-		}
-		s += "scale=" + c.Scale
-	}
-	if c.Hardware != "" {
-		if s != "" {
-			s += " "
-		}
-		s += "hw=" + c.Hardware
-	}
-	// Stamp which clock the latencies were measured against, so a reader of the
-	// table knows whether these are service times (count mode) or open-model
-	// latencies (rate-limited) and never compares the two across runs.
-	if model := results[0].Result.Latency; model != "" {
-		if s != "" {
-			s += " "
-		}
-		s += "latency=" + string(model)
-	}
-	return s
 }

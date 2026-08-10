@@ -1,49 +1,69 @@
-package measure_test
+package measure
 
 import (
-	"context"
 	"testing"
 	"time"
 
-	"github.com/tamnd/graph-bench/measure"
-	"github.com/tamnd/graph-bench/target"
-	"github.com/tamnd/graph-bench/workload"
+	"github.com/tamnd/graph-bench/engine"
 )
 
-// makeTestWorkload builds a minimal workload with a Mix for testing.
-func makeTestWorkload(ids []string, weights map[string]float64) *workload.Workload {
-	queries := make([]*workload.WorkloadQuery, len(ids))
-	for i, id := range ids {
-		queries[i] = &workload.WorkloadQuery{
-			ID:    id,
-			Class: target.PointRead,
-			Texts: map[workload.Dialect]string{
-				workload.Cypher: "RETURN 1",
-			},
-			Params: workload.NewFixed(nil),
-			Reference: workload.RefStrategy{
-				Compare: workload.CompareSpec{},
-			},
+// mixedPools builds a perQuery map with n distinct ready-made ops per id, so
+// tests can check both interleaving and op cycling.
+func mixedPools(ids []string, n int) map[string][]engine.Op {
+	pools := make(map[string][]engine.Op, len(ids))
+	for _, id := range ids {
+		ops := make([]engine.Op, n)
+		for i := range ops {
+			ops[i] = engine.Op{QueryID: id, Class: engine.PointRead, Dialect: engine.Cypher, Text: "RETURN 1"}
+		}
+		pools[id] = ops
+	}
+	return pools
+}
+
+// TestBuildMixedScheduleDeterministic proves two builds with the same inputs
+// and seed produce identical schedules — the seed is a stamp field (MixSeed),
+// so the schedule must be a pure function of it (spec 08 §7).
+func TestBuildMixedScheduleDeterministic(t *testing.T) {
+	ids := []string{"q1", "q2", "q3"}
+	weights := map[string]float64{"q1": 2.0, "q2": 1.0, "q3": 0.5}
+	pools := mixedPools(ids, 4)
+
+	a := BuildMixedSchedule(pools, weights, 42, 200, 100, 0)
+	b := BuildMixedSchedule(pools, weights, 42, 200, 100, 0)
+
+	if len(a) != len(b) {
+		t.Fatalf("lengths differ: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i].Op.QueryID != b[i].Op.QueryID || a[i].Offset != b[i].Offset {
+			t.Fatalf("schedules diverge at %d: %q@%v vs %q@%v",
+				i, a[i].Op.QueryID, a[i].Offset, b[i].Op.QueryID, b[i].Offset)
 		}
 	}
-	return &workload.Workload{
-		Name:    "test",
-		Queries: queries,
-		Mix:     weights,
+
+	// A different seed should produce a different interleave (overwhelmingly
+	// likely over 200 draws from 3 queries).
+	c := BuildMixedSchedule(pools, weights, 43, 200, 100, 0)
+	same := true
+	for i := range a {
+		if a[i].Op.QueryID != c[i].Op.QueryID {
+			same = false
+			break
+		}
+	}
+	if same {
+		t.Error("seed 42 and seed 43 produced identical interleaves")
 	}
 }
 
-// TestBuildMixedScheduleCount proves the schedule contains approximately
-// totalCount ops, interleaved from queries in proportion to their Mix weights.
+// TestBuildMixedScheduleCount proves the schedule contains exactly totalCount ops.
 func TestBuildMixedScheduleCount(t *testing.T) {
 	ids := []string{"q1", "q2", "q3"}
 	weights := map[string]float64{"q1": 2.0, "q2": 1.0, "q3": 1.0}
-	wl := makeTestWorkload(ids, weights)
-	totalCount := 100
-	ops := measure.BuildMixedSchedule(wl, workload.Cypher, totalCount, 10, 0)
-	// Rounding may push total off by a few; allow ±len(queries).
-	if diff := len(ops) - totalCount; diff < -3 || diff > 3 {
-		t.Errorf("op count=%d, want ~%d (delta=%d)", len(ops), totalCount, diff)
+	ops := BuildMixedSchedule(mixedPools(ids, 2), weights, 1, 100, 10, 0)
+	if len(ops) != 100 {
+		t.Errorf("op count=%d, want 100", len(ops))
 	}
 }
 
@@ -51,45 +71,42 @@ func TestBuildMixedScheduleCount(t *testing.T) {
 func TestBuildMixedScheduleQueryIDs(t *testing.T) {
 	ids := []string{"qa", "qb"}
 	weights := map[string]float64{"qa": 1.0, "qb": 1.0}
-	wl := makeTestWorkload(ids, weights)
-	ops := measure.BuildMixedSchedule(wl, workload.Cypher, 20, 5, 0)
+	ops := BuildMixedSchedule(mixedPools(ids, 3), weights, 7, 20, 5, 0)
 	for _, op := range ops {
-		if op.QueryID != "qa" && op.QueryID != "qb" {
-			t.Errorf("op.QueryID=%q not in {qa, qb}", op.QueryID)
+		if op.Op.QueryID != "qa" && op.Op.QueryID != "qb" {
+			t.Errorf("op.Op.QueryID=%q not in {qa, qb}", op.Op.QueryID)
 		}
 	}
 }
 
 // TestBuildMixedScheduleWeightedRatio proves that with weights 3:1 the higher
-// weighted query appears roughly 3x more often.
+// weighted query appears roughly 3x more often. The schedule is deterministic
+// for a fixed seed, so the tolerance only absorbs sampling noise at n=400.
 func TestBuildMixedScheduleWeightedRatio(t *testing.T) {
 	ids := []string{"heavy", "light"}
 	weights := map[string]float64{"heavy": 3.0, "light": 1.0}
-	wl := makeTestWorkload(ids, weights)
-	ops := measure.BuildMixedSchedule(wl, workload.Cypher, 400, 50, 0)
+	ops := BuildMixedSchedule(mixedPools(ids, 5), weights, 42, 400, 50, 0)
 	var heavyCount, lightCount int
 	for _, op := range ops {
-		switch op.QueryID {
+		switch op.Op.QueryID {
 		case "heavy":
 			heavyCount++
 		case "light":
 			lightCount++
 		}
 	}
-	// Allow 10% tolerance on the 3:1 ratio.
 	ratio := float64(heavyCount) / float64(lightCount)
-	if ratio < 2.7 || ratio > 3.3 {
-		t.Errorf("heavy:light ratio=%.2f, want ~3.0 (±10%%)", ratio)
+	if ratio < 2.4 || ratio > 3.7 {
+		t.Errorf("heavy:light ratio=%.2f (%d:%d), want ~3.0", ratio, heavyCount, lightCount)
 	}
 }
 
-// TestBuildMixedScheduleOffsets proves Offset values are set and strictly
-// monotonically non-decreasing (the schedule is time-ordered).
+// TestBuildMixedScheduleOffsets proves Offset values are set and monotonically
+// non-decreasing (the schedule is time-ordered).
 func TestBuildMixedScheduleOffsets(t *testing.T) {
 	ids := []string{"q1", "q2"}
 	weights := map[string]float64{"q1": 1.0, "q2": 1.0}
-	wl := makeTestWorkload(ids, weights)
-	ops := measure.BuildMixedSchedule(wl, workload.Cypher, 20, 10, 0)
+	ops := BuildMixedSchedule(mixedPools(ids, 2), weights, 3, 20, 10, 0)
 	if len(ops) == 0 {
 		t.Fatal("no ops returned")
 	}
@@ -103,88 +120,57 @@ func TestBuildMixedScheduleOffsets(t *testing.T) {
 	}
 }
 
-// TestBuildMixedScheduleEmptyMix proves an empty Mix returns nil.
-func TestBuildMixedScheduleEmptyMix(t *testing.T) {
-	wl := &workload.Workload{Name: "empty", Mix: nil}
-	ops := measure.BuildMixedSchedule(wl, workload.Cypher, 100, 10, 0)
-	if ops != nil {
-		t.Errorf("expected nil for empty Mix, got %d ops", len(ops))
+// TestBuildMixedScheduleEmptyWeights proves empty weights or ids with no ops
+// return nil rather than panicking.
+func TestBuildMixedScheduleEmptyWeights(t *testing.T) {
+	if ops := BuildMixedSchedule(nil, nil, 1, 100, 10, 0); ops != nil {
+		t.Errorf("expected nil for empty weights, got %d ops", len(ops))
+	}
+	// Weights present but no ops behind them.
+	weights := map[string]float64{"ghost": 1.0}
+	if ops := BuildMixedSchedule(map[string][]engine.Op{}, weights, 1, 100, 10, 0); ops != nil {
+		t.Errorf("expected nil for weights without ops, got %d ops", len(ops))
 	}
 }
 
-// TestBuildIsolatedOpsCount proves the op count equals the requested count.
-func TestBuildIsolatedOpsCount(t *testing.T) {
-	q := &workload.WorkloadQuery{
-		ID:     "iso-q",
-		Class:  target.Traversal,
-		Texts:  map[workload.Dialect]string{workload.Cypher: "RETURN 2"},
-		Params: workload.NewFixed(nil),
+// TestBuildMixedScheduleCyclesOps proves that when the draw count exceeds the
+// ops provided for a query, its ops are reused in order (cycling), so a small
+// parameter pool still fills a long schedule.
+func TestBuildMixedScheduleCyclesOps(t *testing.T) {
+	pools := map[string][]engine.Op{
+		"only": {
+			{QueryID: "only", Text: "A"},
+			{QueryID: "only", Text: "B"},
+		},
 	}
-	ops := measure.BuildIsolatedOps(q, workload.Cypher, 50)
-	if len(ops) != 50 {
-		t.Errorf("len(ops)=%d, want 50", len(ops))
+	weights := map[string]float64{"only": 1.0}
+	ops := BuildMixedSchedule(pools, weights, 5, 6, 0, 0)
+	if len(ops) != 6 {
+		t.Fatalf("len=%d, want 6", len(ops))
 	}
-}
-
-// TestBuildIsolatedOpsQueryID proves every op carries the query's ID.
-func TestBuildIsolatedOpsQueryID(t *testing.T) {
-	q := &workload.WorkloadQuery{
-		ID:     "iso-test",
-		Class:  target.Traversal,
-		Texts:  map[workload.Dialect]string{workload.Cypher: "RETURN 1"},
-		Params: workload.NewFixed(nil),
-	}
-	ops := measure.BuildIsolatedOps(q, workload.Cypher, 10)
-	for _, op := range ops {
-		if op.QueryID != "iso-test" {
-			t.Errorf("op.QueryID=%q, want iso-test", op.QueryID)
+	want := []string{"A", "B", "A", "B", "A", "B"}
+	for i, op := range ops {
+		if op.Op.Text != want[i] {
+			t.Errorf("ops[%d].Text=%q, want %q (in-order cycling)", i, op.Op.Text, want[i])
 		}
-		if op.Class != target.Traversal {
-			t.Errorf("op.Class=%v, want Traversal", op.Class)
-		}
-	}
-}
-
-// TestByQueryPopulated proves that running ops with QueryID set populates
-// Result.ByQuery.
-func TestByQueryPopulated(t *testing.T) {
-	d := &echoDriver{}
-	ops := []measure.Op{
-		{Class: target.PointRead, QueryID: "q-alpha", Query: target.Query{Text: "RETURN 1"}, Params: nil},
-		{Class: target.PointRead, QueryID: "q-beta", Query: target.Query{Text: "RETURN 2"}, Params: nil},
-		{Class: target.PointRead, QueryID: "q-alpha", Query: target.Query{Text: "RETURN 1"}, Params: nil},
-	}
-	ops = measure.BuildSchedule(ops, 10, 0)
-	res := measure.Run(t.Context(), d, ops, measure.Options{Concurrency: 1, Count: len(ops)})
-	if res.ByQuery == nil {
-		t.Fatal("ByQuery is nil; QueryID was set on ops")
-	}
-	if _, ok := res.ByQuery["q-alpha"]; !ok {
-		t.Error("ByQuery missing q-alpha")
-	}
-	if _, ok := res.ByQuery["q-beta"]; !ok {
-		t.Error("ByQuery missing q-beta")
-	}
-	if res.ByQuery["q-alpha"].Count != 2 {
-		t.Errorf("q-alpha Count=%d, want 2", res.ByQuery["q-alpha"].Count)
 	}
 }
 
 // TestMixedResultInterference proves Interference() returns a ratio based on
 // the isolated vs mixed p99.
 func TestMixedResultInterference(t *testing.T) {
-	isoResult := measure.Result{
-		ByQuery: map[string]measure.Stat{
-			"q1": {Class: target.PointRead, Count: 10, P99: 2 * time.Millisecond},
+	isoResult := Result{
+		ByQuery: map[string]Stat{
+			"q1": {Class: engine.PointRead, Count: 10, P99: 2 * time.Millisecond},
 		},
 	}
-	mixResult := measure.MixedResult{
-		Result: measure.Result{
-			ByQuery: map[string]measure.Stat{
-				"q1": {Class: target.PointRead, Count: 10, P99: 6 * time.Millisecond},
+	mixResult := MixedResult{
+		Result: Result{
+			ByQuery: map[string]Stat{
+				"q1": {Class: engine.PointRead, Count: 10, P99: 6 * time.Millisecond},
 			},
 		},
-		IsolatedByQuery: map[string]measure.Result{
+		IsolatedByQuery: map[string]Result{
 			"q1": isoResult,
 		},
 	}
@@ -198,9 +184,9 @@ func TestMixedResultInterference(t *testing.T) {
 // TestMixedResultInterferenceMissing proves Interference() returns 0 when the
 // isolated result is not set.
 func TestMixedResultInterferenceMissing(t *testing.T) {
-	mr := measure.MixedResult{
-		Result: measure.Result{
-			ByQuery: map[string]measure.Stat{
+	mr := MixedResult{
+		Result: Result{
+			ByQuery: map[string]Stat{
 				"q1": {P99: 5 * time.Millisecond},
 			},
 		},
@@ -209,22 +195,3 @@ func TestMixedResultInterferenceMissing(t *testing.T) {
 		t.Errorf("Interference=%f, want 0 (no isolated result)", f)
 	}
 }
-
-// echoDriver is a trivial driver that immediately returns an empty result.
-type echoDriver struct{}
-
-func (d *echoDriver) Run(_ context.Context, _ target.Query, _ target.Params) (target.Result, error) {
-	return &emptyResult{}, nil
-}
-func (d *echoDriver) Begin(_ context.Context, _ target.AccessMode) (target.Tx, error) {
-	return nil, nil
-}
-func (d *echoDriver) Close(_ context.Context) error { return nil }
-
-type emptyResult struct{ done bool }
-
-func (r *emptyResult) Columns() []string   { return nil }
-func (r *emptyResult) Next() bool          { return false }
-func (r *emptyResult) Row() []target.Value { return nil }
-func (r *emptyResult) Err() error          { return nil }
-func (r *emptyResult) Close() error        { return nil }

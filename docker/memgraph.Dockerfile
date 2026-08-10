@@ -8,7 +8,8 @@
 # memgraph-mage carries the MAGE algorithm library, so the analytical workloads
 # that call graph procedures (pagerank, weakly connected components) have a
 # procedure surface to hit instead of a blank cell.
-FROM memgraph/memgraph-mage:3.7.2
+# Pinned per engine/pins.go; keep in lockstep with that table.
+FROM memgraph/memgraph-mage:3.10.0
 
 # Bolt. Compose maps this to host 7688 so it does not collide with Neo4j on 7687,
 # and the adapter is pointed at MEMGRAPH_URI=bolt://host:7688.

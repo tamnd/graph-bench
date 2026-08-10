@@ -1,16 +1,17 @@
-// Package setup starts and stops container-hosted graph engines for the Bolt
-// plane. It is the only package that calls Docker (through the docker CLI or
-// daemon API). The rest of the harness speaks Target/Driver; setup is how a
-// Target gets its server.
+// Package setup starts and stops container-hosted graph engines for the
+// Bolt plane. It is the only package that calls Docker. The rest of the
+// harness speaks the engine SPI; setup is how a Bolt-plane engine gets
+// its server (spec 09 §5).
 //
 // Usage pattern:
 //
-//	c, err := setup.Start(ctx, setup.Neo4j("neo4j:5.26-community"))
+//	c, err := setup.Start(ctx, setup.Neo4j(""))
 //	if err != nil { ... }
 //	defer c.Stop(ctx)
-//	// c.BoltURI is ready for the adapter's Setup call
+//	// c.BoltURI is ready for the adapter's Start config
 //
-// See notes/Spec/2060/bench/02-architecture.md section 2.8 for the contract.
+// Image tags default to the single pin table (engine/pins.go); passing an
+// explicit image overrides the pin and the run must disclose it.
 package setup
 
 import (
@@ -20,11 +21,13 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/tamnd/graph-bench/engine"
 )
 
 // ContainerSpec describes one container to launch.
 type ContainerSpec struct {
-	// Image is the Docker image reference, e.g. "neo4j:5.26-community".
+	// Image is the Docker image reference, e.g. "neo4j:2026.06.0-community".
 	Image string
 	// Name is an optional container name for debugging; empty means random.
 	Name string
@@ -50,9 +53,21 @@ type Container struct {
 	ports   map[string]string // container port -> local port
 }
 
-// Neo4j returns a ContainerSpec for the given Neo4j image.
-// Pass the full image tag, e.g. "neo4j:5.26-community".
+// pinnedImage returns the pin-table image for an engine, or def when the
+// engine has no pin entry.
+func pinnedImage(name, def string) string {
+	if p, ok := engine.PinFor(name); ok && p.Pinned != "" {
+		return p.Pinned
+	}
+	return def
+}
+
+// Neo4j returns a ContainerSpec for the given Neo4j image; an empty image
+// means the pinned one.
 func Neo4j(image string) ContainerSpec {
+	if image == "" {
+		image = pinnedImage("neo4j", "neo4j:2026.06.0-community")
+	}
 	return ContainerSpec{
 		Image: image,
 		Env: map[string]string{
@@ -71,9 +86,12 @@ func Neo4j(image string) ContainerSpec {
 	}
 }
 
-// Memgraph returns a ContainerSpec for the given Memgraph image.
-// Pass the full image tag, e.g. "memgraph/memgraph:2.19.0".
+// Memgraph returns a ContainerSpec for the given Memgraph image; an empty
+// image means the pinned MAGE one.
 func Memgraph(image string) ContainerSpec {
+	if image == "" {
+		image = pinnedImage("memgraph", "memgraph/memgraph-mage:3.10.0")
+	}
 	return ContainerSpec{
 		Image: image,
 		Env:   map[string]string{},
@@ -148,14 +166,15 @@ func Start(ctx context.Context, spec ContainerSpec) (*Container, error) {
 	return c, nil
 }
 
-// Stop sends a docker stop + rm to the container. Always call this (via defer)
-// after Start.
+// Stop sends a docker stop to the container (run with --rm, so stop also
+// removes it). Always call this (via defer) after Start.
 func (c *Container) Stop(ctx context.Context) error {
 	return stopContainer(ctx, c.ID)
 }
 
 // DropCaches issues an OS-level page-cache drop if available (Linux-only).
-// On macOS and CI runners without the right privileges it is a no-op.
+// On macOS and CI runners without the right privileges it is a no-op; the
+// cold protocol in the condition stamp records which drop actually ran.
 func DropCaches() {
 	// On Linux: echo 3 > /proc/sys/vm/drop_caches requires root.
 	// We skip silently rather than failing the harness: the cold-run timing is

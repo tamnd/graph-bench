@@ -5,11 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
-
-// ms is a helper to make durations readable in test literals.
-func ms(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 
 // TestPercentileNearestRank checks the nearest-rank formula on a well-known
 // sorted slice where the expected values follow from the closed form.
@@ -67,16 +64,16 @@ func TestPercentileSingleElement(t *testing.T) {
 // TestSummarizeBasic checks per-class grouping, percentile values, and mean.
 func TestSummarizeBasic(t *testing.T) {
 	samples := []Sample{
-		{Class: target.Traversal, Latency: ms(1)},
-		{Class: target.Traversal, Latency: ms(3)},
-		{Class: target.Traversal, Latency: ms(2)},
-		{Class: target.PointRead, Latency: ms(10)},
+		{Class: engine.Traversal, Latency: ms(1)},
+		{Class: engine.Traversal, Latency: ms(3)},
+		{Class: engine.Traversal, Latency: ms(2)},
+		{Class: engine.PointRead, Latency: ms(10)},
 	}
 	window := 4 * time.Second
 
 	stats, _ := summarize(samples, window)
 
-	tr, ok := stats[target.Traversal]
+	tr, ok := stats[engine.Traversal]
 	if !ok {
 		t.Fatal("no Traversal stat")
 	}
@@ -105,7 +102,7 @@ func TestSummarizeBasic(t *testing.T) {
 		t.Errorf("Traversal.Throughput = %v, want 0.75", tr.Throughput)
 	}
 
-	pr, ok := stats[target.PointRead]
+	pr, ok := stats[engine.PointRead]
 	if !ok {
 		t.Fatal("no PointRead stat")
 	}
@@ -115,16 +112,16 @@ func TestSummarizeBasic(t *testing.T) {
 }
 
 // TestSummarizeErrorsExcludedFromLatency proves that error samples increment
-// Errors and Count but are not included in the percentile slice.
+// Errors and Count but are not included in the percentile slice (F10).
 func TestSummarizeErrorsExcludedFromLatency(t *testing.T) {
 	errFoo := errors.New("timeout")
 	samples := []Sample{
-		{Class: target.Write, Latency: ms(5)},
-		{Class: target.Write, Latency: ms(1000), Err: errFoo}, // error sample
-		{Class: target.Write, Latency: ms(6)},
+		{Class: engine.Write, Latency: ms(5)},
+		{Class: engine.Write, Latency: ms(1000), Err: errFoo}, // error sample
+		{Class: engine.Write, Latency: ms(6)},
 	}
 	stats, _ := summarize(samples, time.Second)
-	w, ok := stats[target.Write]
+	w, ok := stats[engine.Write]
 	if !ok {
 		t.Fatal("no Write stat")
 	}
@@ -147,12 +144,12 @@ func TestSummarizeErrorsExcludedFromLatency(t *testing.T) {
 // TestSummarizeZeroWindow proves Throughput is zero when window is zero.
 func TestSummarizeZeroWindow(t *testing.T) {
 	samples := []Sample{
-		{Class: target.Traversal, Latency: ms(1)},
-		{Class: target.Traversal, Latency: ms(2)},
+		{Class: engine.Traversal, Latency: ms(1)},
+		{Class: engine.Traversal, Latency: ms(2)},
 	}
 	stats, _ := summarize(samples, 0)
-	if stats[target.Traversal].Throughput != 0 {
-		t.Errorf("Throughput = %v with zero window, want 0", stats[target.Traversal].Throughput)
+	if stats[engine.Traversal].Throughput != 0 {
+		t.Errorf("Throughput = %v with zero window, want 0", stats[engine.Traversal].Throughput)
 	}
 }
 
@@ -161,11 +158,11 @@ func TestSummarizeZeroWindow(t *testing.T) {
 func TestSummarizeAllErrors(t *testing.T) {
 	errFoo := errors.New("conn refused")
 	samples := []Sample{
-		{Class: target.Analytical, Err: errFoo},
-		{Class: target.Analytical, Err: errFoo},
+		{Class: engine.Analytical, Err: errFoo},
+		{Class: engine.Analytical, Err: errFoo},
 	}
 	stats, _ := summarize(samples, time.Second)
-	a, ok := stats[target.Analytical]
+	a, ok := stats[engine.Analytical]
 	if !ok {
 		t.Fatal("no Analytical stat")
 	}
@@ -177,6 +174,51 @@ func TestSummarizeAllErrors(t *testing.T) {
 		if d != 0 {
 			t.Errorf("latency stat non-zero on all-error class: %v", d)
 		}
+	}
+}
+
+// TestSummarizeMinStdDevRows checks the latency-detail fields beside the
+// percentiles: the minimum sample, a non-zero spread for a varied group, and
+// rows-per-second from the per-sample row counts.
+func TestSummarizeMinStdDevRows(t *testing.T) {
+	samples := []Sample{
+		{Class: engine.PointRead, Latency: ms(10), Rows: 1},
+		{Class: engine.PointRead, Latency: ms(20), Rows: 2},
+		{Class: engine.PointRead, Latency: ms(30), Rows: 3},
+		{Class: engine.PointRead, Latency: ms(40), Rows: 4},
+	}
+	stats, _ := summarize(samples, time.Second)
+	s := stats[engine.PointRead]
+	if s.Min != ms(10) {
+		t.Errorf("Min = %v, want 10ms", s.Min)
+	}
+	if s.Max != ms(40) {
+		t.Errorf("Max = %v, want 40ms", s.Max)
+	}
+	if s.StdDev <= 0 {
+		t.Errorf("StdDev = %v, want > 0 for a varied group", s.StdDev)
+	}
+	// 10 rows over a 1s window is 10 rows/sec.
+	if s.RowThroughput != 10 {
+		t.Errorf("RowThroughput = %v, want 10", s.RowThroughput)
+	}
+}
+
+// TestStdDevZeroForUniform checks a group with identical latencies has zero
+// spread, and a single sample has zero spread (no division by n-1 surprises).
+func TestStdDevZeroForUniform(t *testing.T) {
+	uniform := []Sample{
+		{Class: engine.Traversal, Latency: ms(5)},
+		{Class: engine.Traversal, Latency: ms(5)},
+		{Class: engine.Traversal, Latency: ms(5)},
+	}
+	stats, _ := summarize(uniform, time.Second)
+	if sd := stats[engine.Traversal].StdDev; sd != 0 {
+		t.Errorf("StdDev of uniform group = %v, want 0", sd)
+	}
+	one, _ := summarize([]Sample{{Class: engine.Traversal, Latency: ms(7)}}, time.Second)
+	if sd := one[engine.Traversal].StdDev; sd != 0 {
+		t.Errorf("StdDev of single sample = %v, want 0", sd)
 	}
 }
 
@@ -194,26 +236,62 @@ func TestResultZeroValue(t *testing.T) {
 	}
 }
 
-// TestConditionFields proves the Condition fields are settable and their zero
-// values are the expected empty values (no hidden defaults).
+// TestConditionFields proves the spec 08 §7 Condition fields are settable and
+// their zero values are the expected empty values (no hidden defaults).
 func TestConditionFields(t *testing.T) {
 	c := Condition{
-		Engine:        "gr",
-		EngineVersion: "0.1.0",
-		Plane:         "inproc",
-		Tuned:         false,
-		Cache:         "warm",
-		Repetitions:   5,
-		Seed:          42,
-		Warmup:        "fixed-20pct",
+		HarnessVersion: "0.3.0",
+		HarnessCommit:  "abc1234",
+		Engine:         "zu",
+		EngineVersion:  "0.1.0",
+		Plane:          "subprocess",
+		DialectUsed:    map[string]string{"is3": "zuql"},
+		Tuned:          false,
+		Dataset:        "snb-sf1",
+		Scale:          "SF1",
+		Workload:       "snb-short",
+		MixSeed:        42,
+		LatencyModel:   OpenModelLatency,
+		Rate:           500,
+		Concurrency:    []int{1, 4, 16},
+		WarmupOutcome:  "stable",
+		Cache:          "warm",
+		ColdProtocol:   "none",
+		ValidationMode: "full",
+		Repetitions:    5,
 	}
-	if c.Engine != "gr" {
+	if c.Engine != "zu" {
 		t.Errorf("Engine = %q", c.Engine)
 	}
 	if c.Cache != "warm" {
 		t.Errorf("Cache = %q", c.Cache)
 	}
-	if c.Seed != 42 {
-		t.Errorf("Seed = %d", c.Seed)
+	if c.MixSeed != 42 {
+		t.Errorf("MixSeed = %d", c.MixSeed)
+	}
+	if c.DialectUsed["is3"] != "zuql" {
+		t.Errorf("DialectUsed = %v", c.DialectUsed)
+	}
+	if c.WarmupOutcome != "stable" || c.LatencyModel != OpenModelLatency {
+		t.Errorf("stamp fields lost: %+v", c)
+	}
+}
+
+// TestCollectHardware proves the collected Hardware stamp never carries empty
+// strings and reports a plausible core count — the spec 08 §7 rule that
+// hardware is collected, not hand-entered, and never silently blank.
+func TestCollectHardware(t *testing.T) {
+	h := CollectHardware()
+	if h.CPU == "" {
+		t.Error("CPU is empty; want a model string or \"unknown\"")
+	}
+	if h.OS == "" || h.Arch == "" {
+		t.Errorf("OS/Arch empty: %q/%q", h.OS, h.Arch)
+	}
+	if h.Cores < 1 {
+		t.Errorf("Cores = %d, want >= 1", h.Cores)
+	}
+	if h.RAMBytes == 0 {
+		t.Errorf("RAMBytes = 0, want positive or -1 (explicit unknown)")
 	}
 }

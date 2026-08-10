@@ -1,413 +1,731 @@
+// The run pipeline, per engine: resolve dataset -> Start -> Load -> bind
+// parameter pools -> verify (the toll gate, printed before any timing) ->
+// warmup -> measure -> stamp Condition -> Document. Ported from v1's exec.go
+// and adapted to the v0.3 phase order (spec 08 §5, 09 §1).
 package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
+	"math"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"time"
 
-	grAdapter "github.com/tamnd/graph-bench/adapter/gr"
-	"github.com/tamnd/graph-bench/dataset"
-	"github.com/tamnd/graph-bench/dataset/gen"
+	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/measure"
 	"github.com/tamnd/graph-bench/report"
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/setup"
+	"github.com/tamnd/graph-bench/verify"
 	"github.com/tamnd/graph-bench/workload"
 )
 
-// executeRun runs a workload against a named engine and returns the EngineResult.
-// It owns the full lifecycle: dataset resolve -> Setup -> Load -> measure -> Teardown.
-func executeRun(
-	ctx context.Context,
-	engineName string,
-	wl *workload.Workload,
-	datasetPath string,
-	datasetsDir string,
-	scale string,
-	cache string,
-	opts measure.Options,
-	lineageDir string,
-	publish bool,
-	curateSeed int64,
-) (report.EngineResult, error) {
-	// Resolve the target adapter.
-	tgt, err := lookupTarget(engineName)
+// runConfig carries the run verb's resolved flags into the pipeline.
+type runConfig struct {
+	profile     profile
+	scale       string // "smoke" or "sf1" (condition stamp + recipe mapping)
+	count       int    // per-query count override; 0 = profile default
+	rate        float64
+	concurrency int
+	outDir      string
+	publish     bool
+	tuned       bool
+	datasetsDir string
+	seed        int64
+	noDocker    bool
+	stderr      io.Writer
+	stdout      io.Writer
+}
+
+// executeRun runs one workload against one engine and returns the result
+// document. A verification FAIL is not an error: the document records it and
+// measurement is skipped (a wrong engine is news, F6). An error means the
+// harness could not complete the phases.
+func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc runConfig) (*report.Document, error) {
+	eng, err := engine.Lookup(engName)
 	if err != nil {
-		return report.EngineResult{}, err
+		return nil, err
+	}
+	info := eng.Info()
+
+	ds, err := resolveDataset(ctx, wl.Dataset, rc.scale, rc.datasetsDir)
+	if err != nil {
+		return nil, fmt.Errorf("dataset: %w", err)
 	}
 
-	// Resolve the dataset.
-	ds, err := resolveDataset(ctx, wl, datasetPath, datasetsDir)
-	if err != nil {
-		return report.EngineResult{}, fmt.Errorf("dataset: %w", err)
-	}
-
-	// Query the engine version before Setup (some adapters can do this without a DB).
-	version, _ := tgt.Version(ctx)
-
-	// Setup the engine. When the dataset is file-backed (has a directory), we
-	// need a disk path for the gr bulk loader. Use a temp file for the DB.
-	cfg := target.Config{}
+	// Engine config. Embedded and subprocess engines get a pinned database
+	// path so a cold-pass restart reopens the same files; Bolt engines get a
+	// managed container when no server is configured (port of v1 behavior).
+	cfg := engine.Config{Values: map[string]string{}, Tuned: rc.tuned}
 	var dbTempDir string
-	if ds.Dir() != "" && tgt.Plane() == target.InProc {
+	if info.Plane == engine.Subprocess || info.Plane == engine.InProc {
 		tmp, err := os.MkdirTemp("", "graph-bench-db-*")
 		if err != nil {
-			return report.EngineResult{}, fmt.Errorf("%s: temp db dir: %w", engineName, err)
+			return nil, fmt.Errorf("%s: temp db dir: %w", engName, err)
 		}
 		dbTempDir = tmp
-		cfg.Values = map[string]string{"path": tmp + "/graph-bench.db"}
-	}
-	// Snapshot allocator counters before Setup so the run's memory cost (load
-	// plus queries) is measured from a clean baseline.
-	memStart := measure.SnapshotMem()
-	drv, err := tgt.Setup(ctx, cfg)
-	if err != nil {
-		if dbTempDir != "" {
-			os.RemoveAll(dbTempDir)
-		}
-		return report.EngineResult{}, fmt.Errorf("%s: Setup: %w", engineName, err)
+		cfg.Values["path"] = filepath.Join(tmp, "bench.zu1")
 	}
 	defer func() {
-		_ = tgt.Teardown(ctx, drv)
 		if dbTempDir != "" {
 			os.RemoveAll(dbTempDir)
 		}
 	}()
-
-	// Load the dataset.
-	loadStart := time.Now()
-	loadStats, err := tgt.Load(ctx, drv, ds)
+	container, err := startContainerIfNeeded(ctx, engName, rc)
 	if err != nil {
-		return report.EngineResult{}, fmt.Errorf("%s: Load: %w", engineName, err)
+		return nil, err
 	}
-	if version == "" || version == "devel" {
-		version, _ = tgt.Version(ctx)
+	if container != nil {
+		cfg.Values["uri"] = container.BoltURI
+		defer container.Stop(context.WithoutCancel(ctx))
 	}
-	_ = loadStart
 
-	// Load curated parameter pools for any query that declares a PoolKey.
-	// Auto-curates params.json if absent and the dataset has a directory.
-	paramSources, err := loadParamSources(ctx, wl, ds, curateSeed)
+	// Start and load.
+	memStart := measure.SnapshotMem()
+	sess, err := eng.Start(ctx, cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "run: load curated params: %v (queries will run without seeded params)\n", err)
-		paramSources = nil
+		return nil, fmt.Errorf("%s: Start: %w", engName, err)
 	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = sess.Close(context.WithoutCancel(ctx))
+		}
+	}()
 
-	// Build the op schedule.
-	ops, err := buildOps(wl, engineName, opts, paramSources)
+	// Re-read Info now that a session exists. Some capabilities cannot be
+	// known before Start — whether transactions work, which graph kernels
+	// the build actually exposes — so an adapter probes them there and
+	// refines what Info reports. Reading Info only once, before Start,
+	// pinned every such capability to its pre-probe default and SKIPped
+	// every analytical query on an engine that in fact has the kernels.
+	info = eng.Info()
+
+	engVersion, _ := sess.Version(ctx)
+	loadStats, err := sess.Load(ctx, ds)
 	if err != nil {
-		return report.EngineResult{}, fmt.Errorf("build ops: %w", err)
-	}
-	if len(ops) == 0 {
-		return report.EngineResult{}, fmt.Errorf("%s: workload %q produced no ops", engineName, wl.Name)
+		return nil, fmt.Errorf("%s: Load: %w", engName, err)
 	}
 
-	// Run the measurement.
-	result := measure.Run(ctx, drv, ops, opts)
-	result.Load = loadStats
-	// Capture the memory and disk cost beside the latency: allocator deltas
-	// since memStart, the on-disk dataset size, and the engine's load footprint.
-	result.Resource = measure.CaptureResource(
+	// Bind curated parameter pools (queries with a PoolKey and no Params).
+	unbound := bindParams(wl, ds, rc.seed)
+
+	// Pre-filter: capability skips verify handles itself; the zu primitive
+	// mode additionally restricts to the mapped primitive query IDs.
+	vw, preskips := prefilterWorkload(wl, sess, eng, unbound)
+
+	// Verify — the toll gate, printed before any timing output (spec 09 §1).
+	sampled := wl.ValidationScale != "" && rc.scale != "smoke" && wl.ValidationScale != rc.scale
+	plan, err := verify.Run(ctx, sess, info, vw, ds, verify.Options{
+		SampleDefault: rc.profile.sampleDefault,
+		Sampled:       sampled,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: verify: %w", engName, err)
+	}
+	plan.Reports = append(preskips, plan.Reports...)
+	printVerification(rc.stdout, engName, plan.Reports)
+
+	startedAt := time.Now().UTC()
+	var res measure.Result
+	measured := false
+	if plan.Failed() || plan.Poisoned {
+		fmt.Fprintf(rc.stderr, "run: %s: verification failed; measurement skipped\n", engName)
+	} else if len(plan.Approved) == 0 {
+		fmt.Fprintf(rc.stderr, "run: %s: no queries approved (all SKIP); nothing to measure\n", engName)
+	} else {
+		res, err = measurePlan(ctx, sess, eng, cfg, ds, wl, plan, rc, &closed)
+		if err != nil {
+			return nil, fmt.Errorf("%s: measure: %w", engName, err)
+		}
+		measured = true
+	}
+	finishedAt := time.Now().UTC()
+
+	res.Load = loadStats
+	res.Resource = measure.CaptureResource(
 		memStart, measure.SnapshotMem(),
 		measure.DirSizeBytes(ds.Dir()), loadStats.BytesOnDisk,
 	)
-	result.Condition = buildCondition(tgt, wl, ds, scale, cache, version, opts)
+	res.Condition = buildCondition(ctx, info, sess, cfg, wl, ds, plan, rc, engVersion, res, measured, startedAt, finishedAt)
 
-	er := report.EngineResult{
-		Name:    tgt.Name(),
-		Plane:   tgt.Plane().String(),
-		Version: version,
-		Result:  result,
-	}
-
-	// Publish to lineage if requested.
-	if publish {
-		base := lineageDir
-		if base == "" {
-			base = "results"
-		}
-		path := report.RecordPath(base, er, time.Now())
-		if appendErr := report.Append(path, er); appendErr != nil {
-			fmt.Fprintf(os.Stderr, "run: lineage append %s: %v\n", path, appendErr)
-		}
-	}
-
-	return er, nil
+	doc := report.FromMeasure(wl.Name, wl.Family, wl.Fidelity, res, toVerifications(plan.Reports))
+	return doc, nil
 }
 
-// buildOps builds the measurement op slice for a workload. paramSources overrides
-// each query's Params field by query ID; a nil map falls back to q.Params.
-func buildOps(wl *workload.Workload, engineName string, opts measure.Options, paramSources map[string]workload.ParamSource) ([]measure.Op, error) {
-	d := dialectFor(engineName)
+// measurePlan runs the measurement phase appropriate to the workload shape:
+// analytics repetitions, mixed schedule, or per-query service time. closed is
+// set when a cold pass replaced the session (the replacement is closed here).
+func measurePlan(
+	ctx context.Context,
+	sess engine.Session,
+	eng engine.Engine,
+	cfg engine.Config,
+	ds engine.Dataset,
+	wl *workload.Workload,
+	plan *verify.Plan,
+	rc runConfig,
+	closed *bool,
+) (measure.Result, error) {
+	prof := rc.profile
+	info := eng.Info()
+
+	// Analytics workloads: single-stream repetitions, no concurrency (08 §4).
+	if wl.Analytics {
+		ops := make([]engine.Op, 0, len(plan.Approved))
+		for _, a := range plan.Approved {
+			ops = append(ops, approvedOp(a))
+		}
+		ar, err := measure.RunAnalytics(ctx, sess, ops, prof.analyticsReps, prof.discardFirst)
+		if err != nil {
+			return measure.Result{}, err
+		}
+		return analyticsResult(ar, plan), nil
+	}
+
+	// Mixed workloads: weighted deterministic interleave (BuildMixedSchedule).
+	if wl.Mix != nil {
+		perQuery := map[string][]engine.Op{}
+		for _, a := range plan.Approved {
+			perQuery[a.Query.ID] = buildOpsFor(a, 64)
+		}
+		total := prof.mixCount
+		if rc.count > 0 {
+			total = rc.count
+		}
+		var warmupDur time.Duration
+		if rc.rate > 0 {
+			// Open model: warmup is a schedule prefix (offset < Warmup).
+			warmupDur = warmupWindow(prof)
+			total += int(rc.rate * warmupDur.Seconds())
+		}
+		ops := measure.BuildMixedSchedule(perQuery, wl.Mix.Weights, rc.seed, total, rc.rate, warmupDur)
+		brackets := bracketsFor(plan)
+		opt := measure.Options{
+			Rate:        rc.rate,
+			Count:       total,
+			Warmup:      warmupDur,
+			Concurrency: rc.concurrency,
+			Brackets:    brackets,
+		}
+		if rc.rate <= 0 {
+			warmupPass(ctx, sess, sampleOps(perQuery), prof, brackets)
+		}
+		res := measure.Run(ctx, sess, ops, opt)
+		if prof.sweep {
+			sw := measure.Sweep(ctx, sess, ops, opt, measure.CISweepPoints)
+			res.Sweep = sw.Sweep
+		}
+		return res, nil
+	}
+
+	// Plain workloads: per-query service-time in count mode. One Run over the
+	// concatenation: Result.ByQuery carries per-query stats, Stats the rollup.
 	var ops []measure.Op
-	if len(wl.Mix) > 0 {
-		ops = measure.BuildMixedSchedule(wl, d, opts.Count, opts.Rate, opts.Warmup)
-	} else {
-		for _, q := range wl.Queries {
-			count := opts.Count
-			if count <= 0 {
-				count = 100
-			}
-			ps := paramSources[q.ID]
-			if ps == nil {
-				ps = q.Params
-			}
-			ops = append(ops, buildQueryOps(q, d, count, ps)...)
+	for _, a := range plan.Approved {
+		n := rc.count
+		if n <= 0 {
+			n = prof.countFor(a.Query.Class)
 		}
-		ops = measure.BuildSchedule(ops, opts.Rate, opts.Warmup)
+		for _, op := range buildOpsFor(a, n) {
+			ops = append(ops, measure.Op{Op: op})
+		}
 	}
-	return ops, nil
+	brackets := bracketsFor(plan)
+	warmupPass(ctx, sess, firstOps(plan), prof, brackets)
+	res := measure.Run(ctx, sess, ops, measure.Options{
+		Count:       len(ops),
+		Concurrency: rc.concurrency,
+		Budget:      prof.budget,
+		Brackets:    brackets,
+	})
+
+	// Cold pass: persistent engines only, full profile. Restart the session
+	// and drop the page cache so the first access is genuinely cold (08 §4).
+	if prof.cold && info.Caps.Persistent {
+		if err := sess.Close(ctx); err == nil {
+			setup.DropCaches()
+			cold, err := eng.Start(ctx, cfg)
+			if err != nil {
+				return res, fmt.Errorf("cold restart: %w", err)
+			}
+			defer func() {
+				_ = cold.Close(context.WithoutCancel(ctx))
+			}()
+			*closed = true
+			coldRes := measure.ColdRun(ctx, cold, firstMeasureOps(plan), 0)
+			res = measure.MergeCold(res, coldRes)
+		}
+	}
+	return res, nil
 }
 
-// dialectFor maps an engine name to the workload dialect it speaks. Most engines
-// speak standard openCypher; Kuzu-family engines (ladybug) speak a Kuzu variant
-// that differs in a few constructs (notably shortestPath is not supported).
-func dialectFor(engineName string) workload.Dialect {
-	switch engineName {
-	case "ladybug":
-		return workload.KuzuCypher
-	case "gr", "gr-bolt":
-		// gr speaks openCypher plus its algo_* algorithm functions; the GrCypher
-		// texts override only the analytical queries and everything else falls back
-		// to the shared Cypher text.
-		return workload.GrCypher
-	default:
-		return workload.Cypher
+// approvedOp resolves one Approved into an engine.Op with the next parameter
+// draw from the query's source.
+func approvedOp(a verify.Approved) engine.Op {
+	op := engine.Op{
+		QueryID: a.Query.ID,
+		Class:   a.Query.Class,
+		Dialect: a.Dialect,
+		Text:    a.Text,
 	}
+	if a.Query.Params != nil {
+		op.Params = a.Query.Params.Next()
+	}
+	return op
 }
 
-// buildQueryOps builds count isolated ops for one query, drawing params from ps.
-// It mirrors BuildIsolatedOps but accepts an external ParamSource so the caller
-// can supply the curated pool without mutating the global WorkloadQuery.
-func buildQueryOps(q *workload.WorkloadQuery, d workload.Dialect, count int, ps workload.ParamSource) []measure.Op {
-	if count <= 0 {
-		return nil
-	}
-	query, _, ok := q.Resolve(d, nil)
-	if !ok {
-		// Fall back to Cypher if the engine's preferred dialect has no text for this query.
-		query, _, ok = q.Resolve(workload.Cypher, nil)
-		if !ok {
-			return nil
-		}
-	}
-	ops := make([]measure.Op, 0, count)
-	for i := 0; i < count; i++ {
-		var params target.Params
-		if ps != nil {
-			params = ps.Next()
-		}
-		ops = append(ops, measure.Op{
-			Class:   q.Class,
-			QueryID: q.ID,
-			Query:   query,
-			Params:  params,
-		})
+// buildOpsFor builds n ops for one approved query, drawing parameters in
+// deterministic cycle order.
+func buildOpsFor(a verify.Approved, n int) []engine.Op {
+	ops := make([]engine.Op, 0, n)
+	for i := 0; i < n; i++ {
+		ops = append(ops, approvedOp(a))
 	}
 	return ops
 }
 
-// loadParamSources loads the curated parameter pools for all queries in the
-// workload that declare a PoolKey. If the dataset has a directory but no
-// params.json, it runs workload.Curate first (idempotent). Returns a map from
-// query ID to ParamSource; missing or unreadable pools produce no entry.
-func loadParamSources(ctx context.Context, wl *workload.Workload, ds target.Dataset, curateSeed int64) (map[string]workload.ParamSource, error) {
-	_ = ctx
-	// Check if any query needs a curated pool.
-	needsPool := false
-	for _, q := range wl.Queries {
-		if q.PoolKey != "" {
-			needsPool = true
-			break
-		}
-	}
-	if !needsPool {
-		return nil, nil
-	}
-
-	// Auto-curate if the dataset has a directory (file-backed, not a statements set).
-	if ds.Dir() != "" {
-		if err := workload.Curate(ds, curateSeed); err != nil {
-			return nil, fmt.Errorf("curate %s: %w", ds.Name(), err)
-		}
-	}
-
-	// Load each query's pool, caching by PoolKey so each JSON read happens once.
-	cachedPools := map[string]workload.ParamSource{}
-	result := map[string]workload.ParamSource{}
-	for _, q := range wl.Queries {
-		if q.PoolKey == "" {
+// bracketsFor collects the untimed Setup/Teardown pair of every approved
+// write query, keyed by id, so measure.Run can restore the pre-write state
+// between repetitions (spec 06 §0). Queries that name neither statement are
+// left out: an entry in the map costs a mutex and a map lookup per op, and a
+// read has nothing to restore.
+func bracketsFor(plan *verify.Plan) map[string]measure.Bracket {
+	br := map[string]measure.Bracket{}
+	for _, a := range plan.Approved {
+		if a.Query.Setup == "" && a.Query.Teardown == "" {
 			continue
 		}
-		if ps, ok := cachedPools[q.PoolKey]; ok {
-			if ps != nil {
-				result[q.ID] = ps
-			}
+		br[a.Query.ID] = measure.Bracket{Setup: a.Query.Setup, Teardown: a.Query.Teardown}
+	}
+	if len(br) == 0 {
+		return nil
+	}
+	return br
+}
+
+// firstOps returns one op per approved query (used to exercise every query
+// during warmup).
+func firstOps(plan *verify.Plan) []engine.Op {
+	ops := make([]engine.Op, 0, len(plan.Approved))
+	for _, a := range plan.Approved {
+		ops = append(ops, approvedOp(a))
+	}
+	return ops
+}
+
+// firstMeasureOps is firstOps wrapped for the cold pass: one distinct op per
+// query so the cold map carries one first-access latency per query.
+func firstMeasureOps(plan *verify.Plan) []measure.Op {
+	var ops []measure.Op
+	for _, op := range firstOps(plan) {
+		ops = append(ops, measure.Op{Op: op})
+	}
+	return ops
+}
+
+// sampleOps flattens one op per query from a perQuery pool map, in sorted id
+// order for determinism.
+func sampleOps(perQuery map[string][]engine.Op) []engine.Op {
+	ids := make([]string, 0, len(perQuery))
+	for id := range perQuery {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var ops []engine.Op
+	for _, id := range ids {
+		if pool := perQuery[id]; len(pool) > 0 {
+			ops = append(ops, pool[0])
+		}
+	}
+	return ops
+}
+
+// warmupWindow is the warmup duration for open-model schedules: the profile's
+// fixed window, or the WarmupConfig fixed floor (3s, spec 08 §3).
+func warmupWindow(prof profile) time.Duration {
+	if prof.fixedWarmup > 0 {
+		return prof.fixedWarmup
+	}
+	return 3 * time.Second
+}
+
+// warmupPass fires ops unrecorded before a count-mode measurement. The fast
+// profile skips the stabilization detector and uses a fixed 2s window; the
+// full profile uses the WarmupConfig fixed-fraction rule with its 3s/200-op
+// floors (spec 08 §3, fixed path — CI-reproducible).
+func warmupPass(ctx context.Context, sess engine.Session, ops []engine.Op, prof profile, brackets map[string]measure.Bracket) {
+	if len(ops) == 0 {
+		return
+	}
+	deadline := time.Now().Add(prof.fixedWarmup)
+	minOps := 0
+	if prof.fixedWarmup == 0 {
+		cfg := measure.WarmupConfig{}
+		minOps = cfg.WarmupOps(200 * len(ops))
+		deadline = time.Now().Add(3 * time.Second)
+	}
+	fired := 0
+	for i := 0; ; i++ {
+		if ctx.Err() != nil {
+			return
+		}
+		if time.Now().After(deadline) && fired >= minOps {
+			return
+		}
+		op := ops[i%len(ops)]
+		qctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// Warmup repeats a write as many times as the measured run does, so it
+		// needs the same bracket: without it the warmup pass is what leaves the
+		// graph in the state the measured repetitions then fail against.
+		measure.Fire(qctx, sess, op, brackets[op.QueryID])
+		cancel()
+		fired++
+		if fired > 100000 { // safety valve: never warm forever
+			return
+		}
+	}
+}
+
+// analyticsResult converts the analytics protocol outcome into a measure
+// Result: per-query stats verbatim, per-class stats recomputed from the kept
+// repetition durations.
+func analyticsResult(ar measure.AnalyticsResult, plan *verify.Plan) measure.Result {
+	classOf := map[string]engine.Class{}
+	for _, a := range plan.Approved {
+		classOf[a.Query.ID] = a.Query.Class
+	}
+	byClass := map[engine.Class][]time.Duration{}
+	for id, durs := range ar.PerQuery {
+		cl := classOf[id]
+		byClass[cl] = append(byClass[cl], durs...)
+	}
+	stats := map[engine.Class]measure.Stat{}
+	for cl, durs := range byClass {
+		s := statFromDurations(durs)
+		s.Class = cl
+		stats[cl] = s
+	}
+	return measure.Result{
+		Stats:   stats,
+		ByQuery: ar.Stats,
+		Latency: measure.ServiceTimeLatency,
+	}
+}
+
+// statFromDurations summarizes a duration slice with nearest-rank
+// percentiles, matching the measure package's convention.
+func statFromDurations(durs []time.Duration) measure.Stat {
+	if len(durs) == 0 {
+		return measure.Stat{}
+	}
+	sorted := append([]time.Duration(nil), durs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	rank := func(p float64) time.Duration {
+		i := int(p*float64(len(sorted))+0.999999) - 1
+		if i < 0 {
+			i = 0
+		}
+		if i >= len(sorted) {
+			i = len(sorted) - 1
+		}
+		return sorted[i]
+	}
+	var sum time.Duration
+	for _, d := range sorted {
+		sum += d
+	}
+	mean := sum / time.Duration(len(sorted))
+	var varSum float64
+	for _, d := range sorted {
+		diff := float64(d - mean)
+		varSum += diff * diff
+	}
+	stddev := time.Duration(math.Sqrt(varSum / float64(len(sorted))))
+	return measure.Stat{
+		Count:  len(sorted),
+		Min:    sorted[0],
+		P50:    rank(0.50),
+		P90:    rank(0.90),
+		P95:    rank(0.95),
+		P99:    rank(0.99),
+		Max:    sorted[len(sorted)-1],
+		Mean:   mean,
+		StdDev: stddev,
+	}
+}
+
+// bindParams binds curated parameter pools to every query that declares a
+// PoolKey and has no Params source yet. A family that ships its own binder
+// gets first refusal, because only it knows what makes its parameters
+// non-degenerate; whatever it leaves unbound falls to the dataset's
+// params.json, and anything still missing is curated on demand (and
+// written beside the manifest). Returns the IDs of queries left without a
+// source (they SKIP, reason "no-param-pool").
+func bindParams(wl *workload.Workload, ds engine.Dataset, seed int64) map[string]bool {
+	var missing []string
+	if _, err := bindFamilyPools(wl, ds); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s: family pool binding failed: %v\n", wl.Name, err)
+	}
+	for _, q := range wl.Queries {
+		if q.PoolKey == "" || q.Params != nil {
 			continue
 		}
 		pool, err := ds.Params(q.PoolKey)
-		if err != nil || len(pool) == 0 {
-			cachedPools[q.PoolKey] = nil
+		if err == nil && len(pool) > 0 {
+			q.Params = workload.NewPoolSource(pool)
 			continue
 		}
-		ps := workload.NewPool(pool)
-		cachedPools[q.PoolKey] = ps
-		result[q.ID] = ps
+		missing = append(missing, q.PoolKey)
 	}
-	return result, nil
-}
-
-// resolveDataset finds or generates the dataset for the workload. Priority:
-// 1. --dataset-path is an explicit path to an existing dataset directory.
-// 2. Look for a matching directory in --datasets-dir (default "datasets/").
-// 3. Auto-generate a small synthetic dataset for known synthetic workload kinds.
-func resolveDataset(ctx context.Context, wl *workload.Workload, datasetPath, datasetsDir string) (target.Dataset, error) {
-	// Explicit path wins.
-	if datasetPath != "" {
-		ds, err := dataset.Open(datasetPath)
-		if err != nil {
-			return nil, fmt.Errorf("open dataset at %s: %w", datasetPath, err)
-		}
-		return ds, nil
-	}
-
-	dsName := wl.Dataset
-	if dsName == "" {
-		// Workload needs no dataset (e.g., writes that build their own graph).
-		return target.NewStatements(wl.Name+"-empty", nil), nil
-	}
-
-	// Search in datasetsDir for a directory whose manifest.Name matches.
-	if datasetsDir != "" {
-		if ds, err := findDataset(datasetsDir, dsName); err == nil {
-			return ds, nil
+	if len(missing) > 0 && ds.Dir() != "" {
+		if err := curatePools(ds, missing, curatePoolSize, seed); err == nil {
+			for _, q := range wl.Queries {
+				if q.PoolKey == "" || q.Params != nil {
+					continue
+				}
+				if pool, err := ds.Params(q.PoolKey); err == nil && len(pool) > 0 {
+					q.Params = workload.NewPoolSource(pool)
+				}
+			}
 		}
 	}
-
-	// Auto-generate a synthetic dataset from the workload's dataset name.
-	ds, err := autoGenDataset(ctx, dsName)
-	if err != nil {
-		return nil, fmt.Errorf("cannot find or generate dataset %q: %w; run 'graph-bench generate' first or use --dataset-path", dsName, err)
+	unbound := map[string]bool{}
+	for _, q := range wl.Queries {
+		if q.PoolKey != "" && q.Params == nil {
+			unbound[q.ID] = true
+		}
 	}
-	return ds, nil
+	return unbound
 }
 
-// findDataset scans dir for a subdirectory whose manifest.Name matches name.
-func findDataset(dir, name string) (*dataset.Set, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
+// prefilterWorkload returns a shallow workload copy restricted to the queries
+// the session can execute, plus synthetic SKIP reports for the rest. Two
+// filters apply here (capability and dialect skips are verify's job): queries
+// with no bound parameter pool, and — when a zu session reports primitive
+// mode — queries outside zu's primitive surface (skip zu-no-query-verb).
+func prefilterWorkload(wl *workload.Workload, sess engine.Session, eng engine.Engine, unbound map[string]bool) (*workload.Workload, []verify.QueryReport) {
+	allowed := func(q *workload.Query) (bool, string) {
+		if unbound[q.ID] {
+			return false, "no-param-pool"
+		}
+		return true, ""
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
+	type moder interface{ Mode() string }
+	type primitives interface{ PrimitiveQueries() []string }
+	if ms, ok := sess.(moder); ok && ms.Mode() == "primitive" {
+		if pq, ok := eng.(primitives); ok {
+			prim := map[string]bool{}
+			for _, id := range pq.PrimitiveQueries() {
+				prim[id] = true
+			}
+			inner := allowed
+			allowed = func(q *workload.Query) (bool, string) {
+				if ok, reason := inner(q); !ok {
+					return false, reason
+				}
+				if !prim[q.ID] {
+					return false, "zu-no-query-verb"
+				}
+				return true, ""
+			}
+		}
+	}
+
+	copyWl := *wl
+	copyWl.Queries = nil
+	var skips []verify.QueryReport
+	for _, q := range wl.Queries {
+		if ok, reason := allowed(q); !ok {
+			skips = append(skips, verify.QueryReport{QueryID: q.ID, Outcome: verify.Skip, Reason: reason})
 			continue
 		}
-		path := dir + "/" + e.Name()
-		ds, err := dataset.Open(path)
-		if err != nil {
-			continue
-		}
-		m := ds.Manifest()
-		if m != nil && m.Name == name {
-			return ds, nil
-		}
+		copyWl.Queries = append(copyWl.Queries, q)
 	}
-	return nil, fmt.Errorf("no dataset named %q in %s", name, dir)
+	return &copyWl, skips
 }
 
-// autoGenDataset generates a small deterministic synthetic dataset for known
-// workload dataset names. Used when no explicit path is given and the dataset
-// is not found in the datasets directory. Writes to a temp directory.
-func autoGenDataset(ctx context.Context, dsName string) (*dataset.Set, error) {
-	cfg, ok := syntheticDefaults[dsName]
-	if !ok {
-		return nil, fmt.Errorf("unknown dataset name %q", dsName)
+// printVerification renders the verification table before any timing output
+// (spec 09 §1).
+func printVerification(w io.Writer, engName string, reports []verify.QueryReport) {
+	fmt.Fprintf(w, "verification (%s):\n", engName)
+	fmt.Fprintf(w, "  %-20s  %-6s  %-8s  %s\n", "query", "result", "dialect", "reason")
+	for _, r := range reports {
+		fmt.Fprintf(w, "  %-20s  %-6s  %-8s  %s\n", r.QueryID, r.Outcome, r.Dialect, r.Reason)
 	}
-	dir, err := os.MkdirTemp("", "graph-bench-ds-*")
-	if err != nil {
-		return nil, err
-	}
-	w, err := dataset.NewWriter(dir)
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-	_, err = gen.Generate(ctx, cfg, w)
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-	ds, err := dataset.Open(dir)
-	if err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-	return ds, nil
 }
 
-// syntheticDefaults maps workload dataset names to a small but meaningful
-// auto-generation config for the run command's auto-gen path. These are
-// not the benchmark-grade sizes; they exist so 'graph-bench run' works
-// without a pre-generated dataset for workloads that say what they need.
-var syntheticDefaults = map[string]gen.Config{
-	"grid":     {Kind: "grid", Rows: 100, Cols: 100, Seed: 1},
-	"er":       {Kind: "er", N: 10000, P: 0.001, Seed: 1},
-	"rmat":     {Kind: "rmat", Scale: 14, EdgeFactor: 16, Seed: 1},
-	"powerlaw": {Kind: "powerlaw", N: 5000, Gamma: 2.5, MinDeg: 1, MaxDeg: 500, Seed: 1},
-	"uniform":  {Kind: "uniform", N: 5000, Degree: 10, Seed: 1},
+// toVerifications maps verify reports into the document's plain-data form.
+func toVerifications(reports []verify.QueryReport) []report.Verification {
+	out := make([]report.Verification, 0, len(reports))
+	for _, r := range reports {
+		out = append(out, report.Verification{
+			QueryID: r.QueryID,
+			Outcome: string(r.Outcome),
+			Reason:  r.Reason,
+			Samples: r.Samples,
+			Dialect: string(r.Dialect),
+		})
+	}
+	return out
 }
 
-// buildCondition fills in the Condition stamp for a result.
+// buildCondition assembles the full Condition stamp (spec 08 §7). Every field
+// is filled here; the doc's rule is that no field is zero-valued after a real
+// run.
 func buildCondition(
-	tgt target.Target,
+	ctx context.Context,
+	info engine.Info,
+	sess engine.Session,
+	cfg engine.Config,
 	wl *workload.Workload,
-	ds target.Dataset,
-	scale, cache, version string,
-	opts measure.Options,
+	ds engine.Dataset,
+	plan *verify.Plan,
+	rc runConfig,
+	engVersion string,
+	res measure.Result,
+	measured bool,
+	startedAt, finishedAt time.Time,
 ) measure.Condition {
-	c := measure.Condition{
-		Engine:          tgt.Name(),
-		EngineVersion:   version,
-		Plane:           tgt.Plane().String(),
+	dialects := map[string]string{}
+	for _, a := range plan.Approved {
+		dialects[a.Query.ID] = string(a.Dialect)
+	}
+	cfgMap := map[string]string{}
+	for k, v := range cfg.Values {
+		cfgMap[k] = v
+	}
+	// zu extras: exec mode, discovered binary, calibrated spawn floor. The
+	// subprocess plane reports its per-op floor as a stamp field, never
+	// subtracts it (spec 08 §8).
+	if zs, ok := sess.(interface{ Mode() string }); ok {
+		cfgMap["zu_mode"] = zs.Mode()
+	}
+	if zb, ok := sess.(interface{ Bin() string }); ok {
+		cfgMap["zu_bin"] = zb.Bin()
+	}
+	if zc, ok := sess.(interface {
+		Calibrate(context.Context) time.Duration
+	}); ok && measured {
+		cfgMap["zu_spawn_floor"] = zc.Calibrate(ctx).String()
+	}
+
+	warmupOutcome := "fixed-fraction"
+	if rc.profile.fixedWarmup > 0 {
+		warmupOutcome = "fixed-" + rc.profile.fixedWarmup.String()
+	}
+	validation := "full"
+	if plan.Sampled {
+		validation = "sampled"
+	}
+	cache := "warm"
+	coldProtocol := "none"
+	if len(res.Cold) > 0 {
+		cache = "cold"
+		if runtime.GOOS == "darwin" {
+			coldProtocol = "purge"
+		} else {
+			coldProtocol = "drop_caches"
+		}
+	}
+	conc := []int{rc.concurrency}
+	if len(res.Sweep) > 0 {
+		conc = append([]int(nil), measure.CISweepPoints...)
+	}
+	reps := 0
+	if wl.Analytics {
+		reps = rc.profile.analyticsReps
+	}
+
+	return measure.Condition{
+		HarnessVersion:  version,
+		HarnessCommit:   commit,
+		Engine:          info.Name,
+		EngineVersion:   engVersion,
+		Plane:           string(info.Plane),
+		DialectUsed:     dialects,
+		Config:          cfgMap,
+		Tuned:           cfg.Tuned,
 		Dataset:         ds.Name(),
+		Scale:           rc.scale,
 		DatasetChecksum: ds.Checksum(),
+		ParamsChecksum:  paramsChecksum(ds),
 		Workload:        wl.Name,
-		Scale:           scale,
+		MixSeed:         rc.seed,
+		LatencyModel:    res.Latency,
+		Rate:            rc.rate,
+		Concurrency:     conc,
+		WarmupOutcome:   warmupOutcome,
 		Cache:           cache,
-		OfferedRate:     opts.Rate,
-		GoVersion:       runtime.Version(),
-		OS:              runtime.GOOS + "/" + runtime.GOARCH,
-		Timestamp:       time.Now().UTC(),
+		ColdProtocol:    coldProtocol,
+		ValidationMode:  validation,
+		Repetitions:     reps,
+		Hardware:        measure.CollectHardware(),
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
 	}
-	if opts.Count > 0 {
-		c.Repetitions = opts.Count
-	}
-	return c
 }
 
-// targetRegistry holds registered target adapters. The gr adapter is always
-// registered. Bolt adapters are registered when built with -tags bolt.
-var targetRegistry = map[string]target.Target{}
-
-func init() {
-	registerTarget(grAdapter.New())
+// paramsChecksum hashes the dataset's params.json, so the stamp pins which
+// parameter pools the run drew from. "none" when the dataset has no pools.
+func paramsChecksum(ds engine.Dataset) string {
+	if ds.Dir() == "" {
+		return "none"
+	}
+	data, err := os.ReadFile(filepath.Join(ds.Dir(), "params.json"))
+	if err != nil {
+		return "none"
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
 }
 
-// registerTarget adds a target adapter to the registry. Called from init
-// functions in adapter packages. Panics on duplicate names (programming error).
-func registerTarget(t target.Target) {
-	if _, dup := targetRegistry[t.Name()]; dup {
-		panic("graph-bench: duplicate target registration: " + t.Name())
+// startContainerIfNeeded launches a managed server container for Bolt-plane
+// engines when no server is configured: NEO4J_URI / MEMGRAPH_URI unset,
+// Docker present, and neither --no-docker nor GRAPH_BENCH_SKIP_DOCKER given.
+func startContainerIfNeeded(ctx context.Context, engName string, rc runConfig) (*setup.Container, error) {
+	if rc.noDocker || os.Getenv("GRAPH_BENCH_SKIP_DOCKER") != "" {
+		return nil, nil
 	}
-	targetRegistry[t.Name()] = t
+	var spec setup.ContainerSpec
+	switch engName {
+	case "neo4j":
+		if os.Getenv("NEO4J_URI") != "" {
+			return nil, nil
+		}
+		spec = setup.Neo4j("")
+	case "memgraph":
+		if os.Getenv("MEMGRAPH_URI") != "" {
+			return nil, nil
+		}
+		spec = setup.Memgraph("")
+	default:
+		return nil, nil
+	}
+	if !dockerAvailable() {
+		return nil, nil
+	}
+	fmt.Fprintf(rc.stderr, "run: starting managed %s container (no %s_URI set)\n", engName, envPrefix(engName))
+	c, err := setup.Start(ctx, spec)
+	if err != nil {
+		return nil, fmt.Errorf("%s: managed container: %w", engName, err)
+	}
+	return c, nil
 }
 
-// lookupTarget returns the named target adapter from the registry.
-func lookupTarget(name string) (target.Target, error) {
-	t, ok := targetRegistry[name]
-	if !ok {
-		return nil, fmt.Errorf("unknown engine %q; use 'graph-bench list engines' to see available engines", name)
+func envPrefix(engName string) string {
+	if engName == "memgraph" {
+		return "MEMGRAPH"
 	}
-	return t, nil
+	return "NEO4J"
+}
+
+// dockerAvailable reports whether a docker client binary is on PATH.
+func dockerAvailable() bool {
+	_, err := exec.LookPath("docker")
+	return err == nil
 }

@@ -11,13 +11,13 @@ import (
 	"strings"
 
 	"github.com/tamnd/graph-bench/dataset"
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
 // repackUpstream detects a raw LDBC SNB datagen tree extracted under dir and, when
 // it finds one, rewrites it in place into the canonical nodes/rels + manifest.json
-// layout the dataset package reads. It returns true when it repacked, false when
-// dir is already canonical (a manifest is present) or is not an LDBC tree.
+// layout the dataset package reads (spec 05 §3). It returns true when it repacked,
+// false when dir is already canonical (a manifest is present) or is not an LDBC tree.
 //
 // Why this exists: the LDBC datagen ships pipe-delimited entity files with foreign
 // keys merged into the node rows (Comment.CreatorPersonId and so on), one directory
@@ -30,7 +30,10 @@ import (
 //
 // Determinism: entities are processed in a fixed order, part shards in sorted name
 // order, rows in file order, and every output column set is fixed, so the bytes a
-// run produces depend only on the upstream archive.
+// run produces depend only on the upstream archive. The header strings below are
+// carried from v1 byte-for-byte (lowercase upstream types like "id:int",
+// "creationDate:datetime"): they are part of the checksummed content, and changing
+// them would invalidate every committed pin.
 //
 // Identity: LDBC ids are unique only within an entity, so Person 0, Forum 0, Place 0,
 // Tag 0 all coexist. To load them into one global id space without collisions every
@@ -380,24 +383,30 @@ func (rp *repacker) cleanup() error {
 // writes it, computes the content checksum over the data files plus the recipe
 // block, then writes it again with the checksum filled, the two-pass dance
 // dataset.Verify expects (the checksum cannot cover itself).
+//
+// The recipe fields (Generator "ldbc_snb_datagen", no version, no seed, no params,
+// ";" delimiter, "empty" null) are carried from v1 exactly: they fold into the
+// content checksum, so any change would break every committed pin.
 func (rp *repacker) writeManifest(name string) error {
-	m := &target.Manifest{
+	m := &engine.Manifest{
 		Name:          name,
 		Kind:          "ldbc",
 		Generator:     "ldbc_snb_datagen",
 		ListDelimiter: ";",
 		Null:          "empty",
-		Schema: target.Schema{
-			Nodes:         map[string]target.NodeSchema{},
-			Relationships: map[string]target.RelSchema{},
+		SchemaDef: engine.Schema{
+			Nodes: map[string]engine.NodeSchema{},
+			Rels:  map[string]engine.RelSchema{},
 		},
 	}
 	var nodeCount, edgeCount int64
 	for label, o := range rp.nodes {
 		nodeCount += o.n
-		m.Schema.Nodes[label] = target.NodeSchema{
-			Files:      []string{"nodes/" + label + ".csv"},
-			ID:         "id",
+		m.SchemaDef.Nodes[label] = engine.NodeSchema{
+			Files: []string{"nodes/" + label + ".csv"},
+			// The wiring id is the unnamed structural :ID column; the raw LDBC
+			// id rides along as the id:INT property below.
+			ID:         engine.Column{Type: "ID"},
 			Labels:     nodeLabels(label),
 			Properties: propsOf(rp.nodeHeaders[label]),
 		}
@@ -405,15 +414,15 @@ func (rp *repacker) writeManifest(name string) error {
 	for typ, o := range rp.rels {
 		edgeCount += o.n
 		st, en := relEnds(typ)
-		m.Schema.Relationships[typ] = target.RelSchema{
+		m.SchemaDef.Rels[typ] = engine.RelSchema{
 			Files:      []string{"rels/" + typ + ".csv"},
 			Start:      st,
 			End:        en,
 			Properties: propsOf(rp.relHeaders[typ]),
 		}
 	}
-	m.NodeCount = nodeCount
-	m.EdgeCount = edgeCount
+	m.Invariants.NodeCount = nodeCount
+	m.Invariants.EdgeCount = edgeCount
 	if err := dataset.WriteManifest(rp.dst, m); err != nil {
 		return err
 	}
@@ -478,15 +487,14 @@ func relEnds(typ string) (start, end string) {
 
 // propsOf parses a canonical header and returns its property columns, the non
 // structural ones the manifest's Properties list records.
-func propsOf(header []string) []target.Column {
+func propsOf(header []string) []engine.Column {
 	cols, err := dataset.ParseHeader(header)
 	if err != nil {
 		return nil
 	}
-	structural := map[string]bool{"ID": true, "LABEL": true, "TYPE": true, "START_ID": true, "END_ID": true}
-	var out []target.Column
+	var out []engine.Column
 	for _, c := range cols {
-		if c.Name == "" || structural[c.Type] {
+		if c.Name == "" || dataset.IsStructural(c) {
 			continue
 		}
 		out = append(out, c)

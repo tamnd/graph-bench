@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
 // DefaultSweepPoints is the standard concurrency sweep on the controlled
@@ -12,7 +12,7 @@ import (
 // contention an application generates without requiring larger hardware.
 var DefaultSweepPoints = []int{1, 2, 4, 8, 16, 32}
 
-// CISweepPoints is the truncated sweep for the 2-vCPU CI runner, where the
+// CISweepPoints is the truncated sweep for the small CI runner, where the
 // full sweep would exceed the time budget. Three points capture the isolated
 // latency, a modest concurrent load, and the saturation region.
 var CISweepPoints = []int{1, 4, 16}
@@ -22,10 +22,10 @@ var CISweepPoints = []int{1, 4, 16}
 // query in flight at a time, no queueing, no contention. The open model still
 // applies (arrivals on schedule, latency from intended arrival), but at
 // concurrency 1 with a modest rate the schedule and the engine rarely fight.
-func IsolatedLatency(ctx context.Context, d target.Driver, ops []Op, opt Options) Result {
+func IsolatedLatency(ctx context.Context, sess engine.Session, ops []Op, opt Options) Result {
 	o := opt
 	o.Concurrency = 1
-	return Run(ctx, d, ops, o)
+	return Run(ctx, sess, ops, o)
 }
 
 // Sweep runs the workload at each concurrency point in points and returns a
@@ -37,9 +37,9 @@ func IsolatedLatency(ctx context.Context, d target.Driver, ops []Op, opt Options
 // The caller is expected to pass points in ascending order. Sweep does not
 // sort them, so the Sweep field reflects the order the caller requested, which
 // is the order in the lineage and the report.
-func Sweep(ctx context.Context, d target.Driver, ops []Op, opt Options, points []int) Result {
+func Sweep(ctx context.Context, sess engine.Session, ops []Op, opt Options, points []int) Result {
 	var sweepPts []SweepPoint
-	var baseStats map[target.Class]Stat
+	var baseStats map[engine.Class]Stat
 
 	for i, c := range points {
 		if ctx.Err() != nil {
@@ -47,12 +47,12 @@ func Sweep(ctx context.Context, d target.Driver, ops []Op, opt Options, points [
 		}
 		o := opt
 		o.Concurrency = c
-		r := Run(ctx, d, ops, o)
+		r := Run(ctx, sess, ops, o)
 		if i == 0 {
 			baseStats = r.Stats
 		}
 		// Collect one SweepPoint per class at this concurrency level.
-		classes := make([]target.Class, 0, len(r.Stats))
+		classes := make([]engine.Class, 0, len(r.Stats))
 		for cl := range r.Stats {
 			classes = append(classes, cl)
 		}

@@ -2,215 +2,193 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/tamnd/graph-bench/engine"
+	"github.com/tamnd/graph-bench/gate"
+	"github.com/tamnd/graph-bench/measure"
 	"github.com/tamnd/graph-bench/report"
-	"github.com/tamnd/graph-bench/target"
 )
 
-// gateExitCode wraps a non-zero exit code for commands that need to signal CI
-// failure without printing an error message (the message is already printed).
-type gateExitCode int
+// gateErr carries the gate's exit code (0 pass, 2 budget/regression,
+// 3 verification — spec 08 §9) out through cobra without re-printing.
+type gateErr int
 
-func (e gateExitCode) Error() string { return fmt.Sprintf("gate: failed with exit code %d", int(e)) }
-func (e gateExitCode) ExitCode() int { return int(e) }
+func (e gateErr) Error() string { return fmt.Sprintf("gate: failed with exit code %d", int(e)) }
+func (e gateErr) ExitCode() int { return int(e) }
 
-// Budget is a per-class p99 ceiling for the gate check. All units are
-// durations; a zero value for a class means the budget is unconstrained.
-type Budget struct {
-	PointRead  time.Duration
-	Traversal  time.Duration
-	Subgraph   time.Duration
-	Write      time.Duration
-	Analytical time.Duration
-}
-
-// newGateCmd builds the gate verb. It reads one JSON results file, checks each
-// class p99 against a declared budget, optionally compares p99 against a stored
-// baseline, and exits non-zero on any violation. The violation list is printed
-// to stderr so CI logs capture it. See doc 07 for the full SLO gate design.
+// newGateCmd builds the gate verb. It gates exactly one engine (default zu)
+// on absolute budgets, regression vs a stored baseline, and verification
+// integrity; the comparative matrix reports competitors, it never fails them
+// (F-contract).
 func newGateCmd() *cobra.Command {
 	var (
-		inFile   string
-		lineage  string
-		workload string
-		scale    string
-		engine   string
-
-		// Budget flags: per-class p99 ceilings in duration strings.
-		pointReadBudget  time.Duration
-		traversalBudget  time.Duration
-		subgraphBudget   time.Duration
-		writeBudget      time.Duration
-		analyticalBudget time.Duration
-
-		// Regression flags.
-		regressionFactor float64
-		baselineFile     string
+		inFile     string
+		dir        string
+		baseline   string
+		gateEngine string
+		wlFilter   string
+		regression float64
 	)
-
 	cmd := &cobra.Command{
 		Use:   "gate",
-		Short: "Check a run against its budgets and a stored baseline, for CI",
-		Long: "gate reads a JSON results file (--file) or the newest record per engine " +
-			"from the lineage (--lineage, filtered by --workload/--scale/--engine) " +
-			"and checks each class p99 against the declared budget flags. " +
-			"A budget of 0 for a class means unconstrained. " +
-			"With --regression-factor F (default 1.1), the gate also fails if any class " +
-			"p99 has grown by more than F times the stored baseline. " +
-			"Violations are printed to stderr and the process exits with code 2. " +
-			"Exit 0 means all checks passed.",
+		Short: "Check the gated engine's latest results against budgets and baseline, for CI",
+		Long: "gate reads the newest result per workload for the gated engine " +
+			"(--gate-engine, default zu) from the lineage (--results) or one file " +
+			"(--file) and checks: absolute per-class budgets for the engine's plane, " +
+			"per-query p50/p99 regression against the baseline results (--baseline, " +
+			"a lineage directory or a single JSON file), and verification integrity " +
+			"(any FAIL, any SKIP the baseline had as PASS). Exit codes: 0 pass, " +
+			"2 budget/regression violation, 3 verification failure.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Load results.
-			var results []report.EngineResult
-			var loadErr error
+			// Load the candidate documents.
+			var docs []*report.Document
 			if inFile != "" {
-				f, err := os.Open(inFile)
+				doc, err := report.Read(inFile)
 				if err != nil {
-					return fmt.Errorf("gate: open %s: %w", inFile, err)
+					return fmt.Errorf("gate: %w", err)
 				}
-				r, parseErr := report.ParseJSON(f)
-				f.Close()
-				if parseErr != nil {
-					return fmt.Errorf("gate: parse %s: %w", inFile, parseErr)
-				}
-				results = r
+				docs = []*report.Document{doc}
 			} else {
-				base := lineage
-				if base == "" {
-					base = "results"
-				}
-				results, loadErr = report.ReadLineage(base, workload, scale, engine)
-				if loadErr != nil {
-					return fmt.Errorf("gate: lineage: %w", loadErr)
-				}
-				// Keep only the newest per engine.
-				results = latestPerEngine(results)
-			}
-
-			if len(results) == 0 {
-				return fmt.Errorf("gate: no results found")
-			}
-
-			budgets := map[target.Class]time.Duration{
-				target.PointRead:  pointReadBudget,
-				target.Traversal:  traversalBudget,
-				target.Subgraph:   subgraphBudget,
-				target.Write:      writeBudget,
-				target.Analytical: analyticalBudget,
-			}
-
-			var violations []string
-			for _, er := range results {
-				for cl, ceiling := range budgets {
-					if ceiling == 0 {
-						continue
-					}
-					stat, ok := er.Result.Stats[cl]
-					if !ok {
-						continue
-					}
-					if stat.P99 > ceiling {
-						violations = append(violations, fmt.Sprintf(
-							"  %s %s p99=%s budget=%s (%.1fx over)",
-							er.Name, cl, stat.P99, ceiling,
-							float64(stat.P99)/float64(ceiling),
-						))
-					}
-				}
-			}
-
-			if len(violations) > 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "gate: %d budget violation(s):\n", len(violations))
-				for _, v := range violations {
-					fmt.Fprintln(cmd.ErrOrStderr(), v)
-				}
-				return gateExitCode(2)
-			}
-
-			// Regression check: compare current p99 against baseline, fail if
-			// any class p99 has grown by more than regressionFactor.
-			if baselineFile != "" && regressionFactor > 0 && regressionFactor != 1.0 {
-				bf, err := os.Open(baselineFile)
+				all, err := readResults(dir, wlFilter, "", gateEngine)
 				if err != nil {
-					return fmt.Errorf("gate: open baseline %s: %w", baselineFile, err)
+					return fmt.Errorf("gate: %w", err)
 				}
-				baseline, parseErr := report.ParseJSON(bf)
-				bf.Close()
-				if parseErr != nil {
-					return fmt.Errorf("gate: parse baseline %s: %w", baselineFile, parseErr)
-				}
-				// Index baseline by engine name for O(1) lookup.
-				baseIdx := map[string]report.EngineResult{}
-				for _, b := range latestPerEngine(baseline) {
-					baseIdx[b.Name] = b
-				}
-				for _, er := range results {
-					b, ok := baseIdx[er.Name]
-					if !ok {
-						continue
-					}
-					// Refuse to divide a service-time number by an open-model one:
-					// they are different quantities (the open-model number carries
-					// queueing the service-time number excludes), so a ratio across
-					// them is meaningless. Only guard when both are stamped; an
-					// unstamped older record (empty model) is let through for
-					// back-compat.
-					if er.Result.Latency != "" && b.Result.Latency != "" &&
-						er.Result.Latency != b.Result.Latency {
-						violations = append(violations, fmt.Sprintf(
-							"  %s latency-model mismatch: current=%s baseline=%s "+
-								"(cannot compare; re-run both at the same offered rate)",
-							er.Name, er.Result.Latency, b.Result.Latency))
-						continue
-					}
-					for cl, stat := range er.Result.Stats {
-						bstat, ok := b.Result.Stats[cl]
-						if !ok || bstat.P99 == 0 {
-							continue
-						}
-						ratio := float64(stat.P99) / float64(bstat.P99)
-						if ratio > regressionFactor {
-							violations = append(violations, fmt.Sprintf(
-								"  %s %s regression: current p99=%s baseline=%s ratio=%.2fx (limit %.2fx)",
-								er.Name, cl, stat.P99, bstat.P99, ratio, regressionFactor,
-							))
-						}
-					}
-				}
-				if len(violations) > 0 {
-					fmt.Fprintf(cmd.ErrOrStderr(), "gate: %d regression violation(s):\n", len(violations))
-					for _, v := range violations {
-						fmt.Fprintln(cmd.ErrOrStderr(), v)
-					}
-					return gateExitCode(2)
-				}
-			} else if regressionFactor > 0 && regressionFactor != 1.0 && baselineFile == "" {
-				fmt.Fprintf(cmd.ErrOrStderr(),
-					"gate: --regression-factor %.2f requires --baseline to compare against; skipping regression check\n",
-					regressionFactor)
+				docs = latestPerWorkload(all)
+			}
+			if len(docs) == 0 {
+				return fmt.Errorf("gate: no results for engine %q", gateEngine)
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), "gate: all checks passed")
-			return nil
+			// Load baseline documents, newest per workload, when given.
+			baseDocs := map[string]*report.Document{}
+			if baseline != "" {
+				var bd []*report.Document
+				if doc, err := report.Read(baseline); err == nil {
+					bd = []*report.Document{doc}
+				} else if all, err := readResults(baseline, wlFilter, "", gateEngine); err == nil {
+					bd = latestPerWorkload(all)
+				}
+				for _, d := range bd {
+					baseDocs[d.Workload] = d
+				}
+			}
+
+			d := gate.Decision{Engine: gateEngine}
+			for _, doc := range docs {
+				res := docToResult(doc)
+				plane := engine.Plane(doc.Condition.Plane)
+				d.Violations = append(d.Violations, gate.CheckBudgets(res, plane, doc.Workload)...)
+				if base, ok := baseDocs[doc.Workload]; ok {
+					d.Violations = append(d.Violations,
+						gate.CheckRegression(res, docToResult(base), gate.Options{RegressionFactor: regression})...)
+				}
+				d.Violations = append(d.Violations, checkDocVerification(doc, baseDocs[doc.Workload])...)
+			}
+
+			out := cmd.OutOrStdout()
+			if d.Pass() {
+				fmt.Fprintf(out, "gate: %s: all checks passed (%d workload(s))\n", gateEngine, len(docs))
+				return nil
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "gate: %s: %d violation(s):\n", gateEngine, len(d.Violations))
+			for _, v := range d.Violations {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", v)
+			}
+			return gateErr(d.ExitCode())
 		},
 	}
-
 	f := cmd.Flags()
-	f.StringVar(&inFile, "file", "", "JSON results file (from 'run --format json')")
-	f.StringVar(&lineage, "lineage", "", "lineage tree root (default: results/)")
-	f.StringVar(&workload, "workload", "", "filter lineage by workload name")
-	f.StringVar(&scale, "scale", "", "filter lineage by scale factor")
-	f.StringVar(&engine, "engine", "", "filter lineage by engine name")
-	f.DurationVar(&pointReadBudget, "point-read-budget", 0, "p99 ceiling for PointRead class (0=unconstrained)")
-	f.DurationVar(&traversalBudget, "traversal-budget", 0, "p99 ceiling for Traversal class (0=unconstrained)")
-	f.DurationVar(&subgraphBudget, "subgraph-budget", 0, "p99 ceiling for Subgraph class (0=unconstrained)")
-	f.DurationVar(&writeBudget, "write-budget", 0, "p99 ceiling for Write class (0=unconstrained)")
-	f.DurationVar(&analyticalBudget, "analytical-budget", 0, "p99 ceiling for Analytical class (0=unconstrained)")
-	f.Float64Var(&regressionFactor, "regression-factor", 1.1, "max allowed p99 growth vs baseline (1.0=no regression)")
-	f.StringVar(&baselineFile, "baseline", "", "JSON results file to compare current p99 against (required for --regression-factor to take effect)")
+	f.StringVar(&inFile, "file", "", "single JSON result document to gate")
+	f.StringVar(&dir, "results", "results", "lineage directory holding the candidate results")
+	f.StringVar(&baseline, "baseline", "", "baseline lineage directory or JSON file")
+	f.StringVar(&gateEngine, "gate-engine", "zu", "the one engine the gate applies to")
+	f.StringVar(&wlFilter, "workload", "", "gate only this workload")
+	f.Float64Var(&regression, "regression-factor", gate.DefaultRegressionFactor,
+		"allowed p50/p99 growth over the baseline")
 	return cmd
+}
+
+// latestPerWorkload keeps the newest document per workload name.
+func latestPerWorkload(docs []*report.Document) []*report.Document {
+	seen := map[string]int{}
+	var out []*report.Document
+	for _, d := range docs {
+		if idx, ok := seen[d.Workload]; !ok {
+			seen[d.Workload] = len(out)
+			out = append(out, d)
+		} else if !d.Condition.StartedAt.Before(out[idx].Condition.StartedAt) {
+			out[idx] = d
+		}
+	}
+	return out
+}
+
+// docToResult maps a stored document back into a measure.Result so the gate
+// checks (which take live results) apply to lineage records too.
+func docToResult(doc *report.Document) measure.Result {
+	stats := map[engine.Class]measure.Stat{}
+	for name, cs := range doc.Classes {
+		stats[engine.Class(name)] = classStatToStat(engine.Class(name), cs)
+	}
+	byQuery := map[string]measure.Stat{}
+	for id, cs := range doc.Queries {
+		byQuery[id] = classStatToStat("", cs)
+	}
+	return measure.Result{
+		Stats:     stats,
+		ByQuery:   byQuery,
+		Latency:   doc.Condition.LatencyModel,
+		Condition: doc.Condition,
+	}
+}
+
+func classStatToStat(cl engine.Class, cs report.ClassStat) measure.Stat {
+	return measure.Stat{
+		Class:         cl,
+		Count:         cs.Count,
+		Errors:        cs.Errors,
+		Min:           cs.Min,
+		P50:           cs.P50,
+		P90:           cs.P90,
+		P95:           cs.P95,
+		P99:           cs.P99,
+		Max:           cs.Max,
+		Mean:          cs.Mean,
+		StdDev:        cs.StdDev,
+		Throughput:    cs.Throughput,
+		RowThroughput: cs.RowThroughput,
+	}
+}
+
+// checkDocVerification applies the verification-integrity rules (spec 08 §9
+// item 4) to a stored document: any FAIL fails the gate, and any SKIP that
+// the baseline document verified as PASS is a coverage regression.
+func checkDocVerification(doc, base *report.Document) []gate.Violation {
+	baselinePass := map[string]bool{}
+	if base != nil {
+		for _, v := range base.Verification {
+			if v.Outcome == "PASS" {
+				baselinePass[v.QueryID] = true
+			}
+		}
+	}
+	var out []gate.Violation
+	for _, v := range doc.Verification {
+		switch v.Outcome {
+		case "FAIL":
+			out = append(out, gate.Violation{Kind: "verification", Where: v.QueryID, Detail: v.Reason})
+		case "SKIP":
+			if baselinePass[v.QueryID] {
+				out = append(out, gate.Violation{
+					Kind:  "verification",
+					Where: v.QueryID,
+					Detail: fmt.Sprintf("coverage regression: baseline PASS is now SKIP (%s)",
+						v.Reason),
+				})
+			}
+		}
+	}
+	return out
 }

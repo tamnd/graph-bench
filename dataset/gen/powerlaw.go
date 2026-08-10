@@ -6,30 +6,35 @@ import (
 	"math"
 	"strconv"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
 // PowerLaw is the heavy-tailed generator: N nodes whose out-degrees follow a
 // discrete power law with exponent Gamma, floored at MinDeg and clamped at
-// MaxDeg. A few hub nodes have very high degree and most nodes sit near MinDeg,
-// which is the distribution real graphs (social, web, citation) approximate and
-// the one that exposes whether an engine handles a high-degree vertex gracefully
-// instead of materializing a huge neighbor list.
+// MaxDeg. A few hub nodes have very high degree and most nodes sit near
+// MinDeg, which is the distribution real graphs (social, web, citation)
+// approximate and the one that exposes whether an engine handles a
+// high-degree vertex gracefully instead of materializing a huge neighbor
+// list.
 //
-// Each node's degree is drawn by inverting the power-law cumulative distribution
-// over the integer range [MinDeg, MaxDeg], then that many distinct targets are
-// drawn uniformly (rejecting self-loops and duplicates). This gives an exact
-// power-law out-degree and an exact edge count (the sum of the drawn degrees),
-// which is simpler and more directly reproducible than the configuration-model
-// stub matching while preserving the structural property that matters here. The
-// divergence from the spec's configuration-model sketch is recorded in the
-// implementation note.
+// Each node's degree is drawn by inverting the power-law cumulative
+// distribution over the integer range [MinDeg, MaxDeg], then that many
+// distinct targets are drawn uniformly (rejecting self-loops and duplicates).
+// This gives an exact power-law out-degree and an exact edge count (the sum of
+// the drawn degrees), which is simpler and more directly reproducible than the
+// configuration-model stub matching while preserving the structural property
+// that matters here.
 type PowerLaw struct{}
 
+// Name returns "powerlaw".
 func (PowerLaw) Name() string { return "powerlaw" }
-func (PowerLaw) Version() int { return 1 }
 
-func (g PowerLaw) Generate(ctx context.Context, cfg Config, w Writer) (*target.Manifest, error) {
+// Version is the algorithm version; the emitted bytes are identical to v1's
+// version 1.
+func (PowerLaw) Version() string { return "1" }
+
+// Generate emits the power-law graph. See Generator.Generate.
+func (g PowerLaw) Generate(ctx context.Context, cfg Config, w Writer) (*engine.Manifest, error) {
 	if cfg.N <= 0 {
 		return nil, fmt.Errorf("powerlaw: N must be > 0, got %d", cfg.N)
 	}
@@ -60,11 +65,12 @@ func (g PowerLaw) Generate(ctx context.Context, cfg Config, w Writer) (*target.M
 		return nil, err
 	}
 
-	// Build the cumulative distribution over [minDeg, maxDeg], P(d) proportional
-	// to d^-Gamma, once. A degree draw is a single search into this table.
+	// Build the cumulative distribution over [minDeg, maxDeg], P(d)
+	// proportional to d^-Gamma, once. A degree draw is a single search into
+	// this table.
 	cdf := powerLawCDF(minDeg, maxDeg, cfg.Gamma)
 
-	rels, err := w.RelFile(relType, relHeader())
+	rels, err := w.RelFile(relType, nodeLabel, nodeLabel, relHeader())
 	if err != nil {
 		return nil, err
 	}
@@ -103,14 +109,20 @@ func (g PowerLaw) Generate(ctx context.Context, cfg Config, w Writer) (*target.M
 		return nil, err
 	}
 
-	m := &target.Manifest{
+	m := &engine.Manifest{
 		Name:             fmt.Sprintf("powerlaw-n%d-g%g", cfg.N, cfg.Gamma),
 		Kind:             "synthetic",
 		Generator:        g.Name(),
 		GeneratorVersion: g.Version(),
 		Seed:             cfg.Seed,
-		Params:           map[string]any{"n": cfg.N, "gamma": cfg.Gamma, "minDeg": minDeg, "maxDeg": maxDeg},
-		Invariants:       target.Invariants{NodeCount: i64p(cfg.N), EdgeCount: i64p(edges)},
+		Scale:            fmt.Sprintf("n%d-g%g", cfg.N, cfg.Gamma),
+		Params: map[string]string{
+			"n":      iparam(cfg.N),
+			"gamma":  fparam(cfg.Gamma),
+			"minDeg": iparam(minDeg),
+			"maxDeg": iparam(maxDeg),
+		},
+		Invariants: engine.Invariants{NodeCount: cfg.N, EdgeCount: edges},
 	}
 	return w.Finalize(m)
 }

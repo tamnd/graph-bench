@@ -64,21 +64,33 @@ func TestRepackUpstream(t *testing.T) {
 		t.Fatalf("open repacked dataset: %v", err)
 	}
 	m := ds.Manifest()
-	if m.NodeCount == 0 || m.EdgeCount == 0 {
-		t.Fatalf("empty dataset: %d nodes, %d edges", m.NodeCount, m.EdgeCount)
+	if m.Invariants.NodeCount == 0 || m.Invariants.EdgeCount == 0 {
+		t.Fatalf("empty dataset: %d nodes, %d edges", m.Invariants.NodeCount, m.Invariants.EdgeCount)
 	}
-	t.Logf("repacked: %d nodes, %d edges, checksum %s", m.NodeCount, m.EdgeCount, m.Checksum)
+	t.Logf("repacked: %d nodes, %d edges, checksum %s", m.Invariants.NodeCount, m.Invariants.EdgeCount, m.Checksum)
 
-	// Every node label and relationship type the schema names must have a readable
-	// typed header, the contract the gr adapter loads from.
-	for label := range m.Schema.Nodes {
-		if _, _, err := ds.NodeFiles(label); err != nil {
+	// Every node label and relationship type the schema names must resolve to files
+	// with a readable typed header, the contract the engine adapters load from.
+	for label := range m.SchemaDef.Nodes {
+		files, err := ds.NodeFiles(label)
+		if err != nil {
 			t.Fatalf("node files for %s: %v", label, err)
 		}
+		for _, f := range files {
+			if _, err := dataset.ReadHeader(f); err != nil {
+				t.Fatalf("header of %s: %v", f, err)
+			}
+		}
 	}
-	for typ := range m.Schema.Relationships {
-		if _, _, err := ds.RelFiles(typ); err != nil {
+	for typ := range m.SchemaDef.Rels {
+		files, err := ds.RelFiles(typ)
+		if err != nil {
 			t.Fatalf("rel files for %s: %v", typ, err)
+		}
+		for _, f := range files {
+			if _, err := dataset.ReadHeader(f); err != nil {
+				t.Fatalf("header of %s: %v", f, err)
+			}
 		}
 	}
 

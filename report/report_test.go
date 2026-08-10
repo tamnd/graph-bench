@@ -1,281 +1,386 @@
-package report_test
+package report
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/measure"
-	"github.com/tamnd/graph-bench/report"
-	"github.com/tamnd/graph-bench/target"
 )
 
-// makeEngineResult builds a test EngineResult with a single class stat.
-func makeEngineResult(name, plane string, class target.Class, p50, p99 time.Duration, tput float64) report.EngineResult {
-	return report.EngineResult{
-		Name:  name,
-		Plane: plane,
-		Result: measure.Result{
-			Stats: map[target.Class]measure.Stat{
-				class: {Class: class, Count: 100, P50: p50, P99: p99, Throughput: tput},
+// sampleResult builds a fully-stamped measure.Result for round-trip tests.
+func sampleResult(engineName, plane string, base time.Duration) measure.Result {
+	return measure.Result{
+		Stats: map[engine.Class]measure.Stat{
+			engine.PointRead: {
+				Class: engine.PointRead, Count: 100, Errors: 2,
+				Min: base / 2, P50: base, P90: 2 * base, P95: 3 * base,
+				P99: 4 * base, Max: 5 * base, Mean: base, StdDev: base / 4,
+				Throughput: 1234.5, RowThroughput: 2469.0,
 			},
+			engine.Analytical: {
+				Class: engine.Analytical, Count: 5,
+				Min: 2 * time.Second, P50: 3 * time.Second, P99: 4 * time.Second,
+				Max: 4 * time.Second, Mean: 3 * time.Second,
+			},
+		},
+		ByQuery: map[string]measure.Stat{
+			"is1": {Class: engine.PointRead, Count: 50, Min: base / 2, P50: base, P99: 4 * base, Max: 5 * base, Mean: base},
+			"q9":  {Class: engine.Analytical, Count: 5, P50: 3 * time.Second, P99: 4 * time.Second},
+		},
+		Cold: map[engine.Class]measure.Stat{
+			engine.PointRead: {Class: engine.PointRead, Count: 10, P50: 10 * base, P99: 20 * base},
+		},
+		Load:  engine.LoadStats{Duration: 90 * time.Millisecond, Nodes: 1000, Edges: 5000, BytesOnDisk: 1 << 20, Method: "copy"},
+		Sweep: []measure.SweepPoint{{Concurrency: 4, Class: engine.PointRead, Throughput: 900, P99: 6 * base}},
+		Resource: measure.Resource{
+			HeapAllocBytes: 1 << 24, MaxRSSBytes: 1 << 26, DatasetBytes: 1 << 22, LoadBytes: 1 << 20,
+		},
+		Latency: measure.ServiceTimeLatency,
+		Condition: measure.Condition{
+			HarnessVersion:  "0.3.0",
+			HarnessCommit:   "abc1234",
+			Engine:          engineName,
+			EngineVersion:   "1.2.3",
+			Plane:           plane,
+			Dataset:         "snb-sf1",
+			Scale:           "SF1",
+			DatasetChecksum: "sha256:fd000c2a1c8fe54f57761318492dd1c481374ae74f58a88cebffb272b5b79337",
+			Workload:        "snb-short",
+			LatencyModel:    measure.ServiceTimeLatency,
+			WarmupOutcome:   "stable",
+			Cache:           "warm",
+			StartedAt:       time.Date(2026, 8, 10, 12, 30, 45, 0, time.UTC),
+			FinishedAt:      time.Date(2026, 8, 10, 12, 35, 0, 0, time.UTC),
 		},
 	}
 }
 
-// TestAssembleMatrixRowOrder proves in-process engines come before Bolt in the
-// assembled matrix (F3, doc 08 section 4.4).
-func TestAssembleMatrixRowOrder(t *testing.T) {
-	results := []report.EngineResult{
-		makeEngineResult("neo4j", "bolt", target.PointRead, 50*time.Microsecond, 200*time.Microsecond, 100),
-		makeEngineResult("gr", "inproc", target.PointRead, 10*time.Microsecond, 40*time.Microsecond, 500),
-	}
-	m := report.Assemble(results, report.ColumnClass, "")
-	if len(m.Rows) != 2 {
-		t.Fatalf("want 2 rows, got %d", len(m.Rows))
-	}
-	if m.Rows[0].Plane != "inproc" {
-		t.Errorf("first row plane=%q, want inproc (in-process before Bolt)", m.Rows[0].Plane)
-	}
-	if m.Rows[1].Plane != "bolt" {
-		t.Errorf("second row plane=%q, want bolt", m.Rows[1].Plane)
+func sampleVerification() []Verification {
+	return []Verification{
+		{QueryID: "is1", Outcome: "PASS", Samples: 4, Dialect: "cypher"},
+		{QueryID: "is2", Outcome: "SKIP", Reason: "no-dialect-text", Samples: 0},
+		{QueryID: "q9", Outcome: "PASS", Samples: 2, Dialect: "cypher"},
 	}
 }
 
-// TestAssembleMatrixColumns proves the column list includes only classes seen
-// in the results, in canonical order (PointRead, Traversal, ...).
-func TestAssembleMatrixColumns(t *testing.T) {
-	results := []report.EngineResult{
-		makeEngineResult("gr", "inproc", target.Traversal, 1*time.Millisecond, 5*time.Millisecond, 50),
-		makeEngineResult("neo4j", "bolt", target.PointRead, 50*time.Microsecond, 200*time.Microsecond, 100),
+// TestWriteReadRoundTrip writes a schema-3 document to the lineage and reads
+// it back, checking the lineage filename shape and stat fidelity.
+func TestWriteReadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	doc := FromMeasure("snb-short", "snb", "spec-following; own scheduler", sampleResult("zu", "inproc", 200*time.Microsecond), sampleVerification())
+	if doc.Schema != 3 {
+		t.Fatalf("FromMeasure schema = %d, want 3", doc.Schema)
 	}
-	m := report.Assemble(results, report.ColumnClass, "")
-	// PointRead and Traversal seen; PointRead should come first.
-	if len(m.Columns) < 2 {
-		t.Fatalf("want at least 2 columns, got %d", len(m.Columns))
+
+	path, err := Write(dir, doc)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
 	}
-	if m.Columns[0] != "PointRead" {
-		t.Errorf("first column=%q, want PointRead", m.Columns[0])
+	wantName := "20260810T123045Z-zu-inproc-fd000c2a.json"
+	if filepath.Base(path) != wantName {
+		t.Errorf("lineage filename = %s, want %s", filepath.Base(path), wantName)
 	}
-	if m.Columns[1] != "Traversal" {
-		t.Errorf("second column=%q, want Traversal", m.Columns[1])
+	wantDir := filepath.Join(dir, "snb-short", "SF1")
+	if filepath.Dir(path) != wantDir {
+		t.Errorf("lineage dir = %s, want %s", filepath.Dir(path), wantDir)
+	}
+
+	got, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.Schema != 3 || got.Workload != "snb-short" || got.Family != "snb" {
+		t.Errorf("round-trip header = (%d,%q,%q)", got.Schema, got.Workload, got.Family)
+	}
+	pr := got.Classes["point-read"]
+	if pr.P99 != 800*time.Microsecond || pr.Count != 100 || pr.Errors != 2 {
+		t.Errorf("point-read round-trip = %+v", pr)
+	}
+	if pr.Throughput != 1234.5 || pr.RowThroughput != 2469.0 {
+		t.Errorf("throughput round-trip = %v/%v", pr.Throughput, pr.RowThroughput)
+	}
+	if got.Queries["is1"].P50 != 200*time.Microsecond {
+		t.Errorf("query is1 p50 = %v", got.Queries["is1"].P50)
+	}
+	if got.Cold["point-read"].P99 != 4*time.Millisecond {
+		t.Errorf("cold p99 = %v", got.Cold["point-read"].P99)
+	}
+	if got.Condition.Engine != "zu" || got.Condition.LatencyModel != measure.ServiceTimeLatency {
+		t.Errorf("condition round-trip = %q/%q", got.Condition.Engine, got.Condition.LatencyModel)
+	}
+	if got.Condition.WarmupOutcome != "stable" || !got.Condition.StartedAt.Equal(doc.Condition.StartedAt) {
+		t.Errorf("condition warmup/start = %q/%v", got.Condition.WarmupOutcome, got.Condition.StartedAt)
+	}
+	if len(got.Verification) != 3 || got.Verification[1].Reason != "no-dialect-text" {
+		t.Errorf("verification round-trip = %+v", got.Verification)
+	}
+	if got.Load.Method != "copy" || got.Load.Duration != 90*time.Millisecond {
+		t.Errorf("load round-trip = %+v", got.Load)
+	}
+	if len(got.Sweep) != 1 || got.Sweep[0].Class != "point-read" {
+		t.Errorf("sweep round-trip = %+v", got.Sweep)
 	}
 }
 
-// TestAssembleMatrixEmptyCell proves an engine missing a class gets an empty
-// cell.
-func TestAssembleMatrixEmptyCell(t *testing.T) {
-	// neo4j only has PointRead; gr only has Traversal.
-	neoResult := makeEngineResult("neo4j", "bolt", target.PointRead, 50*time.Microsecond, 200*time.Microsecond, 100)
-	grResult := makeEngineResult("gr", "inproc", target.Traversal, 1*time.Millisecond, 5*time.Millisecond, 50)
-	results := []report.EngineResult{neoResult, grResult}
-	m := report.Assemble(results, report.ColumnClass, "")
-	for _, row := range m.Rows {
-		for col, cell := range row.Cells {
-			if row.Name == "neo4j" && col == "Traversal" {
-				if !cell.Empty {
-					t.Error("neo4j Traversal cell should be empty")
-				}
-			}
-			if row.Name == "gr" && col == "PointRead" {
-				if !cell.Empty {
-					t.Error("gr PointRead cell should be empty")
-				}
-			}
+// TestWriteNoOverwrite asserts the lineage is append-only: a second write of
+// the same stamp is refused, never replaced.
+func TestWriteNoOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	doc := FromMeasure("snb-short", "snb", "", sampleResult("zu", "inproc", time.Millisecond), nil)
+	if _, err := Write(dir, doc); err != nil {
+		t.Fatalf("first Write: %v", err)
+	}
+	if _, err := Write(dir, doc); err == nil {
+		t.Fatal("second Write of same stamp succeeded; lineage must be append-only")
+	}
+}
+
+// TestWriteRefusesIncomplete asserts Write refuses stamps missing the fields
+// the lineage path is built from.
+func TestWriteRefusesIncomplete(t *testing.T) {
+	doc := FromMeasure("", "", "", measure.Result{}, nil)
+	if _, err := Write(t.TempDir(), doc); err == nil {
+		t.Fatal("Write accepted a document with no workload/engine/timestamp")
+	}
+}
+
+// TestReadSchema2 reads a real v1 lineage record (copied verbatim from
+// results/micro-grid/SF1) and checks the best-effort mapping.
+func TestReadSchema2(t *testing.T) {
+	doc, err := Read(filepath.Join("testdata", "20260624T101112Z-ladybug-inproc-fd000c2a.json"))
+	if err != nil {
+		t.Fatalf("Read schema-2: %v", err)
+	}
+	if doc.Schema != 2 {
+		t.Errorf("schema = %d, want 2", doc.Schema)
+	}
+	// v1 class 1 = Traversal.
+	tr, ok := doc.Classes["traversal"]
+	if !ok {
+		t.Fatalf("classes = %v, want traversal key", doc.Classes)
+	}
+	if tr.Count != 250 || tr.Errors != 50 || tr.P50 != 73528917*time.Nanosecond {
+		t.Errorf("traversal = %+v", tr)
+	}
+	q, ok := doc.Queries["micro-khop1"]
+	if !ok || q.P50 != 15881459*time.Nanosecond || q.Class != "traversal" {
+		t.Errorf("micro-khop1 = %+v (ok=%v)", q, ok)
+	}
+	c := doc.Condition
+	if c.Engine != "ladybug" || c.EngineVersion != "0.17.1" || c.Plane != "inproc" {
+		t.Errorf("condition engine = %q/%q/%q", c.Engine, c.EngineVersion, c.Plane)
+	}
+	if c.Workload != "micro-grid" || doc.Workload != "micro-grid" || c.Scale != "SF1" {
+		t.Errorf("condition workload/scale = %q/%q", c.Workload, c.Scale)
+	}
+	if !strings.HasPrefix(c.DatasetChecksum, "sha256:fd000c2a") {
+		t.Errorf("checksum = %q", c.DatasetChecksum)
+	}
+	if c.StartedAt.IsZero() || c.StartedAt.Year() != 2026 {
+		t.Errorf("StartedAt = %v", c.StartedAt)
+	}
+	if c.Hardware.OS != "darwin" || c.Hardware.Arch != "arm64" {
+		t.Errorf("hardware os/arch = %q/%q", c.Hardware.OS, c.Hardware.Arch)
+	}
+	if doc.Load.Duration != 71358333*time.Nanosecond || doc.Load.BytesOnDisk != -1 {
+		t.Errorf("load = %+v", doc.Load)
+	}
+}
+
+// TestUpdateIndex publishes two documents and regenerates INDEX.md.
+func TestUpdateIndex(t *testing.T) {
+	dir := t.TempDir()
+	a := FromMeasure("snb-short", "snb", "", sampleResult("zu", "inproc", time.Millisecond), nil)
+	b := FromMeasure("snb-short", "snb", "", sampleResult("neo4j", "bolt", 2*time.Millisecond), nil)
+	for _, doc := range []*Document{a, b} {
+		if _, err := Write(dir, doc); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if err := UpdateIndex(dir); err != nil {
+		t.Fatalf("UpdateIndex: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "INDEX.md"))
+	if err != nil {
+		t.Fatalf("read INDEX.md: %v", err)
+	}
+	idx := string(data)
+	for _, want := range []string{
+		"| Workload | Scale | Engine | Plane | Date | File |",
+		"| snb-short | SF1 | zu | inproc | 2026-08-10 |",
+		"| snb-short | SF1 | neo4j | bolt | 2026-08-10 |",
+		"(snb-short/SF1/20260810T123045Z-zu-inproc-fd000c2a.json)",
+	} {
+		if !strings.Contains(idx, want) {
+			t.Errorf("INDEX.md missing %q\n%s", want, idx)
+		}
+	}
+	// Sorted: within the same workload/scale, filename order (neo4j < zu).
+	if strings.Index(idx, "neo4j-bolt") > strings.Index(idx, "zu-inproc") {
+		t.Error("INDEX.md rows not sorted by filename within workload/scale")
+	}
+	// Regeneration is idempotent.
+	if err := UpdateIndex(dir); err != nil {
+		t.Fatalf("second UpdateIndex: %v", err)
+	}
+}
+
+// TestPickUnit covers the four-unit auto-selection ladder.
+func TestPickUnit(t *testing.T) {
+	cases := []struct {
+		vals []time.Duration
+		want string
+	}{
+		{nil, "ms"},
+		{[]time.Duration{400 * time.Nanosecond, 600 * time.Nanosecond}, "ns"},
+		{[]time.Duration{50 * time.Microsecond, 150 * time.Microsecond}, "µs"},
+		{[]time.Duration{2 * time.Millisecond, 40 * time.Millisecond}, "ms"},
+		{[]time.Duration{3 * time.Second}, "s"},
+	}
+	for _, c := range cases {
+		if got := pickUnit(c.vals); got != c.want {
+			t.Errorf("pickUnit(%v) = %q, want %q", c.vals, got, c.want)
 		}
 	}
 }
 
-// TestAssembleCellMetrics proves cell P99 and P50 come from the Stats map.
-func TestAssembleCellMetrics(t *testing.T) {
-	er := makeEngineResult("gr", "inproc", target.PointRead, 10*time.Microsecond, 41*time.Microsecond, 0)
-	m := report.Assemble([]report.EngineResult{er}, report.ColumnClass, "")
-	if len(m.Rows) != 1 {
-		t.Fatalf("want 1 row, got %d", len(m.Rows))
-	}
-	cell := m.Rows[0].Cells["PointRead"]
-	if cell.Metric != 41*time.Microsecond {
-		t.Errorf("cell.Metric=%v, want 41µs", cell.Metric)
-	}
-	if cell.P50 != 10*time.Microsecond {
-		t.Errorf("cell.P50=%v, want 10µs", cell.P50)
-	}
+// testMatrix builds a two-engine matrix with a SKIP and a FAIL verdict.
+func testMatrix() *Matrix {
+	fast := FromMeasure("snb-short", "snb", "spec-following; own scheduler",
+		sampleResult("zu", "inproc", 200*time.Microsecond),
+		[]Verification{
+			{QueryID: "is1", Outcome: "PASS", Samples: 4},
+			{QueryID: "is2", Outcome: "SKIP", Reason: "no-dialect-text"},
+			{QueryID: "q9", Outcome: "PASS", Samples: 2},
+		})
+	slow := FromMeasure("snb-short", "snb", "spec-following; own scheduler",
+		sampleResult("neo4j", "bolt", 300*time.Microsecond),
+		[]Verification{
+			{QueryID: "is1", Outcome: "PASS", Samples: 4},
+			{QueryID: "is2", Outcome: "PASS", Samples: 4},
+			{QueryID: "q9", Outcome: "FAIL", Reason: "row 0: got 7, want 9"},
+		})
+	// is2 passed on neo4j but zu skipped it; q9 failed on neo4j.
+	delete(slow.Queries, "q9")
+	slow.Queries["is2"] = slow.Queries["is1"]
+	return NewMatrix([]*Document{slow, fast})
 }
 
-// TestRenderTable proves the table renderer emits engine and plane columns.
+// TestRenderTable asserts the layout and footers by key substrings rather
+// than full golden bytes: engine column pairs, plane ordering, unit choice,
+// SKIP/FAIL cells, fidelity footer, condition footer.
 func TestRenderTable(t *testing.T) {
-	er := makeEngineResult("gr", "inproc", target.PointRead, 10*time.Microsecond, 41*time.Microsecond, 200)
-	m := report.Assemble([]report.EngineResult{er}, report.ColumnClass, "snb-short SF1 warm")
+	m := testMatrix()
+	// Plane order: inproc before bolt regardless of input order.
+	if m.Docs[0].Condition.Engine != "zu" {
+		t.Fatalf("matrix plane order: first doc = %s, want zu (inproc)", m.Docs[0].Condition.Engine)
+	}
 	var buf bytes.Buffer
-	if err := report.Render(m, report.FormatTable, &buf); err != nil {
-		t.Fatalf("Render table: %v", err)
-	}
+	RenderTable(&buf, m)
 	out := buf.String()
-	if !strings.Contains(out, "gr") {
-		t.Error("table output should contain engine name gr")
+	for _, want := range []string{
+		"zu/inproc",
+		"neo4j/bolt",
+		"Class / Query",
+		"point-read",
+		"analytical",
+		"point-read (cold)",
+		"  is1", // query detail indented under rollups
+		"SKIP(no-dialect-text)",
+		"FAIL",
+		"µs",  // point-read row magnitude picks microseconds
+		".00", // sub-unit precision digits present
+		"fidelity: snb-short: spec-following; own scheduler",
+		"zu/inproc: version 1.2.3, dataset fd000c2a, latency service-time, warmup stable, tuned=false",
+		"neo4j/bolt: version 1.2.3",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q\n%s", want, out)
+		}
 	}
-	if !strings.Contains(out, "inproc") {
-		t.Error("table output should contain plane inproc")
+	// Class rollups come before per-query detail (Interpretation order).
+	if strings.Index(out, "point-read") > strings.Index(out, "is1") {
+		t.Error("class rollups must precede per-query detail")
 	}
-	if !strings.Contains(out, "PointRead") {
-		t.Error("table output should contain column PointRead")
-	}
-	if !strings.Contains(out, "snb-short SF1 warm") {
-		t.Error("table output should contain run conditions")
+	// Analytical row renders in seconds, not a 4000000000ns blob.
+	if !regexp.MustCompile(`3\.000s`).MatchString(out) {
+		t.Errorf("analytical row not rendered in seconds\n%s", out)
 	}
 }
 
-// TestRenderMarkdown proves the markdown renderer emits GFM table syntax.
+// TestRenderMarkdown asserts the markdown table shape and footers.
 func TestRenderMarkdown(t *testing.T) {
-	er := makeEngineResult("neo4j", "bolt", target.Traversal, 5*time.Millisecond, 20*time.Millisecond, 50)
-	m := report.Assemble([]report.EngineResult{er}, report.ColumnClass, "")
 	var buf bytes.Buffer
-	if err := report.Render(m, report.FormatMarkdown, &buf); err != nil {
-		t.Fatalf("Render markdown: %v", err)
+	RenderMarkdown(&buf, testMatrix())
+	out := buf.String()
+	for _, want := range []string{
+		"| Class / Query |",
+		"zu/inproc p50 | p99 |",
+		"| point-read |",
+		"| is1 |",
+		"SKIP(no-dialect-text)",
+		"FAIL",
+		"_fidelity: snb-short: spec-following; own scheduler_",
+		"_zu/inproc: version 1.2.3",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("markdown missing %q\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderCSV asserts the explicit-column CSV: header, nanosecond values,
+// verification outcomes on query rows.
+func TestRenderCSV(t *testing.T) {
+	var buf bytes.Buffer
+	if err := RenderCSV(&buf, testMatrix()); err != nil {
+		t.Fatalf("RenderCSV: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "| Engine |") {
-		t.Error("markdown should start with | Engine |")
-	}
-	if !strings.Contains(out, "| neo4j |") {
-		t.Error("markdown should contain | neo4j |")
-	}
-	if !strings.Contains(out, "----") {
-		t.Error("markdown should contain separator row")
+	for _, want := range []string{
+		"engine,plane,section,row,outcome,count,errors,min_ns,p50_ns,p90_ns,p95_ns,p99_ns,max_ns,mean_ns,stddev_ns,throughput,row_throughput",
+		"zu,inproc,class,point-read,,100,2,100000,200000,400000,600000,800000,1000000,200000,50000,1234.50,2469.00",
+		"zu,inproc,cold,point-read,",
+		"zu,inproc,query,is2,SKIP(no-dialect-text)",
+		"neo4j,bolt,query,q9,FAIL",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("csv missing %q\n%s", want, out)
+		}
 	}
 }
 
-// TestRenderCSV proves the CSV renderer emits a header and one data row per
-// non-empty cell.
-func TestRenderCSV(t *testing.T) {
-	er := makeEngineResult("gr", "inproc", target.Write, 1*time.Millisecond, 2*time.Millisecond, 10)
-	m := report.Assemble([]report.EngineResult{er}, report.ColumnClass, "")
+// TestRenderOverhead builds the same engine on two planes and asserts the
+// plane-overhead table (spec 08 §8): p50 per plane, delta and ratio against
+// the fastest plane.
+func TestRenderOverhead(t *testing.T) {
+	inproc := FromMeasure("micro-read", "micro", "harness-native", sampleResult("gr", "inproc", 100*time.Microsecond), nil)
+	bolt := FromMeasure("micro-read", "micro", "harness-native", sampleResult("gr", "bolt", 350*time.Microsecond), nil)
 	var buf bytes.Buffer
-	if err := report.Render(m, report.FormatCSV, &buf); err != nil {
-		t.Fatalf("Render csv: %v", err)
+	RenderOverhead(&buf, []*Document{bolt, inproc})
+	out := buf.String()
+	for _, want := range []string{
+		"Query",
+		"gr/inproc p50",
+		"gr/bolt p50",
+		"is1",
+		"100.0µs",                   // fastest plane: bare p50
+		"350.0µs (+250.0µs, x3.50)", // slower plane: delta vs fastest
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("overhead table missing %q\n%s", want, out)
+		}
 	}
-	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-	if len(lines) < 2 {
-		t.Fatalf("CSV should have header + at least 1 data row, got %d lines", len(lines))
-	}
-	if !strings.Contains(lines[0], "engine") {
-		t.Errorf("CSV header should contain 'engine': %s", lines[0])
-	}
-	if !strings.Contains(lines[1], "gr") {
-		t.Errorf("CSV data row should contain engine 'gr': %s", lines[1])
-	}
-}
-
-// TestRenderJSONRoundTrip proves RenderJSON + ParseJSON returns equivalent
-// results.
-func TestRenderJSONRoundTrip(t *testing.T) {
-	er := makeEngineResult("memgraph", "bolt", target.Traversal, 3*time.Millisecond, 15*time.Millisecond, 80)
-	er.Version = "2.12.0"
-	var buf bytes.Buffer
-	if err := report.RenderJSON([]report.EngineResult{er}, &buf); err != nil {
-		t.Fatalf("RenderJSON: %v", err)
-	}
-	got, err := report.ParseJSON(&buf)
-	if err != nil {
-		t.Fatalf("ParseJSON: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("want 1 result, got %d", len(got))
-	}
-	if got[0].Name != "memgraph" {
-		t.Errorf("Name=%q, want memgraph", got[0].Name)
-	}
-	if got[0].Plane != "bolt" {
-		t.Errorf("Plane=%q, want bolt", got[0].Plane)
-	}
-	if got[0].Version != "2.12.0" {
-		t.Errorf("Version=%q, want 2.12.0", got[0].Version)
-	}
-	stat := got[0].Result.Stats[target.Traversal]
-	if stat.P99 != 15*time.Millisecond {
-		t.Errorf("P99=%v, want 15ms", stat.P99)
-	}
-}
-
-// TestPlaneOverheadComputed proves PlaneOverhead returns the absolute and
-// relative overhead between an inproc and Bolt row.
-func TestPlaneOverheadComputed(t *testing.T) {
-	grInproc := makeEngineResult("gr", "inproc", target.PointRead, 5*time.Microsecond, 20*time.Microsecond, 0)
-	grBolt := makeEngineResult("gr-bolt", "bolt", target.PointRead, 60*time.Microsecond, 100*time.Microsecond, 0)
-	m := report.Assemble([]report.EngineResult{grInproc, grBolt}, report.ColumnClass, "")
-	po := m.PlaneOverhead("gr", "gr-bolt")
-	if po == nil {
-		t.Fatal("PlaneOverhead returned nil")
-	}
-	ov, ok := po.Overhead["PointRead"]
-	if !ok {
-		t.Fatal("no PointRead overhead")
-	}
-	// absolute = 100µs - 20µs = 80µs
-	if ov.Absolute != 80*time.Microsecond {
-		t.Errorf("Absolute=%v, want 80µs", ov.Absolute)
-	}
-	// relative = 100/20 = 5.0
-	if ov.Relative < 4.9 || ov.Relative > 5.1 {
-		t.Errorf("Relative=%.2f, want ~5.0", ov.Relative)
-	}
-}
-
-// TestPlaneOverheadMissingEngine proves PlaneOverhead returns nil when either
-// engine is not in the matrix.
-func TestPlaneOverheadMissingEngine(t *testing.T) {
-	er := makeEngineResult("gr", "inproc", target.PointRead, 5*time.Microsecond, 20*time.Microsecond, 0)
-	m := report.Assemble([]report.EngineResult{er}, report.ColumnClass, "")
-	if po := m.PlaneOverhead("gr", "gr-bolt"); po != nil {
-		t.Errorf("expected nil when gr-bolt is missing, got %+v", po)
-	}
-}
-
-// TestLineageChecksumPrefix8 proves the checksum prefix function extracts
-// correctly via the exported RecordPath (which uses checksumPrefix8 internally).
-func TestLineageRecordPath(t *testing.T) {
-	er := report.EngineResult{
-		Name:  "gr",
-		Plane: "inproc",
-		Result: measure.Result{
-			Condition: measure.Condition{
-				Engine:          "gr",
-				Plane:           "inproc",
-				Workload:        "snb-short",
-				Scale:           "SF1",
-				DatasetChecksum: "sha256:abcdef0123456789abcdef01",
-			},
-		},
-	}
-	ts := time.Date(2026, 6, 20, 11, 0, 0, 0, time.UTC)
-	path := report.RecordPath("results", er, ts)
-	if !strings.Contains(path, "snb-short") {
-		t.Errorf("path should contain workload: %s", path)
-	}
-	if !strings.Contains(path, "SF1") {
-		t.Errorf("path should contain scale: %s", path)
-	}
-	if !strings.Contains(path, "gr") {
-		t.Errorf("path should contain engine name: %s", path)
-	}
-	if !strings.Contains(path, "abcdef01") {
-		t.Errorf("path should contain first 8 chars of checksum hex: %s", path)
-	}
-}
-
-// TestLineageAppendRefusesIncomplete proves Append rejects a record with an
-// empty Condition.
-func TestLineageAppendRefusesIncomplete(t *testing.T) {
-	er := report.EngineResult{
-		Name:   "gr",
-		Plane:  "inproc",
-		Result: measure.Result{
-			// Condition is zero: Engine, Dataset, Workload all empty.
-		},
-	}
-	path := t.TempDir() + "/results/snb-short/SF1/test.json"
-	if err := report.Append(path, er); err == nil {
-		t.Error("Append should fail for a record with an empty Condition")
+	// Nothing shared: disclosed, not silently empty.
+	buf.Reset()
+	RenderOverhead(&buf, []*Document{inproc})
+	if !strings.Contains(buf.String(), "no query measured on more than one plane") {
+		t.Errorf("empty overhead not disclosed:\n%s", buf.String())
 	}
 }

@@ -1,7 +1,7 @@
 // Command graph-bench is the front end to the graph-bench suite: it generates
-// datasets, runs workloads against one or more graph databases, compares the
-// results, and gates them in CI. See the spec at notes/Spec/2060/bench for the
-// full design. The verbs are stubs in this scaffold; each lands in its own slice.
+// datasets, fetches pinned LDBC artifacts, runs workloads against one or more
+// graph engines, renders and compares the results, and gates them in CI.
+// The command surface is specified in notes/Spec/2064g/bench/09-cli-reporting-ci.md.
 package main
 
 import (
@@ -14,9 +14,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Build metadata, injected via -ldflags at release time.
+// Build metadata. version is the release identity stamped into every
+// Condition; commit and date are injected via -ldflags at release time.
 var (
-	version = "dev"
+	version = "0.3.0"
 	commit  = "none"
 	date    = "unknown"
 )
@@ -30,31 +31,35 @@ func main() {
 	os.Exit(exitCode(err))
 }
 
-// newRootCmd builds the command tree. It is a function so tests can execute the
-// CLI in process without going through main.
+// newRootCmd builds the command tree. It is a function so tests can execute
+// the CLI in process without going through main.
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "graph-bench",
 		Short: "Fair, reproducible cross-engine benchmark for graph databases",
 		Long: "graph-bench measures graph databases against each other on the same data, " +
 			"the same queries, and the same machine, and reports the result without spin. " +
-			"It treats gr as one target among many, held to the same rules as every other engine.",
+			"It treats zu as one target among many, held to the same rules as every other engine.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 	root.AddCommand(
-		newGenerateCmd(),
-		newListCmd(),
 		newRunCmd(),
-		newCompareCmd(),
+		newGenerateCmd(),
+		newFetchCmd(),
+		newCurateCmd(),
+		newListCmd(),
 		newReportCmd(),
+		newCompareCmd(),
 		newGateCmd(),
+		newDoctorCmd(),
 	)
 	return root
 }
 
-// exitCode maps an error to a process exit code. Commands may attach a specific
-// code via the ExitCode interface; everything else is a generic failure.
+// exitCode maps an error to a process exit code. Commands may attach a
+// specific code via the ExitCode interface (the gate verb's 2 and 3 are API);
+// everything else is a generic failure.
 func exitCode(err error) int {
 	if err == nil {
 		return 0

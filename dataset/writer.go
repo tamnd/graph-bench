@@ -7,20 +7,21 @@ import (
 	"path/filepath"
 
 	"github.com/tamnd/graph-bench/dataset/gen"
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
-// Writer is the concrete canonical-layout sink the generators write through. It
-// creates the nodes/ and rels/ subdirectories under a dataset directory, opens
-// one CSV file per label and per type with a typed header, counts the rows, and
-// in Finalize builds the schema, totals, and content checksum and writes the
-// manifest. It implements gen.Writer so any generator emits through it and the
-// on-disk form is identical regardless of which generator produced it.
+// Writer is the concrete canonical-layout sink the generators write through.
+// It creates the nodes/ and rels/ subdirectories under a dataset directory,
+// opens one CSV file per label and per type with a typed header, counts the
+// rows, and in Finalize builds the schema, totals, and content checksum and
+// writes the manifest. It implements gen.Writer so any generator emits through
+// it and the on-disk form is identical regardless of which generator produced
+// it (spec 05 §2: one Writer, many generators).
 type Writer struct {
 	dir string
 
-	nodeSchema map[string]target.NodeSchema
-	relSchema  map[string]target.RelSchema
+	nodeSchema map[string]engine.NodeSchema
+	relSchema  map[string]engine.RelSchema
 	nodeCount  int64
 	edgeCount  int64
 }
@@ -38,15 +39,15 @@ func NewWriter(dir string) (*Writer, error) {
 	}
 	return &Writer{
 		dir:        dir,
-		nodeSchema: map[string]target.NodeSchema{},
-		relSchema:  map[string]target.RelSchema{},
+		nodeSchema: map[string]engine.NodeSchema{},
+		relSchema:  map[string]engine.RelSchema{},
 	}, nil
 }
 
-// NodeFile opens the node file for a label, writes its typed header, and returns
-// a RowWriter for the node rows. It records the label's schema (the file, the id
-// column, and the property columns) for the manifest.
-func (w *Writer) NodeFile(label string, header []target.Column) (gen.RowWriter, error) {
+// NodeFile opens the node file for a label, writes its typed header, and
+// returns a RowWriter for the node rows. It records the label's schema (the
+// file, the id column, and the property columns) for the manifest.
+func (w *Writer) NodeFile(label string, header []engine.Column) (gen.RowWriter, error) {
 	rel := nodesDir + "/" + label + ".csv"
 	rw, err := w.openFile(rel, header, &w.nodeCount)
 	if err != nil {
@@ -56,7 +57,7 @@ func (w *Writer) NodeFile(label string, header []target.Column) (gen.RowWriter, 
 	if err != nil {
 		return nil, err
 	}
-	w.nodeSchema[label] = target.NodeSchema{
+	w.nodeSchema[label] = engine.NodeSchema{
 		Files:      []string{rel},
 		ID:         id,
 		Properties: propertyColumns(header),
@@ -66,16 +67,19 @@ func (w *Writer) NodeFile(label string, header []target.Column) (gen.RowWriter, 
 }
 
 // RelFile opens the relationship file for a type, writes its typed header, and
-// returns a RowWriter for the edge rows. The endpoint labels are filled in by
-// Finalize, once every node label is known.
-func (w *Writer) RelFile(typ string, header []target.Column) (gen.RowWriter, error) {
+// returns a RowWriter for the edge rows. start and end are the endpoint node
+// labels; the multi-table generators pass distinct labels, and an empty pair
+// is filled in by Finalize when there is exactly one node label.
+func (w *Writer) RelFile(typ, start, end string, header []engine.Column) (gen.RowWriter, error) {
 	rel := relsDir + "/" + typ + ".csv"
 	rw, err := w.openFile(rel, header, &w.edgeCount)
 	if err != nil {
 		return nil, err
 	}
-	w.relSchema[typ] = target.RelSchema{
+	w.relSchema[typ] = engine.RelSchema{
 		Files:      []string{rel},
+		Start:      start,
+		End:        end,
 		Properties: propertyColumns(header),
 	}
 	return rw, nil
@@ -83,7 +87,7 @@ func (w *Writer) RelFile(typ string, header []target.Column) (gen.RowWriter, err
 
 // openFile creates a CSV file at the directory-relative path, writes the typed
 // header, and returns a rowWriter that appends to the running count.
-func (w *Writer) openFile(rel string, header []target.Column, count *int64) (*rowWriter, error) {
+func (w *Writer) openFile(rel string, header []engine.Column, count *int64) (*rowWriter, error) {
 	f, err := os.Create(filepath.Join(w.dir, rel))
 	if err != nil {
 		return nil, err
@@ -96,12 +100,13 @@ func (w *Writer) openFile(rel string, header []target.Column, count *int64) (*ro
 	return &rowWriter{f: f, cw: cw, count: count}, nil
 }
 
-// Finalize fills in the relationship endpoint labels, sets the totals and the
-// encoding conventions, writes the manifest, computes the content checksum,
-// rewrites the manifest with it, and returns the complete manifest. The partial
-// manifest carries the recipe (generator, version, seed, params, invariants);
-// Finalize owns the schema, the counts, and the checksum.
-func (w *Writer) Finalize(partial *target.Manifest) (*target.Manifest, error) {
+// Finalize fills in missing relationship endpoint labels, sets the totals and
+// the encoding conventions, writes the manifest, computes the content
+// checksum, rewrites the manifest with it, and returns the complete manifest.
+// The partial manifest carries the recipe (name, kind, scale, generator,
+// version, seed, params, invariants); Finalize owns the schema, the counts,
+// and the checksum.
+func (w *Writer) Finalize(partial *engine.Manifest) (*engine.Manifest, error) {
 	m := *partial
 	if m.ListDelimiter == "" {
 		m.ListDelimiter = ";"
@@ -109,29 +114,29 @@ func (w *Writer) Finalize(partial *target.Manifest) (*target.Manifest, error) {
 	if m.Null == "" {
 		m.Null = "empty"
 	}
-	m.NodeCount = w.nodeCount
-	m.EdgeCount = w.edgeCount
+	m.Invariants.NodeCount = w.nodeCount
+	m.Invariants.EdgeCount = w.edgeCount
 
-	// Every synthetic generator emits a single node label, so the relationship
-	// endpoints are that label. When there is exactly one, fill it in; otherwise
-	// leave the endpoints blank for an adapter that does not need them.
+	// A single-label generator leaves the endpoints blank at RelFile time;
+	// when there is exactly one node label, it is the endpoint on both sides.
 	var soleLabel string
 	if len(w.nodeSchema) == 1 {
 		for label := range w.nodeSchema {
 			soleLabel = label
 		}
 	}
-	rels := make(map[string]target.RelSchema, len(w.relSchema))
+	rels := make(map[string]engine.RelSchema, len(w.relSchema))
 	for typ, rs := range w.relSchema {
-		if soleLabel != "" {
+		if rs.Start == "" && rs.End == "" && soleLabel != "" {
 			rs.Start, rs.End = soleLabel, soleLabel
 		}
 		rels[typ] = rs
 	}
-	m.Schema = target.Schema{Nodes: w.nodeSchema, Relationships: rels}
+	m.SchemaDef = engine.Schema{Nodes: w.nodeSchema, Rels: rels}
 
-	// Write the manifest once without the checksum, compute the checksum over the
-	// files plus the recipe, then write it again with the checksum recorded.
+	// Write the manifest once without the checksum, compute the checksum over
+	// the files plus the recipe, then write it again with the checksum
+	// recorded (the checksum cannot cover itself).
 	if err := WriteManifest(w.dir, &m); err != nil {
 		return nil, err
 	}
@@ -173,11 +178,11 @@ func (r *rowWriter) Close() error {
 	return r.f.Close()
 }
 
-// DirName returns the canonical directory name for a dataset: the manifest name
-// followed by the first eight hex characters of its checksum, the
-// <name>-<checksum8> form. It is the cache-key-derived directory name a
-// materialized dataset lives under.
-func DirName(m *target.Manifest) string {
+// DirName returns the canonical directory name for a dataset: the manifest
+// name followed by the first eight hex characters of its checksum, the
+// <name>-<checksum8> form (spec 05 §1). It is the cache-key-derived directory
+// name a materialized dataset lives under.
+func DirName(m *engine.Manifest) string {
 	sum := m.Checksum
 	const prefix = "sha256:"
 	if len(sum) > len(prefix) {

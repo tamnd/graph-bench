@@ -8,6 +8,8 @@
 
 # Local run output and lineage scratch
 /runs/
+/results/
+/results-full/
 *.out
 
 # Editor and OS noise

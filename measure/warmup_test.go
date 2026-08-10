@@ -7,7 +7,7 @@ import (
 
 // TestWarmedUpBasic checks the streak-and-minBuckets gate.
 func TestWarmedUpBasic(t *testing.T) {
-	// Five stable buckets at 10ms: change = 0 < 5%. streak=3, minBuckets=5.
+	// Five stable buckets at 10ms: change = 0 < 15%. streak=3, minBuckets=5.
 	buckets := []time.Duration{
 		10 * time.Millisecond,
 		10 * time.Millisecond,
@@ -15,7 +15,7 @@ func TestWarmedUpBasic(t *testing.T) {
 		10 * time.Millisecond,
 		10 * time.Millisecond,
 	}
-	if !warmedUp(buckets, 0.05, 3, 5) {
+	if !warmedUp(buckets, 0.15, 3, 5) {
 		t.Error("five identical buckets should be declared warm (streak=3, min=5)")
 	}
 }
@@ -23,7 +23,7 @@ func TestWarmedUpBasic(t *testing.T) {
 // TestWarmedUpNotEnoughBuckets proves that fewer than minBuckets always returns false.
 func TestWarmedUpNotEnoughBuckets(t *testing.T) {
 	buckets := []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
-	if warmedUp(buckets, 0.05, 1, 5) {
+	if warmedUp(buckets, 0.15, 1, 5) {
 		t.Error("2 buckets with minBuckets=5 should not be declared warm")
 	}
 }
@@ -38,7 +38,7 @@ func TestWarmedUpStreakBroken(t *testing.T) {
 		10 * time.Millisecond,
 		15 * time.Millisecond, // 50% jump
 	}
-	if warmedUp(buckets, 0.05, 3, 5) {
+	if warmedUp(buckets, 0.15, 3, 5) {
 		t.Error("50%% jump in last bucket should break the streak")
 	}
 }
@@ -57,8 +57,8 @@ func TestWarmedUpAfterRecovery(t *testing.T) {
 		10 * time.Millisecond, // stable
 	}
 	// The last three: prev[5]=10ms cur[6]=10ms ok; prev[4]=10ms cur[5]=10ms ok;
-	// prev[3]=50ms cur[4]=10ms: change=0.8 > 0.05 -> not stable.
-	if warmedUp(buckets, 0.05, 3, 5) {
+	// prev[3]=50ms cur[4]=10ms: change=0.8 > 0.15 -> not stable.
+	if warmedUp(buckets, 0.15, 3, 5) {
 		t.Error("streak check should look back 3 from end and see the spike in prev")
 	}
 }
@@ -67,8 +67,29 @@ func TestWarmedUpAfterRecovery(t *testing.T) {
 // division by zero and a premature warm call at the very start).
 func TestWarmedUpZeroPrev(t *testing.T) {
 	buckets := []time.Duration{0, 0, 0, 0, 0}
-	if warmedUp(buckets, 0.05, 3, 5) {
+	if warmedUp(buckets, 0.15, 3, 5) {
 		t.Error("zero prev buckets should not declare warm")
+	}
+}
+
+// TestWarmupConfigDefaults checks the spec 08 §3 defaults land: 15% tolerance,
+// streak of 3, 60s cap, 3s/200-op floor, 20% fixed fraction.
+func TestWarmupConfigDefaults(t *testing.T) {
+	cfg := WarmupConfig{}.defaults()
+	if cfg.Tol != 0.15 {
+		t.Errorf("default Tol = %v, want 0.15", cfg.Tol)
+	}
+	if cfg.Streak != 3 {
+		t.Errorf("default Streak = %d, want 3", cfg.Streak)
+	}
+	if cfg.MaxWarmup != 60*time.Second {
+		t.Errorf("default MaxWarmup = %v, want 60s", cfg.MaxWarmup)
+	}
+	if cfg.MinDuration != 3*time.Second {
+		t.Errorf("default MinDuration = %v, want 3s", cfg.MinDuration)
+	}
+	if cfg.MinOps != 200 {
+		t.Errorf("default MinOps = %d, want 200", cfg.MinOps)
 	}
 }
 
@@ -96,44 +117,49 @@ func TestWarmupConfigCeiling(t *testing.T) {
 	}
 }
 
+// detectorTestConfig is a small-floor config so detector tests run in
+// milliseconds instead of the real 3s/200-op floor.
+func detectorTestConfig() WarmupConfig {
+	return WarmupConfig{
+		BucketWidth: 10 * time.Millisecond,
+		Tol:         0.15,
+		Streak:      3,
+		MinBuckets:  4,
+		MinDuration: time.Millisecond,
+		MinOps:      1,
+		MaxWarmup:   time.Second,
+		Fraction:    0.20,
+	}
+}
+
 // TestWarmupDetectorStabilizes feeds a WarmupDetector a series of stable
 // latencies and confirms Stable() becomes true after enough buckets.
 func TestWarmupDetectorStabilizes(t *testing.T) {
-	cfg := WarmupConfig{
-		DynamicWarmup: true,
-		BucketWidth:   10 * time.Millisecond,
-		Tol:           0.05,
-		Streak:        3,
-		MinBuckets:    4,
-		MaxWarmup:     time.Second,
-		Fraction:      0.20,
-	}
-	d := NewWarmupDetector(cfg)
+	d := NewWarmupDetector(detectorTestConfig())
 
 	base := time.Now()
 	// Feed 5 buckets of 10 samples each, latency stable at 1ms.
 	for b := 0; b < 5; b++ {
 		for s := 0; s < 10; s++ {
-			t := base.Add(time.Duration(b)*10*time.Millisecond + time.Duration(s)*time.Millisecond)
-			d.Add(1*time.Millisecond, t)
+			ts := base.Add(time.Duration(b)*10*time.Millisecond + time.Duration(s)*time.Millisecond)
+			d.Add(1*time.Millisecond, ts)
 		}
 	}
-	// After 5 buckets (each 10ms wide), all p99 = 1ms -> change = 0 < 5%.
+	// After 5 buckets (each 10ms wide), all p99 = 1ms -> change = 0 < 15%.
 	// MinBuckets=4, streak=3: should be stable.
 	if !d.Stable() {
 		t.Errorf("detector should be stable after 5 uniform buckets; buckets=%v", d.Buckets())
 	}
+	if got := d.Outcome(); got != "stable" {
+		t.Errorf("Outcome() = %q, want \"stable\"", got)
+	}
 }
 
-// TestWarmupDetectorNotStableOnSpike proves a spike during warmup prevents early declaration.
+// TestWarmupDetectorNotStableOnSpike proves a spike during warmup prevents
+// early declaration, and the Outcome stamp reads "capped" when the run ends
+// without stabilization (spec 08 §3).
 func TestWarmupDetectorNotStableOnSpike(t *testing.T) {
-	cfg := WarmupConfig{
-		BucketWidth: 10 * time.Millisecond,
-		Tol:         0.05,
-		Streak:      3,
-		MinBuckets:  4,
-	}
-	d := NewWarmupDetector(cfg)
+	d := NewWarmupDetector(detectorTestConfig())
 
 	base := time.Now()
 	// 3 stable buckets at 1ms, then 1 spike bucket at 100ms.
@@ -150,6 +176,29 @@ func TestWarmupDetectorNotStableOnSpike(t *testing.T) {
 	}
 	if d.Stable() {
 		t.Error("detector declared stable despite spike bucket")
+	}
+	if got := d.Outcome(); got != "capped" {
+		t.Errorf("Outcome() = %q, want \"capped\" for an unstabilized warmup", got)
+	}
+}
+
+// TestWarmupDetectorFloorBlocksEarlyStability proves the fixed floor
+// (spec 08 §3: 3s or 200 ops, whichever is later) prevents stabilization even
+// when the bucket criterion is met.
+func TestWarmupDetectorFloorBlocksEarlyStability(t *testing.T) {
+	cfg := detectorTestConfig()
+	cfg.MinOps = 1000 // more samples than the test feeds
+	d := NewWarmupDetector(cfg)
+
+	base := time.Now()
+	for b := 0; b < 8; b++ {
+		for s := 0; s < 10; s++ {
+			ts := base.Add(time.Duration(b)*10*time.Millisecond + time.Duration(s)*time.Millisecond)
+			d.Add(1*time.Millisecond, ts)
+		}
+	}
+	if d.Stable() {
+		t.Error("detector declared stable before the MinOps floor was met")
 	}
 }
 
