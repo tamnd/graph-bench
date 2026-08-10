@@ -5,28 +5,34 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
 // Grid is the 2D mesh generator: Rows by Cols cells, each connected to its
 // orthogonal neighbors (4-neighbor) and, when Diagonal is set, its diagonal
-// neighbors too (8-neighbor). It is the generator with the richest closed-form
-// invariants, which is why it is in the set: node count, edge count, diameter,
-// every pairwise distance, and the triangle count are all arithmetic, so a
-// shortest-path workload validates against a formula rather than a second
-// engine. It is also the high-diameter dataset that forces a traversal to go
-// deep and exposes per-hop overhead a shallow graph hides.
+// neighbors too (8-neighbor). It is the generator with the richest
+// closed-form invariants, which is why it is in the set: node count, edge
+// count, diameter, every pairwise distance, and the triangle count are all
+// arithmetic, so a shortest-path workload validates against a formula rather
+// than a second engine (spec 05 §2: closed-form oracles). It is also the
+// high-diameter dataset that forces a traversal to go deep and exposes
+// per-hop overhead a shallow graph hides.
 //
 // The structure has no randomness at all; the seed is recorded for uniformity
-// but a grid is identical for every seed. Edges are emitted once per undirected
-// pair in ascending source-then-target order, fully determined by the
-// dimensions.
+// but a grid is identical for every seed. Edges are emitted once per
+// undirected pair in ascending source-then-target order, fully determined by
+// the dimensions.
 type Grid struct{}
 
+// Name returns "grid".
 func (Grid) Name() string { return "grid" }
-func (Grid) Version() int { return 1 }
 
-func (g Grid) Generate(ctx context.Context, cfg Config, w Writer) (*target.Manifest, error) {
+// Version is the algorithm version; the emitted bytes are identical to v1's
+// version 1.
+func (Grid) Version() string { return "1" }
+
+// Generate emits the lattice. See Generator.Generate.
+func (g Grid) Generate(ctx context.Context, cfg Config, w Writer) (*engine.Manifest, error) {
 	if cfg.Rows <= 0 || cfg.Cols <= 0 {
 		return nil, fmt.Errorf("grid: Rows and Cols must be > 0, got %dx%d", cfg.Rows, cfg.Cols)
 	}
@@ -46,13 +52,14 @@ func (g Grid) Generate(ctx context.Context, cfg Config, w Writer) (*target.Manif
 		return nil, err
 	}
 
-	rels, err := w.RelFile(relType, relHeader())
+	rels, err := w.RelFile(relType, nodeLabel, nodeLabel, relHeader())
 	if err != nil {
 		return nil, err
 	}
 	// id(r, c) = r*cols + c. For each cell, emit edges to the neighbors with a
-	// strictly larger id so each undirected pair is written exactly once: right
-	// (c+1), down (r+1), and for the 8-neighbor grid the two downward diagonals.
+	// strictly larger id so each undirected pair is written exactly once:
+	// right (c+1), down (r+1), and for the 8-neighbor grid the two downward
+	// diagonals.
 	var edges int64
 	emit := func(a, b int64) error {
 		edges++
@@ -92,10 +99,10 @@ func (g Grid) Generate(ctx context.Context, cfg Config, w Writer) (*target.Manif
 		return nil, err
 	}
 
-	inv := target.Invariants{NodeCount: i64p(n), EdgeCount: i64p(edges)}
+	inv := engine.Invariants{NodeCount: n, EdgeCount: edges}
 	if !cfg.Diagonal {
-		// 4-neighbor grid: diameter is the Manhattan distance corner to corner,
-		// and the graph is bipartite so it has no triangles.
+		// 4-neighbor grid: diameter is the Manhattan distance corner to
+		// corner, and the graph is bipartite so it has no triangles.
 		inv.Diameter = i64p((rows - 1) + (cols - 1))
 		inv.TriangleCount = i64p(0)
 	} else {
@@ -107,14 +114,19 @@ func (g Grid) Generate(ctx context.Context, cfg Config, w Writer) (*target.Manif
 		inv.Diameter = i64p(diam)
 	}
 
-	m := &target.Manifest{
+	m := &engine.Manifest{
 		Name:             fmt.Sprintf("grid-%dx%d", cfg.Rows, cfg.Cols),
 		Kind:             "synthetic",
 		Generator:        g.Name(),
 		GeneratorVersion: g.Version(),
 		Seed:             cfg.Seed,
-		Params:           map[string]any{"rows": cfg.Rows, "cols": cfg.Cols, "diagonal": cfg.Diagonal},
-		Invariants:       inv,
+		Scale:            fmt.Sprintf("%dx%d", cfg.Rows, cfg.Cols),
+		Params: map[string]string{
+			"rows":     iparam(cfg.Rows),
+			"cols":     iparam(cfg.Cols),
+			"diagonal": bparam(cfg.Diagonal),
+		},
+		Invariants: inv,
 	}
 	return w.Finalize(m)
 }

@@ -1,18 +1,18 @@
 // Package ldbc fetches a pinned LDBC SNB dataset artifact, verifies its
 // checksums (archive first, content second), extracts it to the canonical CSV
-// layout, and returns it as a target.Dataset via the dataset package.
+// layout, and returns it as an engine.Dataset via the dataset package.
 //
-// The fetch-and-verify flow:
+// The fetch-and-verify flow (spec 05 §3):
 //  1. Load the pin JSON for the requested scale factor.
 //  2. Check the cache: if present and manifest verifies, return it.
 //  3. Download the .tar.zst archive from the primary URL (falling back to mirror).
 //  4. Verify the archive sha256 before extraction.
-//  5. Extract into a temp dir, read the embedded manifest, compute the content
-//     checksum, compare to the pin, then rename to the permanent cache path.
+//  5. Extract into a temp dir, repack the upstream tree into the canonical
+//     layout, compute the content checksum, compare to the pin, then rename
+//     to the permanent cache path.
 //  6. Return a dataset.Set wrapping the verified directory.
 //
 // Pins live in dataset/ldbc/pins/ as JSON files committed to the repository.
-// See notes/Spec/2060/bench/04-datasets-and-generation.md section 4.
 package ldbc
 
 import (
@@ -37,7 +37,8 @@ import (
 var pinFS embed.FS
 
 // Pin describes one pinned LDBC artifact. Committed to the repository as a
-// JSON file under dataset/ldbc/pins/.
+// JSON file under dataset/ldbc/pins/. The JSON format is carried from v1
+// unchanged, so existing pin files parse as-is.
 type Pin struct {
 	Name            string `json:"name"`             // stable id, e.g. "snb-sf1"
 	Scale           string `json:"scale"`            // LDBC scale label, e.g. "SF1"
@@ -372,8 +373,8 @@ func ComputePin(ctx context.Context, archivePath, name, scale, url, mirror strin
 		Mirror:          mirror,
 		ArchiveChecksum: "sha256:" + archiveSum,
 		Checksum:        contentSum,
-		NodeCount:       m.NodeCount,
-		EdgeCount:       m.EdgeCount,
+		NodeCount:       m.Invariants.NodeCount,
+		EdgeCount:       m.Invariants.EdgeCount,
 	}, nil
 }
 

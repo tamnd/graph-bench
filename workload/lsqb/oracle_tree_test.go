@@ -21,22 +21,24 @@ func fixtureDS(t *testing.T, rels relSet) fileDataset {
 	return fileDataset{rels: m}
 }
 
-// The brute-force references below count count(*) directly by the literal
-// reading of each pattern: a nested loop over the actual relationship rows under
-// relationship-isomorphism (relationships pairwise distinct, nodes may coincide).
-// They are deliberately naive joins so they share no structure with the indexed
-// closed-form oracles they check.
+// The brute-force references below count count(*) by the literal reading of
+// each pattern in lsqb.go: nested loops over the actual relationship rows,
+// under relationship isomorphism (relationships pairwise distinct within one
+// MATCH, nodes free to coincide unless the text says otherwise). They are
+// deliberately naive joins so they share no structure with the grouped,
+// closed-form oracles they check: the oracle multiplies precomputed degrees,
+// the brute force enumerates tuples.
 
+// bruteQ1: (f:Forum)-[:CONTAINER_OF]->(m:Post)-[:HAS_CREATOR]->(p:Person)-[:LIKES]->(:Post)
 func bruteQ1(r relSet) int64 {
 	var n int64
-	for _, loc := range r["IS_LOCATED_IN"] { // (p)-loc->(city)
-		p, city := loc[0], loc[1]
-		for _, po := range r["IS_PART_OF"] { // (city)-partOf->(country)
-			if po[0] != city {
+	for _, co := range r["CONTAINER_OF"] {
+		for _, hc := range r["HAS_CREATOR"] {
+			if co[1] != hc[0] {
 				continue
 			}
-			for _, sa := range r["STUDY_AT"] { // (p)-studyAt->(univ)
-				if sa[0] == p {
+			for _, lk := range r["LIKES"] {
+				if hc[1] == lk[0] {
 					n++
 				}
 			}
@@ -45,16 +47,16 @@ func bruteQ1(r relSet) int64 {
 	return n
 }
 
+// bruteQ2: (m:Post)-[:HAS_CREATOR]->(p)-[:KNOWS]->(:Person), (m)<-[:LIKES]-(:Person)
 func bruteQ2(r relSet) int64 {
 	var n int64
-	for _, hc := range r["HAS_CREATOR"] { // (m)-creator->(p)
-		m, p := hc[0], hc[1]
-		for _, loc := range r["IS_LOCATED_IN"] { // (p)-loc->(city)
-			if loc[0] != p {
+	for _, hc := range r["HAS_CREATOR"] {
+		for _, k := range r["KNOWS"] {
+			if hc[1] != k[0] {
 				continue
 			}
-			for _, ht := range r["HAS_TAG"] { // (m)-tag->(t)
-				if ht[0] == m {
+			for _, lk := range r["LIKES"] {
+				if lk[1] == hc[0] {
 					n++
 				}
 			}
@@ -63,24 +65,17 @@ func bruteQ2(r relSet) int64 {
 	return n
 }
 
+// bruteQ3: (f)-[:HAS_MEMBER]->(p), (f)-[:CONTAINER_OF]->(m)-[:HAS_CREATOR]->(p)
 func bruteQ3(r relSet) int64 {
 	var n int64
-	for _, mod := range r["HAS_MODERATOR"] { // (f)-moderator->(w)
-		f := mod[0]
-		for _, mem := range r["HAS_MEMBER"] { // (f)-member->(p)
-			if mem[0] != f {
+	for _, hm := range r["HAS_MEMBER"] {
+		for _, co := range r["CONTAINER_OF"] {
+			if hm[0] != co[0] {
 				continue
 			}
-			p := mem[1]
-			for _, co := range r["CONTAINER_OF"] { // (f)-contains->(m)
-				if co[0] != f {
-					continue
-				}
-				m := co[1]
-				for _, hc := range r["HAS_CREATOR"] { // (m)-creator->(p)
-					if hc[0] == m && hc[1] == p {
-						n++
-					}
+			for _, hc := range r["HAS_CREATOR"] {
+				if hc[0] == co[1] && hc[1] == hm[1] {
+					n++
 				}
 			}
 		}
@@ -88,26 +83,26 @@ func bruteQ3(r relSet) int64 {
 	return n
 }
 
+// bruteQ4: (m)-[:HAS_CREATOR]->()-[:KNOWS]->()-[:KNOWS]->(), (m)<-[:LIKES]-(),
+// (m)<-[:CONTAINER_OF]-(). The two KNOWS rows must be distinct relationships.
 func bruteQ4(r relSet) int64 {
+	knows := r["KNOWS"]
 	var n int64
-	for _, ht := range r["HAS_TAG"] { // (m)-tag->(t)
-		m, tag := ht[0], ht[1]
-		for _, hy := range r["HAS_TYPE"] { // (t)-type->(class)
-			if hy[0] != tag {
+	for _, hc := range r["HAS_CREATOR"] {
+		for i, k1 := range knows {
+			if k1[0] != hc[1] {
 				continue
 			}
-			for _, hc := range r["HAS_CREATOR"] { // (m)-creator->(p)
-				if hc[0] != m {
+			for j, k2 := range knows {
+				if i == j || k2[0] != k1[1] {
 					continue
 				}
-				p := hc[1]
-				for _, loc := range r["IS_LOCATED_IN"] { // (p)-loc->(city)
-					if loc[0] != p {
+				for _, lk := range r["LIKES"] {
+					if lk[1] != hc[0] {
 						continue
 					}
-					city := loc[1]
-					for _, po := range r["IS_PART_OF"] { // (city)-partOf->(country)
-						if po[0] == city {
+					for _, co := range r["CONTAINER_OF"] {
+						if co[1] == hc[0] {
 							n++
 						}
 					}
@@ -118,116 +113,183 @@ func bruteQ4(r relSet) int64 {
 	return n
 }
 
-// messageTagCount[(person,tag)] = number of messages that person created
-// carrying that tag, built literally from HAS_CREATOR and HAS_TAG. Shared by the
-// Q6 and Q9 brute forces.
-func messageTagCount(r relSet) map[[2]string]int64 {
-	creator := map[string]string{}
-	for _, e := range r["HAS_CREATOR"] {
-		creator[e[0]] = e[1]
-	}
-	cnt := map[[2]string]int64{}
-	for _, ht := range r["HAS_TAG"] {
-		if p, ok := creator[ht[0]]; ok {
-			cnt[[2]string{p, ht[1]}]++
+// bruteQ5: the undirected KNOWS triangle, counted over ordered (a,b,c). Each
+// underlying triangle contributes 6, one per permutation.
+func bruteQ5(r relSet) int64 {
+	adj := undirectedAdj(r["KNOWS"])
+	nodes := sortedNodes(adj)
+	var n int64
+	for _, a := range nodes {
+		for _, b := range nodes {
+			if !linked(adj, a, b) {
+				continue
+			}
+			for _, c := range nodes {
+				if linked(adj, b, c) && linked(adj, c, a) {
+					n++
+				}
+			}
 		}
 	}
-	return cnt
+	return n
 }
 
-func tagUniverse(r relSet) []string {
-	seen := map[string]struct{}{}
-	for _, ht := range r["HAS_TAG"] {
-		seen[ht[1]] = struct{}{}
-	}
-	out := make([]string, 0, len(seen))
-	for t := range seen {
-		out = append(out, t)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// bruteQ6 enumerates every ordered distinct triple (a,b,c) forming a KNOWS
-// triangle, and for each shared tag multiplies the three message counts. The
-// ordered enumeration visits each distinct triangle six times, so it returns
-// count(*) directly.
+// bruteQ6: the triangle joined with one post per member, all three posts in the
+// same forum. ma, mb and mc carry no distinctness constraint of their own, but
+// each is pinned to a different creator, so they cannot coincide.
 func bruteQ6(r relSet) int64 {
 	adj := undirectedAdj(r["KNOWS"])
-	cnt := messageTagCount(r)
-	tags := tagUniverse(r)
 	nodes := sortedNodes(adj)
-	edge := func(a, b string) bool { _, ok := adj[a][b]; return ok }
-	var total int64
+	// posts[forum][person] is how many of that forum's posts that person wrote.
+	posts := map[string]map[string]int64{}
+	for _, co := range r["CONTAINER_OF"] {
+		for _, hc := range r["HAS_CREATOR"] {
+			if hc[0] != co[1] {
+				continue
+			}
+			if posts[co[0]] == nil {
+				posts[co[0]] = map[string]int64{}
+			}
+			posts[co[0]][hc[1]]++
+		}
+	}
+	var n int64
 	for _, a := range nodes {
 		for _, b := range nodes {
+			if !linked(adj, a, b) {
+				continue
+			}
 			for _, c := range nodes {
-				if a == b || b == c || a == c {
+				if !linked(adj, b, c) || !linked(adj, c, a) {
 					continue
 				}
-				if !edge(a, b) || !edge(b, c) || !edge(c, a) {
-					continue
-				}
-				for _, t := range tags {
-					total += cnt[[2]string{a, t}] * cnt[[2]string{b, t}] * cnt[[2]string{c, t}]
+				for _, byPerson := range posts {
+					n += byPerson[a] * byPerson[b] * byPerson[c]
 				}
 			}
 		}
 	}
-	return total
+	return n
 }
 
-// bruteQ9 extends bruteQ6 with a shared forum: for each ordered triangle it
-// multiplies the shared-tag sum by the number of forums having all three as
-// members.
-func bruteQ9(r relSet) int64 {
+// bruteQ7: the undirected KNOWS four-cycle with the four relationships pairwise
+// distinct, which the text spells out. Distinctness is checked on the
+// undirected endpoint pair, since that is what identifies a KNOWS row here.
+func bruteQ7(r relSet) int64 {
 	adj := undirectedAdj(r["KNOWS"])
-	cnt := messageTagCount(r)
-	tags := tagUniverse(r)
 	nodes := sortedNodes(adj)
-	edge := func(a, b string) bool { _, ok := adj[a][b]; return ok }
-
-	memberForums := map[string]map[string]struct{}{}
-	for _, e := range r["HAS_MEMBER"] {
-		f, p := e[0], e[1]
-		if memberForums[p] == nil {
-			memberForums[p] = map[string]struct{}{}
-		}
-		memberForums[p][f] = struct{}{}
-	}
-	common := func(a, b, c string) int64 {
-		var n int64
-		for f := range memberForums[a] {
-			if _, ok := memberForums[b][f]; !ok {
-				continue
-			}
-			if _, ok := memberForums[c][f]; !ok {
-				continue
-			}
-			n++
-		}
-		return n
-	}
-
-	var total int64
+	var n int64
 	for _, a := range nodes {
 		for _, b := range nodes {
+			if !linked(adj, a, b) {
+				continue
+			}
 			for _, c := range nodes {
-				if a == b || b == c || a == c {
+				if !linked(adj, b, c) {
 					continue
 				}
-				if !edge(a, b) || !edge(b, c) || !edge(c, a) {
-					continue
+				for _, d := range nodes {
+					if !linked(adj, c, d) || !linked(adj, d, a) {
+						continue
+					}
+					if distinctEdges(a, b, c, d) {
+						n++
+					}
 				}
-				var tagSum int64
-				for _, t := range tags {
-					tagSum += cnt[[2]string{a, t}] * cnt[[2]string{b, t}] * cnt[[2]string{c, t}]
-				}
-				total += common(a, b, c) * tagSum
 			}
 		}
 	}
-	return total
+	return n
+}
+
+// bruteQ8: two distinct posts by one person in one forum, counted as ordered
+// pairs (m1, m2).
+func bruteQ8(r relSet) int64 {
+	var n int64
+	for _, co1 := range r["CONTAINER_OF"] {
+		for _, hc1 := range r["HAS_CREATOR"] {
+			if hc1[0] != co1[1] {
+				continue
+			}
+			for _, co2 := range r["CONTAINER_OF"] {
+				if co2[0] != co1[0] || co2[1] == co1[1] {
+					continue
+				}
+				for _, hc2 := range r["HAS_CREATOR"] {
+					if hc2[0] == co2[1] && hc2[1] == hc1[1] {
+						n++
+					}
+				}
+			}
+		}
+	}
+	return n
+}
+
+// bruteQ9: the triangle whose three members share a forum and a liked post.
+func bruteQ9(r relSet) int64 {
+	adj := undirectedAdj(r["KNOWS"])
+	nodes := sortedNodes(adj)
+	members := map[string]map[string]bool{} // forum -> person
+	for _, hm := range r["HAS_MEMBER"] {
+		if members[hm[0]] == nil {
+			members[hm[0]] = map[string]bool{}
+		}
+		members[hm[0]][hm[1]] = true
+	}
+	likers := map[string]map[string]bool{} // post -> person
+	for _, lk := range r["LIKES"] {
+		if likers[lk[1]] == nil {
+			likers[lk[1]] = map[string]bool{}
+		}
+		likers[lk[1]][lk[0]] = true
+	}
+	shared := func(sets map[string]map[string]bool, a, b, c string) int64 {
+		var k int64
+		for _, s := range sets {
+			if s[a] && s[b] && s[c] {
+				k++
+			}
+		}
+		return k
+	}
+	var n int64
+	for _, a := range nodes {
+		for _, b := range nodes {
+			if !linked(adj, a, b) {
+				continue
+			}
+			for _, c := range nodes {
+				if !linked(adj, b, c) || !linked(adj, c, a) {
+					continue
+				}
+				n += shared(members, a, b, c) * shared(likers, a, b, c)
+			}
+		}
+	}
+	return n
+}
+
+func linked(adj map[string]map[string]struct{}, a, b string) bool {
+	_, ok := adj[a][b]
+	return ok
+}
+
+// distinctEdges reports whether the four undirected hops of the cycle
+// a-b-c-d-a are four different relationships.
+func distinctEdges(a, b, c, d string) bool {
+	hops := [4][2]string{{a, b}, {b, c}, {c, d}, {d, a}}
+	seen := map[[2]string]bool{}
+	for _, h := range hops {
+		if h[0] > h[1] {
+			h[0], h[1] = h[1], h[0]
+		}
+		if seen[h] {
+			return false
+		}
+		seen[h] = true
+	}
+	return true
 }
 
 func sortedNodes(adj map[string]map[string]struct{}) []string {
@@ -239,11 +301,13 @@ func sortedNodes(adj map[string]map[string]struct{}) []string {
 	return out
 }
 
-// TestTreeAndCompositeOraclesAgainstBruteForce drives each new oracle through
-// the CSV path and compares it to the literal-join brute force on a range of
-// fixtures, including ones with spurious cross-label edges that the label-pinning
-// join must exclude.
-func TestTreeAndCompositeOraclesAgainstBruteForce(t *testing.T) {
+// TestOraclesAgainstBruteForce checks every closed-form oracle against a naive
+// enumeration of the same pattern. The hand-computed expectations in
+// lsqb_test.go pin one fixture; this pins the algorithm, on fixtures shaped to
+// break the shortcuts a grouped count can take: an edge that must not join, a
+// hub that fans out, a duplicate that has to be counted with multiplicity, and
+// cycles that share edges.
+func TestOraclesAgainstBruteForce(t *testing.T) {
 	cases := []struct {
 		name  string
 		query string
@@ -251,152 +315,220 @@ func TestTreeAndCompositeOraclesAgainstBruteForce(t *testing.T) {
 		rels  relSet
 	}{
 		{
-			name:  "q1 single chain",
+			name:  "q1 chain with a creator who likes twice",
 			query: "lsqb-q1",
 			brute: bruteQ1,
 			rels: relSet{
-				"IS_LOCATED_IN": {{"p1", "city1"}},
-				"IS_PART_OF":    {{"city1", "country1"}},
-				"STUDY_AT":      {{"p1", "uni1"}},
+				"CONTAINER_OF": {{"f1", "m1"}, {"f1", "m2"}, {"f2", "m3"}},
+				"HAS_CREATOR":  {{"m1", "p1"}, {"m2", "p1"}, {"m3", "p2"}},
+				"LIKES":        {{"p1", "m3"}, {"p1", "m2"}, {"p2", "m1"}},
 			},
 		},
 		{
-			name:  "q1 fan-out: two universities, two countries for the city",
+			name:  "q1 post with no container contributes nothing",
 			query: "lsqb-q1",
 			brute: bruteQ1,
 			rels: relSet{
-				"IS_LOCATED_IN": {{"p1", "city1"}},
-				"IS_PART_OF":    {{"city1", "country1"}, {"city1", "country2"}},
-				"STUDY_AT":      {{"p1", "uni1"}, {"p1", "uni2"}},
+				"CONTAINER_OF": {{"f1", "m1"}},
+				"HAS_CREATOR":  {{"m1", "p1"}, {"m9", "p9"}},
+				"LIKES":        {{"p1", "m1"}, {"p9", "m1"}},
 			},
 		},
 		{
-			name:  "q1 spurious message located-in country is excluded",
-			query: "lsqb-q1",
-			brute: bruteQ1,
-			rels: relSet{
-				// m9 is a Message located in a Country; it must not act as a person.
-				"IS_LOCATED_IN": {{"p1", "city1"}, {"m9", "country1"}},
-				"IS_PART_OF":    {{"city1", "country1"}},
-				"STUDY_AT":      {{"p1", "uni1"}},
-			},
-		},
-		{
-			name:  "q2 message with two tags, creator in one city",
+			name:  "q2 hub post liked three times by a well-connected creator",
 			query: "lsqb-q2",
 			brute: bruteQ2,
 			rels: relSet{
-				"HAS_CREATOR":   {{"m1", "p1"}},
-				"IS_LOCATED_IN": {{"p1", "city1"}},
-				"HAS_TAG":       {{"m1", "t1"}, {"m1", "t2"}},
+				"HAS_CREATOR": {{"m1", "p1"}, {"m2", "p2"}},
+				"KNOWS":       {{"p1", "p2"}, {"p1", "p3"}, {"p2", "p1"}},
+				"LIKES":       {{"p2", "m1"}, {"p3", "m1"}, {"p4", "m1"}},
 			},
 		},
 		{
-			name:  "q2 spurious forum tag is excluded",
+			name:  "q2 creator with no friends drops out",
 			query: "lsqb-q2",
 			brute: bruteQ2,
 			rels: relSet{
-				"HAS_CREATOR":   {{"m1", "p1"}},
-				"IS_LOCATED_IN": {{"p1", "city1"}},
-				// f9 is a Forum tagged t3; f9 is not a creator so it cannot match.
-				"HAS_TAG": {{"m1", "t1"}, {"f9", "t3"}},
+				"HAS_CREATOR": {{"m1", "p1"}},
+				"KNOWS":       {{"p2", "p3"}},
+				"LIKES":       {{"p2", "m1"}},
 			},
 		},
 		{
-			name:  "q3 moderator may coincide with the member-creator",
+			name:  "q3 member who is also the creator, and one who is not",
 			query: "lsqb-q3",
 			brute: bruteQ3,
 			rels: relSet{
-				"HAS_MODERATOR": {{"f1", "p1"}},
-				"HAS_MEMBER":    {{"f1", "p1"}, {"f1", "p2"}},
-				"CONTAINER_OF":  {{"f1", "m1"}, {"f1", "m2"}},
-				"HAS_CREATOR":   {{"m1", "p1"}, {"m2", "p3"}}, // m2's creator p3 is not a member
+				"HAS_MEMBER":   {{"f1", "p1"}, {"f1", "p2"}, {"f2", "p1"}},
+				"CONTAINER_OF": {{"f1", "m1"}, {"f1", "m2"}, {"f2", "m3"}},
+				"HAS_CREATOR":  {{"m1", "p1"}, {"m2", "p2"}, {"m3", "p2"}},
 			},
 		},
 		{
-			name:  "q3 two moderators scale the inner count",
+			name:  "q3 creator in the wrong forum does not close the diamond",
 			query: "lsqb-q3",
 			brute: bruteQ3,
 			rels: relSet{
-				"HAS_MODERATOR": {{"f1", "w1"}, {"f1", "w2"}},
-				"HAS_MEMBER":    {{"f1", "p1"}, {"f1", "p2"}},
-				"CONTAINER_OF":  {{"f1", "m1"}, {"f1", "m2"}},
-				"HAS_CREATOR":   {{"m1", "p1"}, {"m2", "p2"}},
+				"HAS_MEMBER":   {{"f1", "p1"}},
+				"CONTAINER_OF": {{"f2", "m1"}},
+				"HAS_CREATOR":  {{"m1", "p1"}},
 			},
 		},
 		{
-			name:  "q4 two tags and a two-country location chain",
+			name:  "q4 two-hop friend chain with a reciprocal edge",
 			query: "lsqb-q4",
 			brute: bruteQ4,
 			rels: relSet{
-				"HAS_TAG":       {{"m1", "t1"}, {"m1", "t2"}},
-				"HAS_TYPE":      {{"t1", "tc1"}, {"t2", "tc1"}},
-				"HAS_CREATOR":   {{"m1", "p1"}},
-				"IS_LOCATED_IN": {{"p1", "city1"}},
-				"IS_PART_OF":    {{"city1", "country1"}},
+				"HAS_CREATOR":  {{"m1", "p1"}},
+				"KNOWS":        {{"p1", "p2"}, {"p2", "p3"}, {"p2", "p1"}, {"p3", "p4"}},
+				"LIKES":        {{"p5", "m1"}, {"p6", "m1"}},
+				"CONTAINER_OF": {{"f1", "m1"}, {"f2", "m1"}},
 			},
 		},
 		{
-			name:  "q6 triangle, two share a tag, all three share another",
+			name:  "q4 one-hop only, no chain to extend",
+			query: "lsqb-q4",
+			brute: bruteQ4,
+			rels: relSet{
+				"HAS_CREATOR":  {{"m1", "p1"}},
+				"KNOWS":        {{"p1", "p2"}},
+				"LIKES":        {{"p3", "m1"}},
+				"CONTAINER_OF": {{"f1", "m1"}},
+			},
+		},
+		{
+			name:  "q5 two triangles sharing an edge",
+			query: "lsqb-q5",
+			brute: bruteQ5,
+			rels: relSet{
+				"KNOWS": {{"a", "b"}, {"b", "c"}, {"c", "a"}, {"c", "d"}, {"d", "a"}},
+			},
+		},
+		{
+			name:  "q5 four-cycle has no triangle",
+			query: "lsqb-q5",
+			brute: bruteQ5,
+			rels: relSet{
+				"KNOWS": {{"a", "b"}, {"b", "c"}, {"c", "d"}, {"d", "a"}},
+			},
+		},
+		{
+			name:  "q6 triangle whose members post in two shared forums",
 			query: "lsqb-q6",
 			brute: bruteQ6,
 			rels: relSet{
-				"KNOWS":       {{"a", "b"}, {"b", "c"}, {"c", "a"}},
-				"HAS_CREATOR": {{"ma", "a"}, {"mb", "b"}, {"mc", "c"}, {"ma2", "a"}},
-				"HAS_TAG":     {{"ma", "t1"}, {"mb", "t1"}, {"mc", "t1"}, {"ma2", "t1"}},
+				"KNOWS":        {{"a", "b"}, {"b", "c"}, {"c", "a"}},
+				"CONTAINER_OF": {{"f1", "ma"}, {"f1", "mb"}, {"f1", "mc"}, {"f2", "na"}, {"f2", "nb"}, {"f2", "nc"}},
+				"HAS_CREATOR":  {{"ma", "a"}, {"mb", "b"}, {"mc", "c"}, {"na", "a"}, {"nb", "b"}, {"nc", "c"}},
 			},
 		},
 		{
-			name:  "q6 no shared tag across the triangle",
+			name:  "q6 one member posts twice in the forum",
 			query: "lsqb-q6",
 			brute: bruteQ6,
 			rels: relSet{
-				"KNOWS":       {{"a", "b"}, {"b", "c"}, {"c", "a"}},
-				"HAS_CREATOR": {{"ma", "a"}, {"mb", "b"}, {"mc", "c"}},
-				"HAS_TAG":     {{"ma", "t1"}, {"mb", "t1"}, {"mc", "t2"}},
+				"KNOWS":        {{"a", "b"}, {"b", "c"}, {"c", "a"}},
+				"CONTAINER_OF": {{"f1", "ma"}, {"f1", "ma2"}, {"f1", "mb"}, {"f1", "mc"}},
+				"HAS_CREATOR":  {{"ma", "a"}, {"ma2", "a"}, {"mb", "b"}, {"mc", "c"}},
 			},
 		},
 		{
-			name:  "q6 two triangles sharing an edge",
+			name:  "q6 posts split across forums never share one",
 			query: "lsqb-q6",
 			brute: bruteQ6,
 			rels: relSet{
-				"KNOWS":       {{"a", "b"}, {"b", "c"}, {"c", "a"}, {"a", "d"}, {"b", "d"}},
-				"HAS_CREATOR": {{"ma", "a"}, {"mb", "b"}, {"mc", "c"}, {"md", "d"}},
-				"HAS_TAG":     {{"ma", "t1"}, {"mb", "t1"}, {"mc", "t1"}, {"md", "t1"}},
+				"KNOWS":        {{"a", "b"}, {"b", "c"}, {"c", "a"}},
+				"CONTAINER_OF": {{"f1", "ma"}, {"f1", "mb"}, {"f2", "mc"}},
+				"HAS_CREATOR":  {{"ma", "a"}, {"mb", "b"}, {"mc", "c"}},
 			},
 		},
 		{
-			name:  "q9 triangle shares one forum and a tag",
-			query: "lsqb-q9",
-			brute: bruteQ9,
+			name:  "q7 one simple four-cycle",
+			query: "lsqb-q7",
+			brute: bruteQ7,
 			rels: relSet{
-				"KNOWS":       {{"a", "b"}, {"b", "c"}, {"c", "a"}},
-				"HAS_MEMBER":  {{"f1", "a"}, {"f1", "b"}, {"f1", "c"}, {"f2", "a"}, {"f2", "b"}},
-				"HAS_CREATOR": {{"ma", "a"}, {"mb", "b"}, {"mc", "c"}},
-				"HAS_TAG":     {{"ma", "t1"}, {"mb", "t1"}, {"mc", "t1"}},
+				"KNOWS": {{"a", "b"}, {"b", "c"}, {"c", "d"}, {"d", "a"}},
 			},
 		},
 		{
-			name:  "q9 triangle shares two forums",
-			query: "lsqb-q9",
-			brute: bruteQ9,
+			name:  "q7 square with a chord",
+			query: "lsqb-q7",
+			brute: bruteQ7,
 			rels: relSet{
-				"KNOWS":       {{"a", "b"}, {"b", "c"}, {"c", "a"}},
-				"HAS_MEMBER":  {{"f1", "a"}, {"f1", "b"}, {"f1", "c"}, {"f2", "a"}, {"f2", "b"}, {"f2", "c"}},
-				"HAS_CREATOR": {{"ma", "a"}, {"mb", "b"}, {"mc", "c"}, {"ma2", "a"}},
-				"HAS_TAG":     {{"ma", "t1"}, {"mb", "t1"}, {"mc", "t1"}, {"ma2", "t1"}},
+				"KNOWS": {{"a", "b"}, {"b", "c"}, {"c", "d"}, {"d", "a"}, {"a", "c"}},
 			},
 		},
 		{
-			name:  "q9 no common forum",
+			name:  "q7 complete K4",
+			query: "lsqb-q7",
+			brute: bruteQ7,
+			rels: relSet{
+				"KNOWS": {{"a", "b"}, {"a", "c"}, {"a", "d"}, {"b", "c"}, {"b", "d"}, {"c", "d"}},
+			},
+		},
+		{
+			name:  "q7 triangle admits no four-cycle",
+			query: "lsqb-q7",
+			brute: bruteQ7,
+			rels: relSet{
+				"KNOWS": {{"a", "b"}, {"b", "c"}, {"c", "a"}},
+			},
+		},
+		{
+			name:  "q8 three posts by one person in one forum",
+			query: "lsqb-q8",
+			brute: bruteQ8,
+			rels: relSet{
+				"CONTAINER_OF": {{"f1", "m1"}, {"f1", "m2"}, {"f1", "m3"}},
+				"HAS_CREATOR":  {{"m1", "p1"}, {"m2", "p1"}, {"m3", "p1"}},
+			},
+		},
+		{
+			name:  "q8 same person, different forums, cannot pair",
+			query: "lsqb-q8",
+			brute: bruteQ8,
+			rels: relSet{
+				"CONTAINER_OF": {{"f1", "m1"}, {"f2", "m2"}},
+				"HAS_CREATOR":  {{"m1", "p1"}, {"m2", "p1"}},
+			},
+		},
+		{
+			name:  "q8 same forum, different people, cannot pair",
+			query: "lsqb-q8",
+			brute: bruteQ8,
+			rels: relSet{
+				"CONTAINER_OF": {{"f1", "m1"}, {"f1", "m2"}},
+				"HAS_CREATOR":  {{"m1", "p1"}, {"m2", "p2"}},
+			},
+		},
+		{
+			name:  "q9 triangle sharing two forums and two liked posts",
 			query: "lsqb-q9",
 			brute: bruteQ9,
 			rels: relSet{
-				"KNOWS":       {{"a", "b"}, {"b", "c"}, {"c", "a"}},
-				"HAS_MEMBER":  {{"f1", "a"}, {"f1", "b"}, {"f2", "c"}},
-				"HAS_CREATOR": {{"ma", "a"}, {"mb", "b"}, {"mc", "c"}},
-				"HAS_TAG":     {{"ma", "t1"}, {"mb", "t1"}, {"mc", "t1"}},
+				"KNOWS":      {{"a", "b"}, {"b", "c"}, {"c", "a"}},
+				"HAS_MEMBER": {{"f1", "a"}, {"f1", "b"}, {"f1", "c"}, {"f2", "a"}, {"f2", "b"}, {"f2", "c"}},
+				"LIKES":      {{"a", "m1"}, {"b", "m1"}, {"c", "m1"}, {"a", "m2"}, {"b", "m2"}, {"c", "m2"}},
+			},
+		},
+		{
+			name:  "q9 one member missing from the forum",
+			query: "lsqb-q9",
+			brute: bruteQ9,
+			rels: relSet{
+				"KNOWS":      {{"a", "b"}, {"b", "c"}, {"c", "a"}},
+				"HAS_MEMBER": {{"f1", "a"}, {"f1", "b"}},
+				"LIKES":      {{"a", "m1"}, {"b", "m1"}, {"c", "m1"}},
+			},
+		},
+		{
+			name:  "q9 shared forum but no post all three liked",
+			query: "lsqb-q9",
+			brute: bruteQ9,
+			rels: relSet{
+				"KNOWS":      {{"a", "b"}, {"b", "c"}, {"c", "a"}},
+				"HAS_MEMBER": {{"f1", "a"}, {"f1", "b"}, {"f1", "c"}},
+				"LIKES":      {{"a", "m1"}, {"b", "m1"}, {"c", "m2"}},
 			},
 		},
 	}

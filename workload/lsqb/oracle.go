@@ -1,45 +1,42 @@
 package lsqb
 
 import (
-	"bufio"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
-// CountOracle computes the reference count for a LSQB count query using an
-// engine-independent method over the canonical CSV. It covers every LSQB query:
-// the tree-shaped joins (Q1-Q4), the cyclic and shared-substructure patterns the
-// spec singles out for an independent subgraph-counting reference
-// (notes/Spec/2060/bench section 2.5: Q5 the 3-clique, Q7 the four-cycle, Q8 the
-// shared substructure), and the dense composite cycles (Q6, Q9).
+// This file is the counting oracle: the engine-independent routines that
+// compute each query's count(*) straight from the canonical relationship CSV
+// (ADR-9), never through another engine. The returned value is count(*) under
+// Cypher relationship-isomorphism, the same quantity the engine returns:
+// relationships in a pattern must be pairwise distinct, but nodes may
+// coincide. That semantics decides the automorphism multiplicity: the
+// undirected KNOWS triangle is matched six times per distinct triangle (3!
+// node orderings over a symmetric pattern), the undirected four-cycle eight
+// times per simple cycle (plus the degenerate matches parallel KNOWS edges
+// admit, which the q7 enumerator handles by enumerating concrete
+// relationships), and the tree joins q1-q4 have no symmetry, so their match
+// count is the product of independent fan-outs at each branch.
 //
-// The returned value is count(*) under Cypher relationship-isomorphism, the same
-// quantity the engine returns: relationships in a pattern must be pairwise
-// distinct, but nodes may coincide (gr matches under relationship-uniqueness,
-// not node-uniqueness). That semantics decides the automorphism multiplicity. An
-// undirected triangle is matched six times (3! node orderings over a symmetric
-// pattern), so Q5, Q6, and Q9 are six times their distinct-triangle sum; the
-// tree joins Q1-Q4 have no symmetry and no repeated relationship, so their
-// match count is the plain product of the independent fan-outs at each branch.
+// The social generator emits KNOWS as directed rows, and a pair of persons
+// may know each other in both directions: two distinct relationships between
+// one unordered pair. The undirected patterns count one match per choice of
+// concrete relationship, so the triangle oracles carry the per-pair edge
+// multiplicity through the product rather than assuming a simple graph.
 //
-// Ambiguous relationship types (IS_LOCATED_IN is used by Person->City and by
-// Message->Country; HAS_TAG by Message->Tag and Forum->Tag) are read by bare
-// type without a label filter, the same convention triangleCount and the Q8
-// oracle already use. That is sound here because LDBC assigns globally unique
-// node ids and every ambiguous type is entered only through a join that pins the
-// endpoint's label: a person reached through STUDY_AT or HAS_CREATOR has only
-// City located-in edges under its id, and a message reached through HAS_CREATOR
-// has only its own (never a forum's) tag edges. The implementation note in
-// notes/Spec/2060/bench/implementation carries the full argument.
-//
-// Verified against brute-force pattern enumeration on hand-built graphs (see
-// oracle_test.go) and, for the cyclic trio, against gr: a square with one chord
-// gives Q5 = 12, Q7 = 8, and the two-message fixture gives Q8 = 2.
-func CountOracle(queryID string, ds target.Dataset) (int64, error) {
+// One generator invariant is relied on and worth naming: every Post has
+// exactly one HAS_CREATOR edge, so the posts attached to distinct persons in
+// a pattern are automatically distinct and the CONTAINER_OF/LIKES
+// relationships hanging off them are too.
+
+// CountOracle computes the reference count for an LSQB query id over the
+// dataset's canonical CSV.
+func CountOracle(queryID string, ds engine.Dataset) (int64, error) {
 	switch queryID {
 	case "lsqb-q1":
 		return q1Count(ds)
@@ -50,312 +47,86 @@ func CountOracle(queryID string, ds target.Dataset) (int64, error) {
 	case "lsqb-q4":
 		return q4Count(ds)
 	case "lsqb-q5":
-		// triangleCount returns distinct triangles; count(*) over the symmetric
-		// three-relationship pattern matches each one 3! = 6 times.
-		n, err := triangleCount(ds)
-		if err != nil {
-			return 0, err
-		}
-		return 6 * n, nil
+		return q5Count(ds)
 	case "lsqb-q6":
 		return q6Count(ds)
 	case "lsqb-q7":
-		return fourCycleCount(ds)
+		return q7Count(ds)
 	case "lsqb-q8":
-		return sharedSubstructureCount(ds)
+		return q8Count(ds)
 	case "lsqb-q9":
 		return q9Count(ds)
 	default:
-		return 0, fmt.Errorf("lsqb: no oracle for %s (set up a trusted-run reference)", queryID)
+		return 0, fmt.Errorf("lsqb: no oracle for %s", queryID)
 	}
 }
 
-// triangleCount counts undirected 3-cliques (triangles) over KNOWS edges.
-// It builds an adjacency set and uses the forward-only set-intersection
-// algorithm: for each edge (a,b) with a < b, count common neighbors c > b.
-// Returns the total number of triangles (each counted once).
-func triangleCount(ds target.Dataset) (int64, error) {
-	files, _, err := ds.RelFiles("KNOWS")
-	if err != nil {
-		return 0, fmt.Errorf("lsqb: triangle: KNOWS files: %w", err)
-	}
-	if len(files) == 0 {
-		return 0, nil
-	}
-	adj, err := buildAdjacencySet(files)
+// q1Count: (f:Forum)-[:CONTAINER_OF]->(m:Post)-[:HAS_CREATOR]->(p:Person)
+// -[:LIKES]->(:Post). A chain through the containment hub: for each
+// containment edge, the creator's LIKES fan-out.
+func q1Count(ds engine.Dataset) (int64, error) {
+	containerOf, err := loadEdges(ds, "CONTAINER_OF")
 	if err != nil {
 		return 0, err
 	}
-	var count int64
-	for a, neighbors := range adj {
-		for b := range neighbors {
-			if b <= a {
-				continue
-			}
-			for c := range neighbors {
-				if c <= b {
-					continue
-				}
-				if _, ok := adj[b][c]; ok {
-					count++
-				}
-			}
-		}
-	}
-	return count, nil
-}
-
-// fourCycleCount counts matches of Q7, the undirected four-cycle
-// a-b-c-d-a over KNOWS, using an engine-independent diagonal method. It builds
-// the undirected adjacency and delegates to fourCycleMatches.
-func fourCycleCount(ds target.Dataset) (int64, error) {
-	files, _, err := ds.RelFiles("KNOWS")
-	if err != nil {
-		return 0, fmt.Errorf("lsqb: fourcycle: KNOWS files: %w", err)
-	}
-	if len(files) == 0 {
-		return 0, nil
-	}
-	adj, err := buildAdjacencySet(files)
-	if err != nil {
-		return 0, err
-	}
-	return fourCycleMatches(adj), nil
-}
-
-// fourCycleMatches returns count(*) for the undirected four-cycle pattern
-// a-b-c-d-a over an undirected adjacency set. The pattern has four KNOWS
-// relationships, and Cypher relationship-isomorphism requires all four to be
-// distinct. On a simple loopless undirected graph any repeated node among
-// a,b,c,d would fold two of the four edges into one, so every match has four
-// distinct nodes and each simple four-cycle is matched eight times (four
-// starting nodes times two directions).
-//
-// The count is found by diagonals. A four-cycle on {a,b,c,d} is fixed by one
-// diagonal pair, say {a,c}, together with its two distinct common neighbors
-// {b,d}; so the number of four-cycles whose diagonal is the pair {u,w} is
-// C(codeg(u,w), 2), where codeg is the number of common neighbors. Each
-// four-cycle has two diagonals, so summing C(codeg,2) over unordered pairs
-// counts every four-cycle twice; with eight matches per four-cycle the count(*)
-// is 4 times that sum.
-//
-// codeg(u,w) is the number of wedges u-x-w, tallied by walking each node x and
-// incrementing the entry for every unordered pair of x's neighbors.
-func fourCycleMatches(adj map[string]map[string]struct{}) int64 {
-	codeg := map[[2]string]int64{}
-	for x := range adj {
-		nbrs := make([]string, 0, len(adj[x]))
-		for u := range adj[x] {
-			nbrs = append(nbrs, u)
-		}
-		for i := 0; i < len(nbrs); i++ {
-			for j := i + 1; j < len(nbrs); j++ {
-				u, w := nbrs[i], nbrs[j]
-				if u > w {
-					u, w = w, u
-				}
-				codeg[[2]string{u, w}]++
-			}
-		}
-	}
-	var sum int64
-	for _, c := range codeg {
-		sum += c * (c - 1) / 2 // C(codeg, 2)
-	}
-	return 4 * sum
-}
-
-// sharedSubstructureCount counts matches of Q8: a person p and two distinct
-// messages m1, m2 they both created, both carrying a shared tag t. It reads
-// HAS_CREATOR (message -> person) and HAS_TAG (message -> tag) and delegates to
-// sharedSubstructureMatches.
-func sharedSubstructureCount(ds target.Dataset) (int64, error) {
-	hcFiles, _, err := ds.RelFiles("HAS_CREATOR")
-	if err != nil {
-		return 0, fmt.Errorf("lsqb: q8: HAS_CREATOR files: %w", err)
-	}
-	htFiles, _, err := ds.RelFiles("HAS_TAG")
-	if err != nil {
-		return 0, fmt.Errorf("lsqb: q8: HAS_TAG files: %w", err)
-	}
-	creator := map[string]string{}
-	for _, f := range hcFiles {
-		edges, err := readCSVEdges(f)
-		if err != nil {
-			return 0, fmt.Errorf("lsqb: read %s: %w", f, err)
-		}
-		for _, e := range edges {
-			creator[e[0]] = e[1] // message -> person
-		}
-	}
-	tagsOf := map[string][]string{}
-	for _, f := range htFiles {
-		edges, err := readCSVEdges(f)
-		if err != nil {
-			return 0, fmt.Errorf("lsqb: read %s: %w", f, err)
-		}
-		for _, e := range edges {
-			tagsOf[e[0]] = append(tagsOf[e[0]], e[1]) // message -> tag
-		}
-	}
-	return sharedSubstructureMatches(creator, tagsOf), nil
-}
-
-// sharedSubstructureMatches returns count(*) for Q8. The pattern's four
-// relationships (two HAS_CREATOR, two HAS_TAG) are automatically distinct once
-// m1 and m2 differ, so the only constraint is m1 <> m2. For a fixed person p and
-// tag t, let k be the number of messages created by p and tagged t; the ordered
-// distinct pairs (m1, m2) number k*(k-1), and each contributes one match for
-// that (p, t). The count is the sum of k*(k-1) over all (person, tag) pairs.
-//
-// creator maps a message to its single creator; tagsOf maps a message to the
-// tags attached to it.
-func sharedSubstructureMatches(creator map[string]string, tagsOf map[string][]string) int64 {
-	k := map[[2]string]int64{}
-	for m, p := range creator {
-		for _, t := range tagsOf[m] {
-			k[[2]string{p, t}]++
-		}
-	}
-	var count int64
-	for _, c := range k {
-		count += c * (c - 1)
-	}
-	return count
-}
-
-// loadEdges reads every CSV shard for a relationship type and returns the
-// concatenated [start, end] pairs. An unknown type or an unreadable file is an
-// error; a type with no files is an empty slice (a pattern over an absent type
-// then counts zero).
-func loadEdges(ds target.Dataset, typ string) ([][2]string, error) {
-	files, _, err := ds.RelFiles(typ)
-	if err != nil {
-		return nil, fmt.Errorf("lsqb: %s files: %w", typ, err)
-	}
-	var all [][2]string
-	for _, f := range files {
-		edges, err := readCSVEdges(f)
-		if err != nil {
-			return nil, fmt.Errorf("lsqb: read %s: %w", f, err)
-		}
-		all = append(all, edges...)
-	}
-	return all, nil
-}
-
-// groupStarts buckets edges by start id, so g[start] is the list of end ids. It
-// is the adjacency list of a directed relationship type, used to walk a fan-out
-// from a known node (a forum's messages, a message's tags).
-func groupStarts(edges [][2]string) map[string][]string {
-	g := map[string][]string{}
-	for _, e := range edges {
-		g[e[0]] = append(g[e[0]], e[1])
-	}
-	return g
-}
-
-// startDegree counts edges by start id, so d[start] is the out-degree. It is the
-// length of groupStarts(edges)[start] without materializing the lists, for the
-// branches that only need the fan-out size (a person's universities, a tag's
-// classes).
-func startDegree(edges [][2]string) map[string]int64 {
-	d := map[string]int64{}
-	for _, e := range edges {
-		d[e[0]]++
-	}
-	return d
-}
-
-// q1Count is the oracle for Q1: (p:Person)-[:IS_LOCATED_IN]->(:City)
-// -[:IS_PART_OF]->(:Country) together with (p)-[:STUDY_AT]->(:University). The
-// two branches out of p are independent, so for each person the match count is
-// the product of the located-in/part-of chain length and the study-at degree.
-//
-// Let partOfDeg[city] be the number of countries a city is part of (one in a
-// clean SNB, but counted, not assumed). For a person p the chain length is the
-// sum of partOfDeg[city] over p's cities. studyAt pins p to a Person, so the sum
-// runs over persons that study somewhere; a person with no university contributes
-// a zero product and is skipped.
-func q1Count(ds target.Dataset) (int64, error) {
-	locatedIn, err := loadEdges(ds, "IS_LOCATED_IN")
-	if err != nil {
-		return 0, err
-	}
-	partOf, err := loadEdges(ds, "IS_PART_OF")
-	if err != nil {
-		return 0, err
-	}
-	studyAt, err := loadEdges(ds, "STUDY_AT")
-	if err != nil {
-		return 0, err
-	}
-	cities := groupStarts(locatedIn)
-	partOfDeg := startDegree(partOf)
-	studyAtDeg := startDegree(studyAt)
-
-	var count int64
-	for p, deg := range studyAtDeg {
-		var chain int64
-		for _, city := range cities[p] {
-			chain += partOfDeg[city]
-		}
-		count += chain * deg
-	}
-	return count, nil
-}
-
-// q2Count is the oracle for Q2: (m:Message)-[:HAS_CREATOR]->(p:Person)
-// -[:IS_LOCATED_IN]->(:City) together with (m)-[:HAS_TAG]->(:Tag). The message is
-// the join hub with two independent fan-outs: the creator-to-city chain and the
-// message's tags. For each message the match count is the product.
-//
-// HAS_CREATOR pins m to a Message and p to a Person, so reading IS_LOCATED_IN and
-// HAS_TAG by bare type is safe: locatedInDeg[p] for a real person counts only its
-// city edges, and hasTagDeg[m] for a real message counts only its own tag edges.
-func q2Count(ds target.Dataset) (int64, error) {
 	hasCreator, err := loadEdges(ds, "HAS_CREATOR")
 	if err != nil {
 		return 0, err
 	}
-	locatedIn, err := loadEdges(ds, "IS_LOCATED_IN")
-	if err != nil {
-		return 0, err
-	}
-	hasTag, err := loadEdges(ds, "HAS_TAG")
+	likes, err := loadEdges(ds, "LIKES")
 	if err != nil {
 		return 0, err
 	}
 	creators := groupStarts(hasCreator)
-	locatedInDeg := startDegree(locatedIn)
-	hasTagDeg := startDegree(hasTag)
+	likesDeg := startDegree(likes)
 
 	var count int64
-	for m, ps := range creators {
-		var cityChain int64
-		for _, p := range ps {
-			cityChain += locatedInDeg[p]
+	for _, e := range containerOf {
+		for _, p := range creators[e[1]] {
+			count += likesDeg[p]
 		}
-		count += cityChain * hasTagDeg[m]
 	}
 	return count, nil
 }
 
-// q3Count is the oracle for Q3: (f:Forum)-[:HAS_MODERATOR]->(:Person),
-// (f)-[:HAS_MEMBER]->(p:Person), (f)-[:CONTAINER_OF]->(m:Message)-[:HAS_CREATOR]->(p).
-// The bound person p is shared between the member edge and the message's creator,
-// so this is not a pure tree; the moderator is an independent fan-out.
-//
-// Under relationship-uniqueness the moderator may coincide with p, so it
-// contributes a plain factor: for each forum the count is the moderator degree
-// times the number of (message, person) pairs where the forum contains the
-// message, the message's creator is a forum member. So for each forum, sum over
-// its contained messages the count of creators that are also members.
-func q3Count(ds target.Dataset) (int64, error) {
-	hasModerator, err := loadEdges(ds, "HAS_MODERATOR")
+// q2Count: (m:Post)-[:HAS_CREATOR]->(p:Person)-[:KNOWS]->(:Person) together
+// with (m)<-[:LIKES]-(:Person). The post is the hub with two independent
+// fan-outs: the creator's out-friendships and the post's likers. For each
+// post the match count is the product.
+func q2Count(ds engine.Dataset) (int64, error) {
+	hasCreator, err := loadEdges(ds, "HAS_CREATOR")
 	if err != nil {
 		return 0, err
 	}
+	knows, err := loadEdges(ds, "KNOWS")
+	if err != nil {
+		return 0, err
+	}
+	likes, err := loadEdges(ds, "LIKES")
+	if err != nil {
+		return 0, err
+	}
+	creators := groupStarts(hasCreator)
+	knowsDeg := startDegree(knows)
+	likesIn := endDegree(likes)
+
+	var count int64
+	for m, ps := range creators {
+		var friendChain int64
+		for _, p := range ps {
+			friendChain += knowsDeg[p]
+		}
+		count += friendChain * likesIn[m]
+	}
+	return count, nil
+}
+
+// q3Count: (f:Forum)-[:HAS_MEMBER]->(p:Person), (f)-[:CONTAINER_OF]->(m:Post)
+// -[:HAS_CREATOR]->(p). The bound person is shared between the member edge
+// and the post's creator, so this is a diamond, not a pure tree: for each
+// forum, each contained post whose creator is a member contributes one match
+// per member edge.
+func q3Count(ds engine.Dataset) (int64, error) {
 	hasMember, err := loadEdges(ds, "HAS_MEMBER")
 	if err != nil {
 		return 0, err
@@ -368,136 +139,165 @@ func q3Count(ds target.Dataset) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	modDeg := startDegree(hasModerator)
-	members := map[string]map[string]struct{}{}
-	for _, e := range hasMember {
-		if members[e[0]] == nil {
-			members[e[0]] = map[string]struct{}{}
-		}
-		members[e[0]][e[1]] = struct{}{}
-	}
+	memberCount := pairCounts(hasMember) // {forum, person} -> member-edge count
 	contains := groupStarts(containerOf)
 	creators := groupStarts(hasCreator)
 
 	var count int64
-	for f, deg := range modDeg {
-		memberSet := members[f]
-		if len(memberSet) == 0 {
-			continue
-		}
-		var pairs int64
-		for _, m := range contains[f] {
+	for f, ms := range contains {
+		for _, m := range ms {
 			for _, p := range creators[m] {
-				if _, ok := memberSet[p]; ok {
-					pairs++
-				}
+				count += memberCount[arcKey(f, p)]
 			}
 		}
-		count += deg * pairs
 	}
 	return count, nil
 }
 
-// q4Count is the oracle for Q4: (m:Message)-[:HAS_TAG]->(:Tag)-[:HAS_TYPE]->
-// (:TagClass) together with (m)-[:HAS_CREATOR]->(:Person)-[:IS_LOCATED_IN]->
-// (:City)-[:IS_PART_OF]->(:Country). The message is the hub with two independent
-// chains: tag-to-class and creator-to-city-to-country. For each message the
-// match count is the product of the two chain lengths.
-//
-// A(m) is the tag-class chain: sum over the message's tags of the tag's type
-// degree. B(m) is the location chain: sum over the message's creators of, for
-// each creator's city, the city's part-of degree. HAS_CREATOR pins m to a
-// Message and the creator to a Person, so the bare-type reads of HAS_TAG and
-// IS_LOCATED_IN stay label-correct.
-func q4Count(ds target.Dataset) (int64, error) {
-	hasTag, err := loadEdges(ds, "HAS_TAG")
-	if err != nil {
-		return 0, err
-	}
-	hasType, err := loadEdges(ds, "HAS_TYPE")
-	if err != nil {
-		return 0, err
-	}
+// q4Count: (m:Post)-[:HAS_CREATOR]->(:Person)-[:KNOWS]->(:Person)-[:KNOWS]->
+// (:Person), (m)<-[:LIKES]-(:Person), (m)<-[:CONTAINER_OF]-(:Forum). The
+// deeper tree: a three-level chain out of the post hub plus two independent
+// one-hop branches into it; the match count per post is the product of the
+// three. The two chain relationships are always distinct (their sources
+// differ), so the chain length is a plain nested sum.
+func q4Count(ds engine.Dataset) (int64, error) {
 	hasCreator, err := loadEdges(ds, "HAS_CREATOR")
 	if err != nil {
 		return 0, err
 	}
-	locatedIn, err := loadEdges(ds, "IS_LOCATED_IN")
+	knows, err := loadEdges(ds, "KNOWS")
 	if err != nil {
 		return 0, err
 	}
-	partOf, err := loadEdges(ds, "IS_PART_OF")
+	likes, err := loadEdges(ds, "LIKES")
 	if err != nil {
 		return 0, err
 	}
-	tagsOf := groupStarts(hasTag)
-	hasTypeDeg := startDegree(hasType)
+	containerOf, err := loadEdges(ds, "CONTAINER_OF")
+	if err != nil {
+		return 0, err
+	}
 	creators := groupStarts(hasCreator)
-	cities := groupStarts(locatedIn)
-	partOfDeg := startDegree(partOf)
+	knowsOut := groupStarts(knows)
+	knowsDeg := startDegree(knows)
+	likesIn := endDegree(likes)
+	containerIn := endDegree(containerOf)
 
-	// locationChain[p] is the city-to-country chain length for a person, cached
-	// so a person who created many messages is walked once.
-	locationChain := map[string]int64{}
+	// twoChain[p] is the number of KNOWS 2-paths out of p, cached so a person
+	// who created many posts is walked once.
+	twoChain := map[string]int64{}
 	chainFor := func(p string) int64 {
-		if v, ok := locationChain[p]; ok {
+		if v, ok := twoChain[p]; ok {
 			return v
 		}
 		var c int64
-		for _, city := range cities[p] {
-			c += partOfDeg[city]
+		for _, q := range knowsOut[p] {
+			c += knowsDeg[q]
 		}
-		locationChain[p] = c
+		twoChain[p] = c
 		return c
 	}
 
 	var count int64
-	for m, tags := range tagsOf {
-		var a int64
-		for _, t := range tags {
-			a += hasTypeDeg[t]
-		}
-		if a == 0 {
+	for m, ps := range creators {
+		fan := likesIn[m] * containerIn[m]
+		if fan == 0 {
 			continue
 		}
-		var b int64
-		for _, p := range creators[m] {
-			b += chainFor(p)
+		var chain int64
+		for _, p := range ps {
+			chain += chainFor(p)
 		}
-		count += a * b
+		count += chain * fan
 	}
 	return count, nil
 }
 
-// q6Count is the oracle for Q6: a KNOWS triangle (a,b,c) where each person
-// created a message carrying a shared tag t. The triangle is symmetric over its
-// three KNOWS relationships, so count(*) is six times the sum over distinct
-// triangles. Inside a triangle the three messages are forced distinct (different
-// creators) and the only shared node is the tag, so for a fixed t the number of
-// matches is k[a][t]*k[b][t]*k[c][t], where k[person][tag] is the number of
-// messages that person created carrying that tag. Summing over shared tags and
-// distinct triangles, then multiplying by six, gives count(*).
-func q6Count(ds target.Dataset) (int64, error) {
-	adj, k, err := knowsAndCreatorTags(ds)
+// q5Count: the undirected KNOWS triangle (a)-[:KNOWS]-(b)-[:KNOWS]-(c)
+// -[:KNOWS]-(a). Each distinct node triangle is matched 3! = 6 times, and
+// each match picks one concrete relationship per unordered pair, so the
+// count is six times the sum over triangles of the pairwise edge
+// multiplicities' product.
+func q5Count(ds engine.Dataset) (int64, error) {
+	knows, err := loadEdges(ds, "KNOWS")
 	if err != nil {
 		return 0, err
 	}
+	adj, mult := undirectedAdjacency(knows)
 	var sum int64
 	forEachTriangle(adj, func(a, b, c string) {
-		sum += sharedTagProduct(k, a, b, c)
+		sum += mult[pairKey(a, b)] * mult[pairKey(b, c)] * mult[pairKey(a, c)]
 	})
 	return 6 * sum, nil
 }
 
-// q9Count is the oracle for Q9: a KNOWS triangle (a,b,c) whose three members
-// share a forum (each joined by HAS_MEMBER) and a tag (each created a message
-// carrying it). The forum and the tag are independent given the triangle, so for
-// a distinct triangle the match count is F*(shared-tag product), where F is the
-// number of forums that have all three as members. As in Q6 the triangle is
-// six-fold symmetric, so count(*) is six times the sum of F times the shared-tag
-// product over distinct triangles.
-func q9Count(ds target.Dataset) (int64, error) {
-	adj, k, err := knowsAndCreatorTags(ds)
+// q6Count: a KNOWS triangle whose members each created a post contained in a
+// shared forum f. Inside a triangle the three posts are forced distinct
+// (single creator per post), so for a fixed forum the matches multiply:
+// k[p][f] is the number of (creator, containment) pairs putting a post of p
+// in f, and the per-triangle factor is the sum over forums of the product.
+func q6Count(ds engine.Dataset) (int64, error) {
+	knows, err := loadEdges(ds, "KNOWS")
+	if err != nil {
+		return 0, err
+	}
+	k, err := postsPerPersonForum(ds)
+	if err != nil {
+		return 0, err
+	}
+	adj, mult := undirectedAdjacency(knows)
+	var sum int64
+	forEachTriangle(adj, func(a, b, c string) {
+		shared := sharedProduct(k, a, b, c)
+		if shared == 0 {
+			return
+		}
+		sum += mult[pairKey(a, b)] * mult[pairKey(b, c)] * mult[pairKey(a, c)] * shared
+	})
+	return 6 * sum, nil
+}
+
+// q7Count: the undirected KNOWS four-cycle (a)-[:KNOWS]-(b)-[:KNOWS]-(c)
+// -[:KNOWS]-(d)-[:KNOWS]-(a). Counted by direct enumeration over concrete
+// relationships with the pairwise-distinctness Cypher requires, which gets
+// the degenerate matches right (a pair known in both directions supports a
+// two-pair "cycle" through two distinct relationships) without a simple-graph
+// assumption. Each simple four-cycle is found eight times (four starting
+// nodes, two directions), matching count(*).
+func q7Count(ds engine.Dataset) (int64, error) {
+	knows, err := loadEdges(ds, "KNOWS")
+	if err != nil {
+		return 0, err
+	}
+	return fourCycleMatches(knows), nil
+}
+
+// q8Count: the shared substructure: (p:Person)<-[:HAS_CREATOR]-(m1:Post)
+// <-[:CONTAINER_OF]-(f:Forum), (p)<-[:HAS_CREATOR]-(m2:Post)
+// <-[:CONTAINER_OF]-(f), m1 <> m2. For a fixed person and forum with k
+// qualifying posts the ordered distinct pairs number k*(k-1); the count is
+// that sum over all (person, forum) pairs.
+func q8Count(ds engine.Dataset) (int64, error) {
+	k, err := postsPerPersonForum(ds)
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, byForum := range k {
+		for _, n := range byForum {
+			count += n * (n - 1)
+		}
+	}
+	return count, nil
+}
+
+// q9Count: a KNOWS triangle whose members share a forum (each a HAS_MEMBER
+// target) and a post all three liked. The forum and the post are independent
+// given the triangle, so the per-triangle factor is the product of the
+// common-forum and common-liked-post counts, each summed with edge
+// multiplicities.
+func q9Count(ds engine.Dataset) (int64, error) {
+	knows, err := loadEdges(ds, "KNOWS")
 	if err != nil {
 		return 0, err
 	}
@@ -505,69 +305,86 @@ func q9Count(ds target.Dataset) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	// memberForums[person] is the set of forums the person belongs to (HAS_MEMBER
-	// is Forum->Person, so it is read end-to-start).
-	memberForums := map[string]map[string]struct{}{}
-	for _, e := range hasMember {
-		f, p := e[0], e[1]
-		if memberForums[p] == nil {
-			memberForums[p] = map[string]struct{}{}
-		}
-		memberForums[p][f] = struct{}{}
+	likes, err := loadEdges(ds, "LIKES")
+	if err != nil {
+		return 0, err
 	}
+	// memberOf[person][forum] and liked[person][post] carry per-pair edge
+	// counts (0/1 from the generator, but counted, not assumed).
+	memberOf := groupCountsByEnd(hasMember)
+	liked := groupCountsByStart(likes)
+
+	adj, mult := undirectedAdjacency(knows)
 	var sum int64
 	forEachTriangle(adj, func(a, b, c string) {
-		shared := sharedTagProduct(k, a, b, c)
-		if shared == 0 {
+		forums := sharedProduct(memberOf, a, b, c)
+		if forums == 0 {
 			return
 		}
-		sum += commonForums(memberForums, a, b, c) * shared
+		posts := sharedProduct(liked, a, b, c)
+		if posts == 0 {
+			return
+		}
+		sum += mult[pairKey(a, b)] * mult[pairKey(b, c)] * mult[pairKey(a, c)] * forums * posts
 	})
 	return 6 * sum, nil
 }
 
-// knowsAndCreatorTags builds the two structures the composite cyclic oracles
-// share: the undirected KNOWS adjacency set and k[person][tag], the count of
-// messages a person created carrying a tag. k is built by walking each message's
-// creator and tags, so it never reads a forum's tags (a forum is not a creator).
-func knowsAndCreatorTags(ds target.Dataset) (map[string]map[string]struct{}, map[string]map[string]int64, error) {
-	knowsFiles, _, err := ds.RelFiles("KNOWS")
-	if err != nil {
-		return nil, nil, fmt.Errorf("lsqb: KNOWS files: %w", err)
-	}
-	adj, err := buildAdjacencySet(knowsFiles)
-	if err != nil {
-		return nil, nil, err
-	}
+// ---- shared structure builders --------------------------------------
+
+// postsPerPersonForum builds k[person][forum]: the number of (HAS_CREATOR,
+// CONTAINER_OF) pairs putting a post created by the person into the forum.
+func postsPerPersonForum(ds engine.Dataset) (map[string]map[string]int64, error) {
 	hasCreator, err := loadEdges(ds, "HAS_CREATOR")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	hasTag, err := loadEdges(ds, "HAS_TAG")
+	containerOf, err := loadEdges(ds, "CONTAINER_OF")
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	creator := map[string]string{}
-	for _, e := range hasCreator {
-		creator[e[0]] = e[1] // message -> person
-	}
-	tagsOf := groupStarts(hasTag)
+	creators := groupStarts(hasCreator)
 	k := map[string]map[string]int64{}
-	for m, p := range creator {
-		for _, t := range tagsOf[m] {
+	for _, e := range containerOf {
+		f, m := e[0], e[1]
+		for _, p := range creators[m] {
 			if k[p] == nil {
 				k[p] = map[string]int64{}
 			}
-			k[p][t]++
+			k[p][f]++
 		}
 	}
-	return adj, k, nil
+	return k, nil
+}
+
+// undirectedAdjacency folds directed edges into an undirected adjacency set
+// plus the per-unordered-pair relationship count (a pair connected in both
+// directions has multiplicity two). Self-loops are dropped: no loopless
+// pattern can use them.
+func undirectedAdjacency(edges [][2]string) (map[string]map[string]struct{}, map[[2]string]int64) {
+	adj := map[string]map[string]struct{}{}
+	mult := map[[2]string]int64{}
+	for _, e := range edges {
+		u, v := e[0], e[1]
+		if u == v {
+			continue
+		}
+		if adj[u] == nil {
+			adj[u] = map[string]struct{}{}
+		}
+		if adj[v] == nil {
+			adj[v] = map[string]struct{}{}
+		}
+		adj[u][v] = struct{}{}
+		adj[v][u] = struct{}{}
+		mult[pairKey(u, v)]++
+	}
+	return adj, mult
 }
 
 // forEachTriangle calls fn once for each distinct undirected triangle in adj,
-// with its three nodes in ascending id order. It is the forward-only enumeration
-// triangleCount uses, lifted into a callback so the composite oracles can attach
-// their own per-triangle weight.
+// with its three nodes in ascending id order: the forward-only enumeration,
+// lifted into a callback so each oracle attaches its own per-triangle weight.
 func forEachTriangle(adj map[string]map[string]struct{}, fn func(a, b, c string)) {
 	for a, nbrs := range adj {
 		for b := range nbrs {
@@ -586,10 +403,84 @@ func forEachTriangle(adj map[string]map[string]struct{}, fn func(a, b, c string)
 	}
 }
 
-// sharedTagProduct sums k[a][t]*k[b][t]*k[c][t] over tags t the three persons
-// all carry. It iterates the smallest of the three tag maps so the cost scales
-// with the rarest person's tag count, not the product.
-func sharedTagProduct(k map[string]map[string]int64, a, b, c string) int64 {
+// fourCycleMatches returns count(*) for the undirected four-cycle pattern by
+// enumerating concrete relationship assignments: for every node a and every
+// walk e1,e2,e3 over pairwise-distinct relationships reaching d, the closing
+// candidates are the relationships between {d, a} not already used. Each
+// match is one (node, relationship) assignment of the pattern, so the total
+// is count(*) exactly.
+func fourCycleMatches(edges [][2]string) int64 {
+	type arc struct {
+		rel   int
+		other string
+	}
+	inc := map[string][]arc{}
+	mult := map[[2]string]int64{}
+	for i, e := range edges {
+		u, v := e[0], e[1]
+		if u == v {
+			continue
+		}
+		inc[u] = append(inc[u], arc{i, v})
+		inc[v] = append(inc[v], arc{i, u})
+		mult[pairKey(u, v)]++
+	}
+	// onPair reports whether relationship r connects the unordered pair {x,y}.
+	onPair := func(r int, x, y string) bool {
+		e := edges[r]
+		return (e[0] == x && e[1] == y) || (e[0] == y && e[1] == x)
+	}
+
+	var count int64
+	for a, arcsA := range inc {
+		for _, e1 := range arcsA {
+			b := e1.other
+			for _, e2 := range inc[b] {
+				if e2.rel == e1.rel {
+					continue
+				}
+				c := e2.other
+				if c == a {
+					// b's neighbor folding straight back onto a: the closing
+					// pattern node d would coincide with b only through a
+					// relationship between {a, b} — handled below like any
+					// other c, but c == a makes edge (c,d) share a's pair
+					// space; keep it, Cypher allows the node coincidence.
+					_ = c
+				}
+				for _, e3 := range inc[c] {
+					if e3.rel == e1.rel || e3.rel == e2.rel {
+						continue
+					}
+					d := e3.other
+					// Closing relationships between {d, a}, minus the ones
+					// already used by e1..e3.
+					m := mult[pairKey(d, a)]
+					if m == 0 {
+						continue
+					}
+					var used int64
+					if onPair(e1.rel, d, a) {
+						used++
+					}
+					if onPair(e2.rel, d, a) {
+						used++
+					}
+					if onPair(e3.rel, d, a) {
+						used++
+					}
+					count += m - used
+				}
+			}
+		}
+	}
+	return count
+}
+
+// sharedProduct sums k[a][x]*k[b][x]*k[c][x] over the keys x the three
+// persons share, iterating the smallest of the three maps so the cost scales
+// with the rarest person's key count.
+func sharedProduct(k map[string]map[string]int64, a, b, c string) int64 {
 	ka, kb, kc := k[a], k[b], k[c]
 	if len(ka) == 0 || len(kb) == 0 || len(kc) == 0 {
 		return 0
@@ -602,121 +493,167 @@ func sharedTagProduct(k map[string]map[string]int64, a, b, c string) int64 {
 		smallest = kc
 	}
 	var sum int64
-	for t := range smallest {
-		ca, ok := ka[t]
+	for x := range smallest {
+		na, ok := ka[x]
 		if !ok {
 			continue
 		}
-		cb, ok := kb[t]
+		nb, ok := kb[x]
 		if !ok {
 			continue
 		}
-		cc, ok := kc[t]
+		nc, ok := kc[x]
 		if !ok {
 			continue
 		}
-		sum += ca * cb * cc
+		sum += na * nb * nc
 	}
 	return sum
 }
 
-// commonForums returns the number of forums that have all three persons as
-// members, by intersecting the smallest membership set against the other two.
-func commonForums(memberForums map[string]map[string]struct{}, a, b, c string) int64 {
-	fa, fb, fc := memberForums[a], memberForums[b], memberForums[c]
-	if len(fa) == 0 || len(fb) == 0 || len(fc) == 0 {
-		return 0
-	}
-	smallest := fa
-	if len(fb) < len(smallest) {
-		smallest = fb
-	}
-	if len(fc) < len(smallest) {
-		smallest = fc
-	}
-	var n int64
-	for f := range smallest {
-		if _, ok := fa[f]; !ok {
-			continue
-		}
-		if _, ok := fb[f]; !ok {
-			continue
-		}
-		if _, ok := fc[f]; !ok {
-			continue
-		}
-		n++
-	}
-	return n
-}
+// ---- edge loading and grouping --------------------------------------
 
-// buildAdjacencySet reads KNOWS relationship CSV files and builds an undirected
-// adjacency set keyed by string node id. Both directions are inserted so the
-// triangle check works from either endpoint.
-func buildAdjacencySet(files []string) (map[string]map[string]struct{}, error) {
-	adj := map[string]map[string]struct{}{}
+// loadEdges reads every CSV shard for a relationship type and returns the
+// concatenated [start, end] pairs, locating the endpoint columns through the
+// typed header (spec 05 §1). An unknown type is an error from RelFiles; a
+// type with no files is an empty slice (a pattern over an absent type counts
+// zero).
+func loadEdges(ds engine.Dataset, typ string) ([][2]string, error) {
+	files, err := ds.RelFiles(typ)
+	if err != nil {
+		return nil, fmt.Errorf("lsqb: %s files: %w", typ, err)
+	}
+	var all [][2]string
 	for _, f := range files {
-		edges, err := readCSVEdges(f)
+		pairs, err := readCSVEdges(f)
 		if err != nil {
 			return nil, fmt.Errorf("lsqb: read %s: %w", f, err)
 		}
-		for _, e := range edges {
-			if adj[e[0]] == nil {
-				adj[e[0]] = map[string]struct{}{}
-			}
-			if adj[e[1]] == nil {
-				adj[e[1]] = map[string]struct{}{}
-			}
-			adj[e[0]][e[1]] = struct{}{}
-			adj[e[1]][e[0]] = struct{}{}
-		}
+		all = append(all, pairs...)
 	}
-	return adj, nil
+	return all, nil
 }
 
-// readCSVEdges reads the first two non-empty, non-header columns from a
-// relationship CSV file as [start_id, end_id] pairs. It skips the typed header
-// line (which contains ":" characters and no real edge data).
+// readCSVEdges reads the :START_ID and :END_ID columns of one relationship
+// CSV.
 func readCSVEdges(path string) ([][2]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return parseCSVEdges(f)
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = -1
+	r.ReuseRecord = true
+	startCol, endCol := -1, -1
+	first := true
+	var pairs [][2]string
+	for {
+		rec, err := r.Read()
+		if err == io.EOF {
+			return pairs, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if first {
+			first = false
+			for i, cell := range rec {
+				switch {
+				case strings.HasSuffix(cell, ":START_ID"):
+					startCol = i
+				case strings.HasSuffix(cell, ":END_ID"):
+					endCol = i
+				}
+			}
+			if startCol < 0 || endCol < 0 {
+				return nil, fmt.Errorf("header has no :START_ID/:END_ID columns")
+			}
+			continue
+		}
+		if startCol >= len(rec) || endCol >= len(rec) {
+			return nil, fmt.Errorf("row has %d fields, need endpoints at %d,%d", len(rec), startCol, endCol)
+		}
+		pairs = append(pairs, [2]string{rec[startCol], rec[endCol]})
+	}
 }
 
-// parseCSVEdges reads [start, end] pairs from a reader, skipping the first line
-// (the typed header).
-func parseCSVEdges(r io.Reader) ([][2]string, error) {
-	sc := bufio.NewScanner(r)
-	if !sc.Scan() {
-		return nil, nil // empty file
+// groupStarts buckets edges by start id: g[start] is the list of end ids.
+func groupStarts(edges [][2]string) map[string][]string {
+	g := map[string][]string{}
+	for _, e := range edges {
+		g[e[0]] = append(g[e[0]], e[1])
 	}
-	// First line is the header; skip it.
-	var pairs [][2]string
-	for sc.Scan() {
-		line := sc.Text()
-		if line == "" {
-			continue
-		}
-		// CSV is comma-separated; take the first two fields.
-		i := strings.Index(line, ",")
-		if i < 0 {
-			continue
-		}
-		start := line[:i]
-		rest := line[i+1:]
-		j := strings.Index(rest, ",")
-		var end string
-		if j < 0 {
-			end = rest
-		} else {
-			end = rest[:j]
-		}
-		if start != "" && end != "" {
-			pairs = append(pairs, [2]string{start, end})
-		}
+	return g
+}
+
+// startDegree counts edges by start id.
+func startDegree(edges [][2]string) map[string]int64 {
+	d := map[string]int64{}
+	for _, e := range edges {
+		d[e[0]]++
 	}
-	return pairs, sc.Err()
+	return d
+}
+
+// endDegree counts edges by end id.
+func endDegree(edges [][2]string) map[string]int64 {
+	d := map[string]int64{}
+	for _, e := range edges {
+		d[e[1]]++
+	}
+	return d
+}
+
+// pairCounts counts edges per ordered (start, end) pair.
+func pairCounts(edges [][2]string) map[[2]string]int64 {
+	c := map[[2]string]int64{}
+	for _, e := range edges {
+		c[arcKey(e[0], e[1])]++
+	}
+	return c
+}
+
+// arcKey returns the directed (start, end) key pairCounts stores under, as
+// distinct from pairKey's canonical unordered key.
+//
+// The two key spaces coincide whenever start sorts before end, which is why
+// mixing them hid for so long: while ids carried a label prefix, a Forum id
+// ("F0") always sorted before a Person id ("P3"), so a canonical lookup of a
+// directed pair happened to find it. Under canonical integer ids the label
+// blocks sort by number, the accident stops holding, and a canonical lookup
+// silently misses most of the map — an undercount, never an error.
+func arcKey(start, end string) [2]string { return [2]string{start, end} }
+
+// groupCountsByStart builds m[start][end] = edge count.
+func groupCountsByStart(edges [][2]string) map[string]map[string]int64 {
+	m := map[string]map[string]int64{}
+	for _, e := range edges {
+		if m[e[0]] == nil {
+			m[e[0]] = map[string]int64{}
+		}
+		m[e[0]][e[1]]++
+	}
+	return m
+}
+
+// groupCountsByEnd builds m[end][start] = edge count (HAS_MEMBER is
+// Forum->Person, read person-first).
+func groupCountsByEnd(edges [][2]string) map[string]map[string]int64 {
+	m := map[string]map[string]int64{}
+	for _, e := range edges {
+		if m[e[1]] == nil {
+			m[e[1]] = map[string]int64{}
+		}
+		m[e[1]][e[0]]++
+	}
+	return m
+}
+
+// pairKey returns the canonical unordered-pair key.
+func pairKey(u, v string) [2]string {
+	if u > v {
+		u, v = v, u
+	}
+	return [2]string{u, v}
 }

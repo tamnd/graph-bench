@@ -1,231 +1,369 @@
 package snb
 
 import (
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/workload"
 )
 
+// This file registers "snb-complex": the faithful-shape subset of the LDBC
+// SNB Interactive v2 complex reads expressible on the social schema
+// (spec 06 §3.2). Included: IC1, IC2, IC4 (substituted), IC5, IC9, IC13.
+//
+// Omitted ICs and why (one line each; the schema has no Comment, Tag,
+// Place, or Organisation entities — package doc):
+//
+//   - IC3  (friends in two countries): no Places.
+//   - IC6  (co-occurring tags): no Tags.
+//   - IC7  (recent likers with reply latency): latency needs Comments.
+//   - IC8  (recent replies): no Comments/REPLY_OF.
+//   - IC10 (friend recommendation by tag interest): no Tags/interests.
+//   - IC11 (job referral): no Organisations.
+//   - IC12 (expert search): no Comments or Tag hierarchy.
+//   - IC14 (cheapest interaction path): weights derive from reply
+//     interactions, which need Comments.
+//
+// Substitution: IC4 (new topics — tags in friends' recent posts) becomes
+// "recent posts liked by friends" — the same friend-fanout-then-window-scan
+// shape over the dated relationship the schema has (LIKES).
+//
+// IC1 deviates in one respect: LDBC orders by knows-distance first;
+// computing the per-row minimum distance in portable Cypher would dominate
+// the query, so snb-ic1 returns the distinct 1..3-hop matches ordered by
+// (lastName, personId) only.
+
 func init() {
-	workload.Register(complexWorkload)
+	workload.Register(&workload.Workload{
+		Name:     "snb-complex",
+		Title:    "SNB Interactive complex reads IC1/2/4/5/9/13 (shapes, social schema)",
+		Family:   "snb",
+		Dataset:  "social-1k",
+		Fidelity: "derived",
+		Queries:  complexQueries,
+	})
 }
 
-// complexWorkload is the "snb-complex" workload: the six curated SNB Interactive
-// complex reads that finish in the 1-500 ms band at SF1 and fit a CI runner.
-// The heavier IC3/IC4/IC5/IC7/IC10/IC12/IC13/IC14 are deferred to the
-// controlled-machine analytical tier. All six are class Traversal.
-var complexWorkload = &workload.Workload{
-	Name:    "snb-complex",
-	Title:   "SNB Interactive curated complex reads IC1/IC2/IC6/IC8/IC9/IC11 (isolated)",
-	Dataset: "snb-sf1",
+var complexQueries = []*workload.Query{qIC1, qIC2, qIC4, qIC5, qIC9, qIC13}
 
-	Queries: []*workload.WorkloadQuery{
-		ic1(), ic2(), ic6(), ic8(), ic9(), ic11(),
+// qIC1 — IC1 shape: persons with a given first name within 3 KNOWS hops.
+var qIC1 = &workload.Query{
+	ID:    "snb-ic1",
+	Class: engine.Subgraph,
+	Texts: map[engine.Dialect]string{
+		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS*1..3]-(f:Person)
+WHERE f.firstName = $firstName AND f.id <> $personId
+RETURN DISTINCT f.id AS personId, f.lastName AS lastName
+ORDER BY lastName ASC, personId ASC
+LIMIT 20`,
+	},
+	PoolKey: PoolPersonName,
+	Params:  workload.NewPoolSource(nil),
+	Reference: &workload.RefStrategy{
+		Compare: workload.CompareSpec{Ordered: true},
+		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
+			m, err := loadSocial(ds)
+			if err != nil {
+				return nil, err
+			}
+			id, err := pstr(p, "personId")
+			if err != nil {
+				return nil, err
+			}
+			name, err := pstr(p, "firstName")
+			if err != nil {
+				return nil, err
+			}
+			i, err := m.person(id)
+			if err != nil {
+				return nil, err
+			}
+			dist := m.bfs(i, 3)
+			var rows [][]engine.Value
+			for j, d := range dist {
+				if d >= 1 && d <= 3 && m.persons[j].firstName == name {
+					rows = append(rows, row(idv(m.persons[j].id), m.persons[j].lastName))
+				}
+			}
+			sortRows(rows, sortKey{col: 1}, sortKey{col: 0})
+			return &workload.Answer{
+				Columns: []string{"personId", "lastName"},
+				Rows:    limit(rows, 20),
+			}, nil
+		},
 	},
 }
 
-// ic1: friends with a given first name to three hops, with profile.
-// Bounded variable-length KNOWS traversal, distinct-by-distance, fan-out of
-// optional one-hop fetches for city, universities, and companies.
-func ic1() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "snb-ic1",
-		Class: target.Traversal,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (p:Person {id: $personId}), (friend:Person {firstName: $firstName})
-WHERE NOT p = friend
-WITH p, friend
-MATCH path = shortestPath((p)-[:KNOWS*1..3]-(friend))
-WITH min(length(path)) AS distance, friend
-ORDER BY distance ASC, friend.lastName ASC, toInteger(friend.id) ASC
-LIMIT 20
-MATCH (friend)-[:IS_LOCATED_IN]->(friendCity:Place)
-OPTIONAL MATCH (friend)-[studyAt:STUDY_AT]->(uni:Organisation)-[:IS_PART_OF]->(uniCity:Place)
-OPTIONAL MATCH (friend)-[workAt:WORK_AT]->(company:Organisation)-[:IS_PART_OF]->(companyCountry:Place)
-RETURN
-    friend.id AS personId,
-    friend.lastName AS personLastName,
-    distance,
-    friend.birthday AS personBirthday,
-    friend.creationDate AS personCreationDate,
-    friend.gender AS personGender,
-    friend.browserUsed AS personBrowserUsed,
-    friend.locationIP AS personLocationIP,
-    collect(DISTINCT [uni.name, studyAt.classYear, uniCity.name]) AS universities,
-    collect(DISTINCT [company.name, workAt.workFrom, companyCountry.name]) AS companies,
-    friendCity.name AS cityName
-ORDER BY distance ASC, friend.lastName ASC, toInteger(friend.id) ASC`,
+// qIC2 — IC2 shape: friends' recent posts before a date, newest first.
+var qIC2 = &workload.Query{
+	ID:    "snb-ic2",
+	Class: engine.Subgraph,
+	Texts: map[engine.Dialect]string{
+		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
+WITH DISTINCT f
+MATCH (f)<-[:HAS_CREATOR]-(m:Post)
+WHERE m.creationDate < $maxDate
+RETURN f.id AS personId, f.firstName AS firstName, f.lastName AS lastName,
+       m.id AS postId, m.content AS content, m.creationDate AS creationDate
+ORDER BY creationDate DESC, postId ASC
+LIMIT 20`,
+	},
+	PoolKey: PoolPersonDate,
+	Params:  workload.NewPoolSource(nil),
+	Reference: &workload.RefStrategy{
+		Compare: workload.CompareSpec{Ordered: true},
+		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
+			m, err := loadSocial(ds)
+			if err != nil {
+				return nil, err
+			}
+			id, err := pstr(p, "personId")
+			if err != nil {
+				return nil, err
+			}
+			maxDate, err := pint(p, "maxDate")
+			if err != nil {
+				return nil, err
+			}
+			i, err := m.person(id)
+			if err != nil {
+				return nil, err
+			}
+			var rows [][]engine.Value
+			for _, f := range m.friends[i] {
+				fr := m.persons[f]
+				for _, pi := range m.postsOf[f] {
+					po := m.posts[pi]
+					if po.creationDate < maxDate {
+						rows = append(rows, row(idv(fr.id), fr.firstName, fr.lastName, idv(po.id), po.content, po.creationDate))
+					}
+				}
+			}
+			sortRows(rows, sortKey{col: 5, desc: true}, sortKey{col: 3})
+			return &workload.Answer{
+				Columns: []string{"personId", "firstName", "lastName", "postId", "content", "creationDate"},
+				Rows:    limit(rows, 20),
+			}, nil
 		},
-		Params: workload.NewPool(nil), // {personId, firstName} pairs from curated person pool
-		Reference: workload.RefStrategy{
-			Compare: workload.CompareSpec{
-				Ordered:   true,
-				CoerceNum: false,
-			},
-			Compute: nil,
-		},
-	}
+	},
 }
 
-// ic2: a friend's twenty most recent messages before a date.
-// One-hop KNOWS, temporal filter on creationDate, top-k ordered result.
-func ic2() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "snb-ic2",
-		Class: target.Traversal,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS]-(friend:Person),
-      (friend)<-[:HAS_CREATOR]-(message:Message)
-WHERE message.creationDate < $maxDate
-WITH friend, message
-ORDER BY message.creationDate DESC, message.id ASC
-LIMIT 20
-RETURN
-    friend.id AS personId,
-    friend.firstName AS personFirstName,
-    friend.lastName AS personLastName,
-    message.id AS messageId,
-    coalesce(message.content, message.imageFile) AS messageContent,
-    message.creationDate AS messageCreationDate
-ORDER BY messageCreationDate DESC, messageId ASC`,
+// qIC4 — IC4 substitute (disclosed above): distinct posts liked by friends
+// with a like date in the window.
+var qIC4 = &workload.Query{
+	ID:    "snb-ic4",
+	Class: engine.Subgraph,
+	Texts: map[engine.Dialect]string{
+		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
+WITH DISTINCT f
+MATCH (f)-[l:LIKES]->(m:Post)
+WHERE l.creationDate >= $minDate
+RETURN DISTINCT m.id AS postId, m.content AS content
+ORDER BY postId ASC
+LIMIT 20`,
+	},
+	PoolKey: PoolPersonDate,
+	Params:  workload.NewPoolSource(nil),
+	Reference: &workload.RefStrategy{
+		Compare: workload.CompareSpec{Ordered: true},
+		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
+			m, err := loadSocial(ds)
+			if err != nil {
+				return nil, err
+			}
+			id, err := pstr(p, "personId")
+			if err != nil {
+				return nil, err
+			}
+			minDate, err := pint(p, "minDate")
+			if err != nil {
+				return nil, err
+			}
+			i, err := m.person(id)
+			if err != nil {
+				return nil, err
+			}
+			seen := map[int]struct{}{}
+			for _, f := range m.friends[i] {
+				for _, e := range m.personLikes[f] {
+					if e.date >= minDate {
+						seen[e.other] = struct{}{}
+					}
+				}
+			}
+			var rows [][]engine.Value
+			for pi := range seen {
+				rows = append(rows, row(idv(m.posts[pi].id), m.posts[pi].content))
+			}
+			sortRows(rows, sortKey{col: 0})
+			return &workload.Answer{
+				Columns: []string{"postId", "content"},
+				Rows:    limit(rows, 20),
+			}, nil
 		},
-		Params: workload.NewPool(nil), // {personId, maxDate} from curated message-window pool
-		Reference: workload.RefStrategy{
-			Compare: workload.CompareSpec{
-				Ordered:   true,
-				CoerceNum: false,
-			},
-			Compute: nil,
-		},
-	}
+	},
 }
 
-// ic6: tag co-occurrence among friends-of-friends.
-// Two-hop KNOWS expansion, join to messages on a given tag, collect other tags
-// on those messages, top-k by co-occurrence count.
-func ic6() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "snb-ic6",
-		Class: target.Traversal,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (knownTag:Tag {name: $tagName})<-[:HAS_TAG]-(message:Message)
-      -[:HAS_CREATOR]->(friend:Person)-[:KNOWS*1..2]-(p:Person {id: $personId})
-WHERE NOT p = friend
-MATCH (message)-[:HAS_TAG]->(commonTag:Tag)
-WHERE NOT commonTag = knownTag
-WITH commonTag, count(message) AS tagCount
-ORDER BY tagCount DESC, commonTag.name ASC
-LIMIT 10
-RETURN commonTag.name AS tagName, tagCount`,
+// qIC5 — IC5 shape (new groups): forums the person's friends belong to,
+// ranked by how many friends are members. The schema's HAS_MEMBER carries
+// no join date, so the LDBC date filter is dropped (disclosed).
+var qIC5 = &workload.Query{
+	ID:    "snb-ic5",
+	Class: engine.Subgraph,
+	Texts: map[engine.Dialect]string{
+		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
+WITH DISTINCT f
+MATCH (forum:Forum)-[:HAS_MEMBER]->(f)
+RETURN forum.id AS forumId, forum.title AS title, count(f) AS memberFriends
+ORDER BY memberFriends DESC, forumId ASC
+LIMIT 20`,
+	},
+	PoolKey: PoolPersonID,
+	Params:  workload.NewPoolSource(nil),
+	Reference: &workload.RefStrategy{
+		Compare: workload.CompareSpec{Ordered: true},
+		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
+			m, err := loadSocial(ds)
+			if err != nil {
+				return nil, err
+			}
+			id, err := pstr(p, "personId")
+			if err != nil {
+				return nil, err
+			}
+			i, err := m.person(id)
+			if err != nil {
+				return nil, err
+			}
+			inFriends := map[int]struct{}{}
+			for _, f := range m.friends[i] {
+				inFriends[f] = struct{}{}
+			}
+			counts := map[int]int64{}
+			for fi, members := range m.forumMembers {
+				for _, pm := range members {
+					if _, ok := inFriends[pm]; ok {
+						counts[fi]++
+					}
+				}
+			}
+			var rows [][]engine.Value
+			for fi, n := range counts {
+				rows = append(rows, row(idv(m.forums[fi].id), m.forums[fi].title, n))
+			}
+			sortRows(rows, sortKey{col: 2, desc: true}, sortKey{col: 0})
+			return &workload.Answer{
+				Columns: []string{"forumId", "title", "memberFriends"},
+				Rows:    limit(rows, 20),
+			}, nil
 		},
-		Params: workload.NewPool(nil), // {personId, tagName} from curated tag-cooccurrence pool
-		Reference: workload.RefStrategy{
-			Compare: workload.CompareSpec{
-				Ordered:   true, // ORDER BY tagCount DESC, tagName ASC is stable for top-10
-				CoerceNum: true, // count returns int on some engines, float on others
-			},
-			Compute: nil,
-		},
-	}
+	},
 }
 
-// ic8: twenty most recent replies to a person's messages.
-// One-hop HAS_CREATOR to the person's messages, one-hop REPLY_OF to comments,
-// then the comment's author. Top-k ordered by creation date.
-func ic8() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "snb-ic8",
-		Class: target.Traversal,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (p:Person {id: $personId})<-[:HAS_CREATOR]-(message:Message)
-      <-[:REPLY_OF]-(comment:Comment)-[:HAS_CREATOR]->(author:Person)
-WITH author, comment
-ORDER BY comment.creationDate DESC, comment.id ASC
-LIMIT 20
-RETURN
-    author.id AS personId,
-    author.firstName AS personFirstName,
-    author.lastName AS personLastName,
-    comment.creationDate AS commentCreationDate,
-    comment.id AS commentId,
-    comment.content AS commentContent
-ORDER BY commentCreationDate DESC, commentId ASC`,
+// qIC9 — IC9 shape: recent posts of friends and friends-of-friends before a
+// date, newest first.
+var qIC9 = &workload.Query{
+	ID:    "snb-ic9",
+	Class: engine.Subgraph,
+	Texts: map[engine.Dialect]string{
+		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS*1..2]-(f:Person)
+WHERE f.id <> $personId
+WITH DISTINCT f
+MATCH (f)<-[:HAS_CREATOR]-(m:Post)
+WHERE m.creationDate < $maxDate
+RETURN f.id AS personId, m.id AS postId, m.creationDate AS creationDate
+ORDER BY creationDate DESC, postId ASC
+LIMIT 20`,
+	},
+	PoolKey: PoolPersonDate,
+	Params:  workload.NewPoolSource(nil),
+	Reference: &workload.RefStrategy{
+		Compare: workload.CompareSpec{Ordered: true},
+		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
+			m, err := loadSocial(ds)
+			if err != nil {
+				return nil, err
+			}
+			id, err := pstr(p, "personId")
+			if err != nil {
+				return nil, err
+			}
+			maxDate, err := pint(p, "maxDate")
+			if err != nil {
+				return nil, err
+			}
+			i, err := m.person(id)
+			if err != nil {
+				return nil, err
+			}
+			dist := m.bfs(i, 2)
+			var rows [][]engine.Value
+			for j, d := range dist {
+				if d < 1 || d > 2 {
+					continue
+				}
+				for _, pi := range m.postsOf[j] {
+					po := m.posts[pi]
+					if po.creationDate < maxDate {
+						rows = append(rows, row(idv(m.persons[j].id), idv(po.id), po.creationDate))
+					}
+				}
+			}
+			sortRows(rows, sortKey{col: 2, desc: true}, sortKey{col: 1})
+			return &workload.Answer{
+				Columns: []string{"personId", "postId", "creationDate"},
+				Rows:    limit(rows, 20),
+			}, nil
 		},
-		Params: workload.NewPool(nil), // {personId} from curated person pool
-		Reference: workload.RefStrategy{
-			Compare: workload.CompareSpec{
-				Ordered:   true,
-				CoerceNum: false,
-			},
-			Compute: nil,
-		},
-	}
+	},
 }
 
-// ic9: twenty most recent messages from the two-hop social neighborhood before
-// a date. Two-hop KNOWS (excluding the start person), temporal filter, top-k.
-func ic9() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "snb-ic9",
-		Class: target.Traversal,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)
-WHERE NOT p = friend
-WITH DISTINCT friend
-MATCH (friend)<-[:HAS_CREATOR]-(message:Message)
-WHERE message.creationDate < $maxDate
-WITH friend, message
-ORDER BY message.creationDate DESC, message.id ASC
-LIMIT 20
-RETURN
-    friend.id AS personId,
-    friend.firstName AS personFirstName,
-    friend.lastName AS personLastName,
-    message.id AS messageId,
-    coalesce(message.content, message.imageFile) AS messageContent,
-    message.creationDate AS messageCreationDate
-ORDER BY messageCreationDate DESC, messageId ASC`,
+// qIC13 — IC13 shape: shortest path length between two persons over KNOWS,
+// treated undirected. Zero rows when no path exists. The Cypher text uses
+// Neo4j-style shortestPath(); the Kùzu text uses its SHORTEST recursive-rel
+// syntax (bounded at 30 hops, far beyond the dataset's diameter). The
+// reference is a plain breadth-first search over the KNOWS-only subgraph
+// loaded by this package (workload.LoadGraph merges all relationship types,
+// so it cannot serve here).
+var qIC13 = &workload.Query{
+	ID:    "snb-ic13",
+	Class: engine.Traversal,
+	Texts: map[engine.Dialect]string{
+		engine.Cypher: `MATCH path = shortestPath((a:Person {id: $person1Id})-[:KNOWS*]-(b:Person {id: $person2Id}))
+RETURN length(path) AS len`,
+		engine.KuzuCy: `MATCH (a:Person {id: $person1Id})-[e:KNOWS* SHORTEST 1..30]-(b:Person {id: $person2Id})
+RETURN length(e) AS len`,
+	},
+	PoolKey: PoolPersonPair,
+	Params:  workload.NewPoolSource(nil),
+	Reference: &workload.RefStrategy{
+		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
+			m, err := loadSocial(ds)
+			if err != nil {
+				return nil, err
+			}
+			aID, err := pstr(p, "person1Id")
+			if err != nil {
+				return nil, err
+			}
+			bID, err := pstr(p, "person2Id")
+			if err != nil {
+				return nil, err
+			}
+			a, err := m.person(aID)
+			if err != nil {
+				return nil, err
+			}
+			b, err := m.person(bID)
+			if err != nil {
+				return nil, err
+			}
+			// Both texts match paths of length >= 1, so a pair with no
+			// path — and the degenerate a == b pair, which the pool never
+			// emits — yields zero rows.
+			ans := &workload.Answer{Columns: []string{"len"}}
+			if d := m.bfs(a, -1)[b]; d >= 1 {
+				ans.Rows = append(ans.Rows, row(int64(d)))
+			}
+			return ans, nil
 		},
-		Params: workload.NewPool(nil), // {personId, maxDate} from curated message-window pool
-		Reference: workload.RefStrategy{
-			Compare: workload.CompareSpec{
-				Ordered:   true,
-				CoerceNum: false,
-			},
-			Compute: nil,
-		},
-	}
-}
-
-// ic11: friends and friends-of-friends who work at companies in a given country
-// before a given year. Two-hop KNOWS, organization join, country filter, work-year
-// filter.
-func ic11() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "snb-ic11",
-		Class: target.Traversal,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS*1..2]-(friend:Person)
-WHERE NOT p = friend
-WITH DISTINCT friend
-MATCH (friend)-[workAt:WORK_AT]->(company:Organisation)-[:IS_PART_OF]->(country:Place)
-WHERE country.name = $countryName
-  AND workAt.workFrom < $workFromYear
-RETURN
-    friend.id AS personId,
-    friend.firstName AS personFirstName,
-    friend.lastName AS personLastName,
-    company.name AS organizationName,
-    workAt.workFrom AS organizationWorkFromYear
-ORDER BY workAt.workFrom ASC, friend.id ASC, company.name DESC
-LIMIT 10`,
-		},
-		Params: workload.NewPool(nil), // {personId, countryName, workFromYear} from curated pool
-		Reference: workload.RefStrategy{
-			Compare: workload.CompareSpec{
-				Ordered:   true,
-				CoerceNum: false,
-			},
-			Compute: nil,
-		},
-	}
+	},
 }

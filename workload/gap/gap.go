@@ -1,0 +1,375 @@
+// Package gap registers the GAP Benchmark Suite view of the whole-graph
+// kernels (spec 07 §4): the four kernels shared with Graphalytics (BFS,
+// SSSP, PageRank, connected components) plus the two GAP additions,
+// triangle count and sampled betweenness centrality. Fidelity is
+// "derived": the kernels and rules are GAP's (trials from pre-selected
+// sources, uniform 1..255 weights generated with the graph, epsilon
+// validation for PageRank), but the graph is the harness's own
+// uniform-random generator at a reduced scale ("urand-14",
+// 2^14 nodes, edge factor 16) rather than the official -u20/-g20 pair.
+//
+// Every query is Analytical and names its kernel in Algorithm; the
+// runner SKIPs engines that do not declare the capability. Engines that
+// reach kernels through a query surface run the engine.MAGE texts
+// (Memgraph MAGE procedures and Memgraph's *BFS / *WSHORTEST
+// expansions). Triangle count and betweenness carry no text: MAGE has no
+// matching kernel surface (its betweenness is full and normalized, not
+// the GAP source-sampled accumulation), so those cells come only from a
+// declared native capability.
+//
+// GAP sources are pre-selected: the four-entry pools below are the T=4
+// default trials (full tier 64 comes from a curated dataset pool under
+// the same PoolKey). Betweenness accumulates unnormalized pair
+// dependencies over its fixed source sample, exactly what the oracle's
+// Brandes implementation computes; it is the expensive oracle, so its
+// SampleSize caps validation draws.
+package gap
+
+import (
+	"fmt"
+	"strconv"
+
+	"github.com/tamnd/graph-bench/engine"
+	"github.com/tamnd/graph-bench/workload"
+	"github.com/tamnd/graph-bench/workload/galytics"
+)
+
+func init() {
+	workload.Register(gapWorkload)
+}
+
+const (
+	// pageRankDamping and the 1e-4 comparison epsilon are GAP's PageRank
+	// rules; the reference converges to 1e-12 so the epsilon budget
+	// belongs to the engine, not the oracle.
+	pageRankDamping = 0.85
+	pageRankTol     = 1e-12
+	pageRankMaxIter = 100
+)
+
+// trialSources is the T=4 pre-selected source pool for gap-bfs and
+// gap-sssp: dense node-id tokens that exist in every urand-14 graph
+// (id space 0..2^14-1).
+var trialSources = []string{"0", "511", "8191", "12800"}
+
+// bcSources is the fixed betweenness source sample, the numeric ids
+// BetweennessExact accumulates over.
+var bcSources = []engine.Value{int64(0), int64(511), int64(8191), int64(12800)}
+
+var gapWorkload = &workload.Workload{
+	Name:            "gap",
+	Title:           "GAP Benchmark Suite kernels (BFS, SSSP, PR, CC, TC, BC)",
+	Family:          "gap",
+	Dataset:         "urand-14",
+	Fidelity:        "derived",
+	Analytics:       true,
+	ValidationScale: "s14-e16",
+	Queries: []*workload.Query{
+		bfsQuery(), ssspQuery(), pageRankQuery(), ccQuery(), tcQuery(), bcQuery(),
+	},
+}
+
+// bfsQuery is breadth-first search from a pooled source, returning each
+// reachable node's level.
+func bfsQuery() *workload.Query {
+	return &workload.Query{
+		ID:        "gap-bfs",
+		Class:     engine.Analytical,
+		Algorithm: "bfs",
+		PoolKey:   "bfs-source",
+		Params:    sourcePool(trialSources),
+		Texts: map[engine.Dialect]string{
+			engine.MAGE: `MATCH p = (src:Node {id: $source})-[:EDGE *BFS]->(n:Node)
+WHERE n <> src
+RETURN n.id AS id, size(relationships(p)) AS level
+UNION ALL
+MATCH (src:Node {id: $source})
+RETURN src.id AS id, 0 AS level`,
+		},
+		Reference: &workload.RefStrategy{
+			Compute: func(ds engine.Dataset, params workload.Params) (*workload.Answer, error) {
+				src, err := sourceOf(params)
+				if err != nil {
+					return nil, fmt.Errorf("gap-bfs: %w", err)
+				}
+				g, err := workload.LoadGraph(ds)
+				if err != nil {
+					return nil, fmt.Errorf("gap-bfs reference: %w", err)
+				}
+				levels, ok := g.BFSLevels(src)
+				if !ok {
+					return nil, fmt.Errorf("gap-bfs: source %q not in graph", src)
+				}
+				rows := make([][]engine.Value, 0, len(levels))
+				for _, l := range levels {
+					id, err := idValue(l.ID)
+					if err != nil {
+						return nil, fmt.Errorf("gap-bfs: id %q not numeric: %w", l.ID, err)
+					}
+					rows = append(rows, []engine.Value{id, l.Val})
+				}
+				return &workload.Answer{Columns: []string{"id", "level"}, Rows: rows}, nil
+			},
+			Compare: workload.CompareSpec{CoerceNum: true},
+		},
+	}
+}
+
+// ssspQuery is weighted single-source shortest paths from the same
+// pooled sources, over the uniform 1..255 "w" weights urand always
+// carries (the GAP SSSP rule).
+func ssspQuery() *workload.Query {
+	return &workload.Query{
+		ID:        "gap-sssp",
+		Class:     engine.Analytical,
+		Algorithm: "sssp",
+		PoolKey:   "sssp-source",
+		Params:    sourcePool(trialSources),
+		Texts: map[engine.Dialect]string{
+			engine.MAGE: `MATCH p = (src:Node {id: $source})-[:EDGE *WSHORTEST (r, n | r.w) total]->(n:Node)
+WHERE n <> src
+RETURN n.id AS id, total AS distance
+UNION ALL
+MATCH (src:Node {id: $source})
+RETURN src.id AS id, 0 AS distance`,
+		},
+		Reference: &workload.RefStrategy{
+			Compute: func(ds engine.Dataset, params workload.Params) (*workload.Answer, error) {
+				src, err := sourceOf(params)
+				if err != nil {
+					return nil, fmt.Errorf("gap-sssp: %w", err)
+				}
+				g, err := workload.LoadGraph(ds)
+				if err != nil {
+					return nil, fmt.Errorf("gap-sssp reference: %w", err)
+				}
+				dists, ok := g.SSSPWeighted(src)
+				if !ok {
+					return nil, fmt.Errorf("gap-sssp: source %q not in graph", src)
+				}
+				return floatAnswer("gap-sssp", dists, "distance")
+			},
+			Compare: workload.CompareSpec{CoerceNum: true},
+		},
+	}
+}
+
+// pageRankQuery scores every node by PageRank, validated at GAP's 1e-4
+// epsilon.
+func pageRankQuery() *workload.Query {
+	return &workload.Query{
+		ID:        "gap-pr",
+		Class:     engine.Analytical,
+		Algorithm: "pagerank",
+		Params:    workload.Fixed{},
+		Texts: map[engine.Dialect]string{
+			// Kùzu's kernel is reached through a named projection the adapter
+			// creates at load ("gb"). Two adjustments make it answer the same
+			// question as the reference rather than a nearby one, and both are
+			// about the question, not about going faster.
+			//
+			// Its ranks are not sum-normalized: the mass on dangling nodes is
+			// dropped instead of redistributed, so they sum to less than 1 and
+			// the division below restores the LDBC scale. The convergence
+			// criterion is stated for the same reason the MAGE text records
+			// MAGE's — the default stops at 20 iterations, which is a
+			// different, less-converged answer. Together they land within
+			// 1.2e-10 per node of this oracle on rmat-10; normalization alone
+			// left 3.4e-4 relative, outside the 1e-4 tolerance, and the gap
+			// was convergence rather than the dropped mass.
+			engine.KuzuCy: `CALL page_rank('gb', maxIterations := 100, tolerance := 0.000000001)
+WITH collect({i: node.id, r: rank}) AS ranks, sum(rank) AS total
+UNWIND ranks AS x
+RETURN x.i AS id, x.r/total AS score ORDER BY id`,
+			engine.MAGE: `CALL pagerank.get() YIELD node, rank
+RETURN node.id AS id, rank AS score ORDER BY id`,
+		},
+		Reference: &workload.RefStrategy{
+			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
+				g, err := workload.LoadGraph(ds)
+				if err != nil {
+					return nil, fmt.Errorf("gap-pr reference: %w", err)
+				}
+				return floatAnswer("gap-pr", g.PageRank(pageRankDamping, pageRankTol, pageRankMaxIter), "score")
+			},
+			Compare: workload.CompareSpec{FloatTol: 1e-4, CoerceNum: true},
+		},
+	}
+}
+
+// ccQuery labels every node with its weakly connected component in the
+// canonical smallest-member labeling (galytics.NormalizeComponents is
+// the exported normalization for adapters that surface raw ids; the
+// text normalizes in-query).
+func ccQuery() *workload.Query {
+	return &workload.Query{
+		ID:        "gap-cc",
+		Class:     engine.Analytical,
+		Algorithm: "wcc",
+		Params:    workload.Fixed{},
+		Texts: map[engine.Dialect]string{
+			// Kùzu labels a component by an arbitrary group id, so the text
+			// relabels by the smallest member id — the same canonical form
+			// the oracle emits — before returning.
+			engine.KuzuCy: `CALL weakly_connected_components('gb')
+WITH group_id, min(node.id) AS label, collect(node.id) AS ids
+UNWIND ids AS nid
+RETURN nid AS id, label AS component ORDER BY id`,
+			engine.MAGE: `CALL weakly_connected_components.get() YIELD node, component_id
+WITH component_id, min(node.id) AS label, collect(node) AS members
+UNWIND members AS m
+RETURN m.id AS id, label AS component ORDER BY id`,
+		},
+		Reference: &workload.RefStrategy{
+			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
+				g, err := workload.LoadGraph(ds)
+				if err != nil {
+					return nil, fmt.Errorf("gap-cc reference: %w", err)
+				}
+				comps := g.WeaklyConnectedComponents()
+				rows := make([][]engine.Value, 0, len(comps))
+				for _, c := range comps {
+					id, err := idValue(c.ID)
+					if err != nil {
+						return nil, fmt.Errorf("gap-cc: id %q not numeric: %w", c.ID, err)
+					}
+					rows = append(rows, []engine.Value{id, c.Label})
+				}
+				ans := &workload.Answer{Columns: []string{"id", "component"}, Rows: rows}
+				// The oracle already emits canonical labels; normalizing here
+				// keeps the reference in the same canonical form the engine
+				// side is reduced to, by the one shared routine.
+				if err := galytics.NormalizeComponents(ans); err != nil {
+					return nil, fmt.Errorf("gap-cc: %w", err)
+				}
+				return ans, nil
+			},
+			Compare: workload.CompareSpec{CoerceNum: true},
+		},
+	}
+}
+
+// tcQuery is the global undirected triangle count, a single-row answer.
+func tcQuery() *workload.Query {
+	return &workload.Query{
+		ID:        "gap-tc",
+		Class:     engine.Analytical,
+		Algorithm: "tc",
+		Params:    workload.Fixed{},
+		Reference: &workload.RefStrategy{
+			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
+				g, err := workload.LoadGraph(ds)
+				if err != nil {
+					return nil, fmt.Errorf("gap-tc reference: %w", err)
+				}
+				return &workload.Answer{
+					Columns: []string{"triangles"},
+					Rows:    [][]engine.Value{{g.TriangleCountTotal()}},
+				}, nil
+			},
+			Compare: workload.CompareSpec{CoerceNum: true},
+		},
+	}
+}
+
+// bcQuery is betweenness centrality accumulated exactly (Brandes) over
+// the fixed four-source sample, the GAP sampled-BC rule. The scores are
+// unnormalized pair-dependency sums. Brandes over the whole pool is the
+// expensive oracle, so SampleSize caps validation at one draw.
+func bcQuery() *workload.Query {
+	return &workload.Query{
+		ID:        "gap-bc",
+		Class:     engine.Analytical,
+		Algorithm: "bc",
+		Params:    workload.Fixed{P: workload.Params{"sources": bcSources}},
+		Reference: &workload.RefStrategy{
+			Compute: func(ds engine.Dataset, params workload.Params) (*workload.Answer, error) {
+				srcs, err := sourcesOf(params)
+				if err != nil {
+					return nil, fmt.Errorf("gap-bc: %w", err)
+				}
+				g, err := workload.LoadGraph(ds)
+				if err != nil {
+					return nil, fmt.Errorf("gap-bc reference: %w", err)
+				}
+				return floatAnswer("gap-bc", g.BetweennessExact(srcs), "centrality")
+			},
+			Compare:    workload.CompareSpec{FloatTol: 1e-6, CoerceNum: true},
+			SampleSize: 1,
+		},
+	}
+}
+
+// sourcePool builds the inline deterministic parameter pool: one draw
+// per source token under the key "source".
+func sourcePool(sources []string) *workload.PoolSource {
+	pool := make([]workload.Params, len(sources))
+	for i, s := range sources {
+		pool[i] = workload.Params{"source": s}
+	}
+	return workload.NewPoolSource(pool)
+}
+
+// sourceOf reads the "source" parameter as a node id token.
+func sourceOf(params workload.Params) (string, error) {
+	v, ok := params["source"]
+	if !ok {
+		return "", fmt.Errorf("missing source parameter")
+	}
+	switch s := v.(type) {
+	case string:
+		return s, nil
+	case int64:
+		return strconv.FormatInt(s, 10), nil
+	}
+	return "", fmt.Errorf("source parameter has type %T, want string or int64", v)
+}
+
+// sourcesOf reads the "sources" parameter as the numeric id list the
+// betweenness oracle takes.
+func sourcesOf(params workload.Params) ([]int, error) {
+	v, ok := params["sources"]
+	if !ok {
+		return nil, fmt.Errorf("missing sources parameter")
+	}
+	list, ok := v.([]engine.Value)
+	if !ok {
+		return nil, fmt.Errorf("sources parameter has type %T, want list", v)
+	}
+	out := make([]int, 0, len(list))
+	for i, e := range list {
+		switch n := e.(type) {
+		case int64:
+			out = append(out, int(n))
+		case int:
+			out = append(out, n)
+		case string:
+			p, err := strconv.Atoi(n)
+			if err != nil {
+				return nil, fmt.Errorf("sources[%d] %q is not numeric: %w", i, n, err)
+			}
+			out = append(out, p)
+		default:
+			return nil, fmt.Errorf("sources[%d] has type %T, want int64 or string", i, e)
+		}
+	}
+	return out, nil
+}
+
+// idValue parses a dense numeric node id token to an int64.
+func idValue(id string) (int64, error) {
+	return strconv.ParseInt(id, 10, 64)
+}
+
+// floatAnswer renders per-node float results as an (id, col) answer.
+func floatAnswer(q string, vals []workload.NodeFloat, col string) (*workload.Answer, error) {
+	rows := make([][]engine.Value, 0, len(vals))
+	for _, v := range vals {
+		id, err := idValue(v.ID)
+		if err != nil {
+			return nil, fmt.Errorf("%s: id %q not numeric: %w", q, v.ID, err)
+		}
+		rows = append(rows, []engine.Value{id, v.Val})
+	}
+	return &workload.Answer{Columns: []string{"id", col}, Rows: rows}, nil
+}

@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+// TestPinnedDefaults proves an empty image resolves through the pin table
+// (engine/pins.go), so containers and condition stamps agree.
+func TestPinnedDefaults(t *testing.T) {
+	if img := Neo4j("").Image; !strings.HasPrefix(img, "neo4j:") {
+		t.Errorf("Neo4j pin = %q, want a neo4j: tag", img)
+	}
+	if img := Memgraph("").Image; !strings.HasPrefix(img, "memgraph/memgraph-mage:") {
+		t.Errorf("Memgraph pin = %q, want a memgraph/memgraph-mage: tag", img)
+	}
+}
+
 // TestNeo4jSpec proves Neo4j() produces a spec with the expected image, the
 // Bolt port mapping, and the auth=none env var.
 func TestNeo4jSpec(t *testing.T) {

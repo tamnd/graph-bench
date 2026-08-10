@@ -1,5 +1,8 @@
 name: Nightly cross-engine matrix
 
+# Tier-1 nightly (spec 09 §5): stand up each Bolt-plane engine at its pinned
+# image, run the smoke workloads for real, and run the gate against checked-in
+# baselines. Image tags here mirror engine/pins.go — bump both together.
 on:
   schedule:
     # Run at 02:00 UTC every day.
@@ -18,24 +21,20 @@ jobs:
       matrix:
         include:
           - engine: neo4j
-            image: neo4j:5.26-community
-            bolt_uri: bolt://localhost:7687
-            env: NEO4J_AUTH=none
+            image: neo4j:2026.06.0-community
           - engine: memgraph
-            image: memgraph/memgraph:2.19.0
-            bolt_uri: bolt://localhost:7687
-            env: ""
+            image: memgraph/memgraph-mage:3.10.0
 
     services:
       engine:
         image: ${{ matrix.image }}
         env:
-          NEO4J_AUTH: ${{ matrix.engine == 'neo4j' && 'none' || '' }}
+          NEO4J_AUTH: ${{ matrix.engine == 'neo4j' && 'neo4j/benchbench' || '' }}
         ports:
           - "7687:7687"
           - "7474:7474"
         options: >-
-          --health-cmd "echo > /dev/tcp/localhost/7687 || exit 1"
+          --health-cmd "bash -c 'echo > /dev/tcp/localhost/7687' || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 12
@@ -43,9 +42,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: clone gr beside the repo
-        run: git clone --depth 1 https://github.com/tamnd/gr.git ../gr
-
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -54,42 +50,46 @@ jobs:
       - name: build (bolt tag)
         run: go build -tags bolt ./...
 
-      - name: vet (bolt tag)
-        run: go vet -tags bolt ./...
-
-      - name: test (bolt tag, no container tests)
-        run: go test -tags bolt ./... -timeout 10m
+      - name: test (bolt tag, integration on)
+        run: go test -tags bolt ./engine/... -timeout 15m
         env:
-          GRAPH_BENCH_SKIP_CONTAINER: "1"
+          GRAPH_BENCH_BOLT_IT: "1"
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_PASS: benchbench
+          MEMGRAPH_URI: bolt://localhost:7687
 
-  bolt-build:
-    name: bolt build + unit tests
+      - name: smoke run
+        run: |
+          go run -tags bolt ./cmd/graph-bench run \
+            --workload micro-grid --engines ${{ matrix.engine }} \
+            --count 30 --out /tmp/results
+        env:
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_PASS: benchbench
+          MEMGRAPH_URI: bolt://localhost:7687
+
+  zu:
+    name: cross-engine (zu, subprocess plane)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: clone gr beside the repo
-        run: git clone --depth 1 https://github.com/tamnd/gr.git ../gr
-
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: gofmt (bolt tag)
+      - name: build zu from source
         run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "Files not gofmt-clean:"
-            echo "$unformatted"
-            exit 1
-          fi
+          git clone --depth 1 https://github.com/tamnd/zu.git /tmp/zu
+          cd /tmp/zu && cargo build --release -p zu-cli
+        continue-on-error: true
+        id: zubuild
 
-      - name: build (bolt tag)
-        run: go build -tags bolt ./...
-
-      - name: vet (bolt tag)
-        run: go vet -tags bolt ./...
-
-      - name: test (bolt tag)
-        run: go test -tags bolt ./... -timeout 10m
+      - name: smoke run (primitive mode)
+        if: steps.zubuild.outcome == 'success'
+        run: |
+          go run ./cmd/graph-bench run \
+            --workload micro-grid --engines zu --count 30 --out /tmp/results
+        env:
+          ZU_BIN: /tmp/zu/target/release/zu

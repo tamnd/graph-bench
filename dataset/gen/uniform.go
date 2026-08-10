@@ -5,21 +5,26 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
 // Uniform is the k-regular generator: N nodes, every node with out-degree
 // exactly Degree, targets drawn uniformly at random with self-loops and
 // duplicate targets rejected. It is the control case, the anti-power-law: it
-// removes degree skew as a variable so a traversal touches a predictable number
-// of neighbors at every hop and the result is the raw k-hop cost without a hub
-// blowing up one expansion.
+// removes degree skew as a variable so a traversal touches a predictable
+// number of neighbors at every hop and the result is the raw k-hop cost
+// without a hub blowing up one expansion.
 type Uniform struct{}
 
+// Name returns "uniform".
 func (Uniform) Name() string { return "uniform" }
-func (Uniform) Version() int { return 1 }
 
-func (g Uniform) Generate(ctx context.Context, cfg Config, w Writer) (*target.Manifest, error) {
+// Version is the algorithm version; the emitted bytes are identical to v1's
+// version 1.
+func (Uniform) Version() string { return "1" }
+
+// Generate emits the k-regular graph. See Generator.Generate.
+func (g Uniform) Generate(ctx context.Context, cfg Config, w Writer) (*engine.Manifest, error) {
 	if cfg.N <= 0 {
 		return nil, fmt.Errorf("uniform: N must be > 0, got %d", cfg.N)
 	}
@@ -43,7 +48,7 @@ func (g Uniform) Generate(ctx context.Context, cfg Config, w Writer) (*target.Ma
 		return nil, err
 	}
 
-	rels, err := w.RelFile(relType, relHeader())
+	rels, err := w.RelFile(relType, nodeLabel, nodeLabel, relHeader())
 	if err != nil {
 		return nil, err
 	}
@@ -85,14 +90,15 @@ func (g Uniform) Generate(ctx context.Context, cfg Config, w Writer) (*target.Ma
 		return nil, err
 	}
 
-	m := &target.Manifest{
+	m := &engine.Manifest{
 		Name:             fmt.Sprintf("uniform-n%d-k%d", cfg.N, cfg.Degree),
 		Kind:             "synthetic",
 		Generator:        g.Name(),
 		GeneratorVersion: g.Version(),
 		Seed:             cfg.Seed,
-		Params:           map[string]any{"n": cfg.N, "degree": cfg.Degree},
-		Invariants:       target.Invariants{NodeCount: i64p(cfg.N), EdgeCount: i64p(edges)},
+		Scale:            fmt.Sprintf("n%d-k%d", cfg.N, cfg.Degree),
+		Params:           map[string]string{"n": iparam(cfg.N), "degree": iparam(cfg.Degree)},
+		Invariants:       engine.Invariants{NodeCount: cfg.N, EdgeCount: edges},
 	}
 	return w.Finalize(m)
 }

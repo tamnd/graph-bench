@@ -6,63 +6,21 @@ import (
 
 	"github.com/tamnd/graph-bench/dataset"
 	"github.com/tamnd/graph-bench/dataset/gen"
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/workload"
-	_ "github.com/tamnd/graph-bench/workload/micro" // register the micro workloads
+	_ "github.com/tamnd/graph-bench/workload/micro"
 )
 
-// gridDS generates a 5x5 4-neighbor grid in a temp directory and opens it.
-// A 5x5 grid has 25 nodes and 40 directed edges (right and down only). The
-// corner-to-corner Manhattan distance is 8, and there are zero triangles.
-func gridDS(t *testing.T) *dataset.Set {
+// genDS generates a synthetic dataset into a temp dir and opens it.
+func genDS(t *testing.T, cfg gen.Config) *dataset.Set {
 	t.Helper()
 	dir := t.TempDir()
 	w, err := dataset.NewWriter(dir)
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}
-	if _, err := gen.Generate(context.Background(), gen.Config{Kind: "grid", Rows: 5, Cols: 5}, w); err != nil {
-		t.Fatalf("Generate grid: %v", err)
-	}
-	ds, err := dataset.Open(dir)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	return ds
-}
-
-// erDS generates a small ER graph with enough density to have many triangles.
-// N=30, P=0.15: the closed-form expected triangle count is N*(N-1)*(N-2)*P^3/6 ≈ 14.
-func erDS(t *testing.T) *dataset.Set {
-	t.Helper()
-	dir := t.TempDir()
-	w, err := dataset.NewWriter(dir)
-	if err != nil {
-		t.Fatalf("NewWriter: %v", err)
-	}
-	if _, err := gen.Generate(context.Background(), gen.Config{Kind: "er", N: 30, P: 0.15, Seed: 42}, w); err != nil {
-		t.Fatalf("Generate er: %v", err)
-	}
-	ds, err := dataset.Open(dir)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	return ds
-}
-
-// powerLawDS generates a small scale-free graph whose out-degrees follow a power
-// law, so the degree bands curation samples are genuinely skewed (a few hubs,
-// many leaves). N=400 with gamma 2.5 gives a clear spread without a slow oracle.
-func powerLawDS(t *testing.T) *dataset.Set {
-	t.Helper()
-	dir := t.TempDir()
-	w, err := dataset.NewWriter(dir)
-	if err != nil {
-		t.Fatalf("NewWriter: %v", err)
-	}
-	cfg := gen.Config{Kind: "powerlaw", N: 400, Gamma: 2.5, MinDeg: 1, MaxDeg: 80, Seed: 7}
 	if _, err := gen.Generate(context.Background(), cfg, w); err != nil {
-		t.Fatalf("Generate powerlaw: %v", err)
+		t.Fatalf("Generate %s: %v", cfg.Kind, err)
 	}
 	ds, err := dataset.Open(dir)
 	if err != nil {
@@ -71,586 +29,308 @@ func powerLawDS(t *testing.T) *dataset.Set {
 	return ds
 }
 
-// uniformDS generates a small flat-degree graph where every node has the same
-// out-degree, the control against which the power-law skew is read.
-func uniformDS(t *testing.T) *dataset.Set {
+// ref computes a query's reference answer.
+func ref(t *testing.T, wl *workload.Workload, id string, ds *dataset.Set, p workload.Params) *workload.Answer {
 	t.Helper()
-	dir := t.TempDir()
-	w, err := dataset.NewWriter(dir)
-	if err != nil {
-		t.Fatalf("NewWriter: %v", err)
-	}
-	if _, err := gen.Generate(context.Background(), gen.Config{Kind: "uniform", N: 400, Degree: 8, Seed: 7}, w); err != nil {
-		t.Fatalf("Generate uniform: %v", err)
-	}
-	ds, err := dataset.Open(dir)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	return ds
-}
-
-// mustLookup retrieves a registered workload or fails immediately.
-func mustLookup(t *testing.T, name string) *workload.Workload {
-	t.Helper()
-	w, ok := workload.Lookup(name)
+	q, ok := wl.Query(id)
 	if !ok {
-		t.Fatalf("workload %q not in registry", name)
+		t.Fatalf("workload %s has no query %s", wl.Name, id)
 	}
-	return w
+	ans, err := q.Reference.Compute(ds, p)
+	if err != nil {
+		t.Fatalf("%s reference: %v", id, err)
+	}
+	return ans
 }
 
-// mustQuery retrieves a query from a workload or fails immediately.
-func mustQuery(t *testing.T, w *workload.Workload, id string) *workload.WorkloadQuery {
+// oneCount extracts the single integer a count answer carries.
+func oneCount(t *testing.T, id string, ans *workload.Answer) int64 {
 	t.Helper()
-	q, ok := w.Query(id)
+	if len(ans.Rows) != 1 || len(ans.Rows[0]) < 1 {
+		t.Fatalf("%s: want one row, got %v", id, ans.Rows)
+	}
+	n, ok := ans.Rows[0][0].(int64)
 	if !ok {
-		t.Fatalf("workload %q has no query %q", w.Name, id)
+		t.Fatalf("%s: first cell is %T, want int64", id, ans.Rows[0][0])
 	}
-	return q
+	return n
 }
 
-// assertScalar fails the test if the answer is not a single row with the given value.
-func assertScalar(t *testing.T, ans *target.Answer, want target.Value) {
-	t.Helper()
-	if len(ans.Rows) != 1 || len(ans.Rows[0]) != 1 {
-		t.Fatalf("answer shape: %d rows, want 1x1", len(ans.Rows))
+// TestRegistration checks the registered workloads carry the v1 query ids, the
+// right datasets, and pool keys that workload.Curate serves.
+func TestRegistration(t *testing.T) {
+	read, err := workload.Lookup("micro-read")
+	if err != nil {
+		t.Fatalf("Lookup(micro-read): %v", err)
 	}
-	if ans.Rows[0][0] != want {
-		t.Errorf("scalar = %v (%T), want %v (%T)", ans.Rows[0][0], ans.Rows[0][0], want, want)
+	if read.Dataset != "grid-100x100" || read.Family != "micro" {
+		t.Errorf("micro-read dataset/family = %q/%q", read.Dataset, read.Family)
 	}
-}
+	wantIDs := []string{
+		"micro-point", "micro-point-miss", "micro-edge",
+		"micro-khop1", "micro-khop2", "micro-khop3", "micro-varlen",
+		"micro-scan-count", "micro-scan-stats",
+	}
+	if len(read.Queries) != len(wantIDs) {
+		t.Fatalf("micro-read has %d queries, want %d", len(read.Queries), len(wantIDs))
+	}
+	for _, id := range wantIDs {
+		q, ok := read.Query(id)
+		if !ok {
+			t.Errorf("micro-read missing query %s", id)
+			continue
+		}
+		if q.Texts[engine.Cypher] == "" {
+			t.Errorf("%s has no cypher text", id)
+		}
+		if q.PoolKey == "" && q.Params == nil {
+			t.Errorf("%s has neither a pool key nor fixed params", id)
+		}
+	}
+	// The pooled queries must name pools Curate can actually serve.
+	ds := genDS(t, gen.Config{Kind: "grid", Rows: 4, Cols: 4})
+	for _, q := range read.Queries {
+		if q.PoolKey == "" {
+			continue
+		}
+		if _, err := workload.Curate(ds, q.PoolKey, 4, 1); err != nil {
+			t.Errorf("Curate(%s) for query %s: %v", q.PoolKey, q.ID, err)
+		}
+	}
 
-// TestMicroGridRegistered proves the micro-grid workload is in the registry after
-// the blank import, with the expected query ids.
-func TestMicroGridRegistered(t *testing.T) {
-	w := mustLookup(t, "micro-grid")
-	if w.Dataset != "grid" {
-		t.Errorf("micro-grid.Dataset = %q, want %q", w.Dataset, "grid")
+	er, err := workload.Lookup("micro-er")
+	if err != nil {
+		t.Fatalf("Lookup(micro-er): %v", err)
 	}
-	ids := make([]string, len(w.Queries))
-	for i, q := range w.Queries {
-		ids[i] = q.ID
+	if er.Dataset != "er-10k" || len(er.Queries) != 2 {
+		t.Errorf("micro-er dataset %q, %d queries; want er-10k, 2", er.Dataset, len(er.Queries))
 	}
-	want := []string{"micro-khop1", "micro-khop2", "micro-khop3", "micro-varlen", "micro-sp"}
-	for i, id := range want {
-		if i >= len(ids) || ids[i] != id {
-			t.Errorf("query[%d] = %q, want %q (all: %v)", i, ids[i], id, ids)
+
+	for _, tc := range []struct {
+		name, dataset string
+	}{
+		{"micro-powerlaw", "powerlaw-10k"},
+		{"micro-uniform", "uniform-10k"},
+	} {
+		w, err := workload.Lookup(tc.name)
+		if err != nil {
+			t.Fatalf("Lookup(%s): %v", tc.name, err)
+		}
+		if w.Dataset != tc.dataset || w.Family != "micro" {
+			t.Errorf("%s dataset/family = %q/%q, want %q/micro", tc.name, w.Dataset, w.Family, tc.dataset)
+		}
+		if len(w.Queries) == 0 {
+			t.Errorf("%s has no queries", tc.name)
+		}
+	}
+
+	// The two path queries are the only ones that need a shortest-path
+	// capability, and they must say so: without the flag they resolve to the
+	// plain Cypher text on engines with no shortest-path syntax, which fails
+	// verification and discards the whole workload's measurement instead of
+	// skipping two queries.
+	pl, err := workload.Lookup("micro-powerlaw")
+	if err != nil {
+		t.Fatalf("Lookup(micro-powerlaw): %v", err)
+	}
+	for _, id := range []string{"micro-sp", "micro-sp-bidir"} {
+		q, ok := pl.Query(id)
+		if !ok {
+			t.Errorf("micro-powerlaw missing %s", id)
+			continue
+		}
+		if !q.NeedsShortestPath {
+			t.Errorf("%s does not set NeedsShortestPath", id)
+		}
+	}
+
+	mix, err := workload.Lookup("micro-mix")
+	if err != nil {
+		t.Fatalf("Lookup(micro-mix): %v", err)
+	}
+	if mix.Mix == nil || len(mix.Mix.Weights) == 0 {
+		t.Fatal("micro-mix has no mix weights")
+	}
+	for id := range mix.Mix.Weights {
+		if _, ok := mix.Query(id); !ok {
+			t.Errorf("mix weight names unknown query %s", id)
+		}
+	}
+	// And the other direction: a query in the mix with no weight is never
+	// scheduled, so it is dead configuration rather than a benchmark.
+	for _, q := range mix.Queries {
+		if mix.Mix.Weights[q.ID] == 0 {
+			t.Errorf("micro-mix carries query %s with no weight", q.ID)
 		}
 	}
 }
 
-// TestMicroERRegistered proves the micro-er workload is in the registry with the
-// two triangle queries.
-func TestMicroERRegistered(t *testing.T) {
-	w := mustLookup(t, "micro-er")
-	if len(w.Queries) != 2 {
-		t.Errorf("micro-er has %d queries, want 2", len(w.Queries))
+// TestGridEndToEnd is the end-to-end path on a small grid: generate, curate
+// every pool, and compute references for each binding; then pin the
+// closed-form values a 5x5 right/down grid dictates, including the
+// non-degeneracy khop2 > khop1 at a mid-grid seed.
+func TestGridEndToEnd(t *testing.T) {
+	ds := genDS(t, gen.Config{Kind: "grid", Rows: 5, Cols: 5})
+	read, err := workload.Lookup("micro-read")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	// Every pooled query's references compute cleanly over its curated pool.
+	for _, q := range read.Queries {
+		if q.PoolKey == "" {
+			// Parameterless: one reference off the fixed (empty) binding.
+			if _, err := q.Reference.Compute(ds, q.Params.Next()); err != nil {
+				t.Errorf("%s reference: %v", q.ID, err)
+			}
+			continue
+		}
+		pool, err := workload.Curate(ds, q.PoolKey, 8, 7)
+		if err != nil {
+			t.Fatalf("Curate(%s): %v", q.PoolKey, err)
+		}
+		if len(pool) == 0 {
+			t.Fatalf("Curate(%s) returned an empty pool", q.PoolKey)
+		}
+		for _, p := range pool {
+			if _, err := q.Reference.Compute(ds, p); err != nil {
+				t.Errorf("%s reference for %v: %v", q.ID, p, err)
+			}
+		}
+	}
+
+	// Node 12 is the center of the 5x5 grid, at (row 2, col 2). Only right and
+	// down edges exist, so the nodes at exactly h hops are the cells (2+dr,
+	// 2+dc) with dr+dc = h and both offsets within the two rows and two columns
+	// that remain: 2 at one hop, 3 at two, and back down to 2 at three, where
+	// the grid boundary starts clipping the frontier. The 1..3 union is the sum.
+	k1 := oneCount(t, "micro-khop1", ref(t, read, "micro-khop1", ds, workload.Params{"seed": "12"}))
+	k2 := oneCount(t, "micro-khop2", ref(t, read, "micro-khop2", ds, workload.Params{"seed": "12"}))
+	k3 := oneCount(t, "micro-khop3", ref(t, read, "micro-khop3", ds, workload.Params{"seed": "12"}))
+	vl := oneCount(t, "micro-varlen", ref(t, read, "micro-varlen", ds, workload.Params{"seed": "12"}))
+	if k1 != 2 || k2 != 3 || k3 != 2 {
+		t.Errorf("khop1/2/3 at seed 12 = %d/%d/%d, want 2/3/2", k1, k2, k3)
+	}
+	if vl != k1+k2+k3 {
+		t.Errorf("varlen at seed 12 = %d, want %d (the three shells are disjoint on a DAG grid)", vl, k1+k2+k3)
+	}
+	if k2 <= k1 {
+		t.Errorf("khop2 (%d) should exceed khop1 (%d) at a mid-grid seed", k2, k1)
+	}
+	// The bottom-right corner is a sink.
+	if n := oneCount(t, "micro-khop1", ref(t, read, "micro-khop1", ds, workload.Params{"seed": "24"})); n != 0 {
+		t.Errorf("khop1 at sink 24 = %d, want 0", n)
+	}
+
+	// Point hit and miss.
+	hit := ref(t, read, "micro-point", ds, workload.Params{"id": "7"})
+	if len(hit.Rows) != 1 || hit.Rows[0][0] != int64(7) {
+		t.Errorf("micro-point(7) = %v, want [[7]]", hit.Rows)
+	}
+	miss := ref(t, read, "micro-point-miss", ds, workload.Params{"id": "9999"})
+	if len(miss.Rows) != 0 {
+		t.Errorf("micro-point-miss(9999) = %v, want no rows", miss.Rows)
+	}
+	q, _ := read.Query("micro-point-miss")
+	if _, err := q.Reference.Compute(ds, workload.Params{"id": "3"}); err == nil {
+		t.Error("micro-point-miss with a present id should error (corrupt pool)")
+	}
+
+	// Edge probe: 0->1 exists (right neighbor), the reverse does not.
+	if ans := ref(t, read, "micro-edge", ds, workload.Params{"src": "0", "dst": "1"}); ans.Rows[0][0] != true {
+		t.Errorf("micro-edge(0,1) = %v, want true", ans.Rows[0][0])
+	}
+	if ans := ref(t, read, "micro-edge", ds, workload.Params{"src": "1", "dst": "0"}); ans.Rows[0][0] != false {
+		t.Errorf("micro-edge(1,0) = %v, want false", ans.Rows[0][0])
+	}
+
+	// Scans: 25 nodes, ids 0..24, mean 12.
+	if n := oneCount(t, "micro-scan-count", ref(t, read, "micro-scan-count", ds, nil)); n != 25 {
+		t.Errorf("micro-scan-count = %d, want 25", n)
+	}
+	stats := ref(t, read, "micro-scan-stats", ds, nil)
+	if stats.Rows[0][0] != int64(25) || stats.Rows[0][1] != 12.0 {
+		t.Errorf("micro-scan-stats = %v, want [25 12]", stats.Rows[0])
 	}
 }
 
-// TestCurateWritesGridPools runs curation on a generated grid dataset and reads
-// the resulting parameter pools back through Dataset.Params, checking that the
-// khop, sp, and triangle pools are present and correctly shaped.
-func TestCurateWritesGridPools(t *testing.T) {
-	ds := gridDS(t)
-
-	if err := workload.Curate(ds, 77); err != nil {
-		t.Fatalf("Curate: %v", err)
+// TestShortestPathRefs pins the two path references on the same 5x5 grid,
+// where every distance is Manhattan and every unreachable pair is obvious.
+// The grid is a right/down DAG, so directed reachability runs one way only and
+// the undirected variant answers where the directed one has no row at all,
+// which is the whole difference between the two queries.
+func TestShortestPathRefs(t *testing.T) {
+	ds := genDS(t, gen.Config{Kind: "grid", Rows: 5, Cols: 5})
+	pl, err := workload.Lookup("micro-powerlaw")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
 	}
 
-	pool, err := ds.Params("micro-khop")
+	// 12 is (2,2) and 24 is (4,4): four right/down steps.
+	if d := oneCount(t, "micro-sp", ref(t, pl, "micro-sp", ds, workload.Params{"src": "12", "dst": "24"})); d != 4 {
+		t.Errorf("micro-sp(12,24) = %d, want 4", d)
+	}
+	// Backwards there is no directed path, and no row is the answer.
+	if ans := ref(t, pl, "micro-sp", ds, workload.Params{"src": "24", "dst": "12"}); len(ans.Rows) != 0 {
+		t.Errorf("micro-sp(24,12) = %v, want no rows on a right/down DAG", ans.Rows)
+	}
+	// Undirected, the same pair is four hops in either direction.
+	for _, p := range []workload.Params{{"src": "12", "dst": "24"}, {"src": "24", "dst": "12"}} {
+		if d := oneCount(t, "micro-sp-bidir", ref(t, pl, "micro-sp-bidir", ds, p)); d != 4 {
+			t.Errorf("micro-sp-bidir(%v) = %d, want 4", p, d)
+		}
+	}
+
+	// The sp pool must be one Curate serves, and every pair it draws must have
+	// a reference that computes.
+	pool, err := workload.Curate(ds, "micro-sp", 8, 7)
 	if err != nil {
-		t.Fatalf("Params(micro-khop): %v", err)
+		t.Fatalf("Curate(micro-sp): %v", err)
 	}
 	if len(pool) == 0 {
-		t.Fatal("micro-khop pool is empty after curation")
+		t.Fatal("Curate(micro-sp) returned an empty pool")
 	}
-	for i, p := range pool {
-		if _, ok := p["seed"].(string); !ok {
-			t.Errorf("pool[%d] missing string seed: %v", i, p)
-		}
-	}
-
-	spPool, err := ds.Params("micro-sp")
-	if err != nil {
-		t.Fatalf("Params(micro-sp): %v", err)
-	}
-	if len(spPool) == 0 {
-		t.Fatal("micro-sp pool is empty after curation")
-	}
-	for i, p := range spPool {
-		if _, ok := p["src"].(string); !ok {
-			t.Errorf("spPool[%d] missing string src: %v", i, p)
-		}
-		if _, ok := p["dst"].(string); !ok {
-			t.Errorf("spPool[%d] missing string dst: %v", i, p)
-		}
-	}
-
-	triPool, err := ds.Params("micro-triangle")
-	if err != nil {
-		t.Fatalf("Params(micro-triangle): %v", err)
-	}
-	if len(triPool) != 1 {
-		t.Errorf("micro-triangle pool len = %d, want 1 (empty sentinel)", len(triPool))
-	}
-}
-
-// TestKHop1GridCorner checks the khop1 reference on the 5x5 grid corner
-// (top-left node id "0") and the dead-end corner (bottom-right id "24").
-func TestKHop1GridCorner(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-khop1")
-
-	// Top-left corner: one right (id 1) and one down (id 5) neighbor. Degree = 2.
-	ref, err := q.Reference.Compute(ds, target.Params{"seed": "0"})
-	if err != nil {
-		t.Fatalf("Compute(0): %v", err)
-	}
-	assertScalar(t, ref, int64(2))
-
-	// Bottom-right corner: no outgoing edges in the right/down DAG. Degree = 0.
-	ref2, err := q.Reference.Compute(ds, target.Params{"seed": "24"})
-	if err != nil {
-		t.Fatalf("Compute(24): %v", err)
-	}
-	assertScalar(t, ref2, int64(0))
-}
-
-// TestKHop2GridCorner checks the two-hop expansion from node "0" in the 5x5
-// grid. One hop reaches {1,5}; two hops from those reach {2,6,10} (id 6 is
-// shared). Distinct count = 3.
-func TestKHop2GridCorner(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-khop2")
-	ref, err := q.Reference.Compute(ds, target.Params{"seed": "0"})
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	assertScalar(t, ref, int64(3))
-}
-
-// TestVarlen1to3GridCorner checks the 1-to-3-hop range from node "0". The
-// union over hops 1/2/3 from a 5x5 grid corner: hop1={1,5}, hop2={2,6,10},
-// hop3={3,7,11,15}. Union = {1,2,3,5,6,7,10,11,15} = 9 nodes.
-func TestVarlen1to3GridCorner(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-varlen")
-	ref, err := q.Reference.Compute(ds, target.Params{"seed": "0"})
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	assertScalar(t, ref, int64(9))
-}
-
-// TestSPGridCornerToCorner checks that the single-pair SP reference from
-// top-left ("0") to bottom-right ("24") of the 5x5 grid returns the Manhattan
-// distance 8.
-func TestSPGridCornerToCorner(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-sp")
-	ref, err := q.Reference.Compute(ds, target.Params{"src": "0", "dst": "24"})
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	assertScalar(t, ref, int64(8))
-}
-
-// TestSPGridUnreachable checks that the reverse pair ("24" to "0") in the
-// right/down DAG returns no row.
-func TestSPGridUnreachable(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-sp")
-	ref, err := q.Reference.Compute(ds, target.Params{"src": "24", "dst": "0"})
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	if len(ref.Rows) != 0 {
-		t.Errorf("reverse pair has %d rows, want 0 (unreachable)", len(ref.Rows))
-	}
-}
-
-// TestTriangleGridIsZero proves the directed and undirected triangle counts on
-// the 4-neighbor grid (a DAG and a bipartite graph) are zero, matching the
-// generator's TriangleCount=0 invariant.
-func TestTriangleGridIsZero(t *testing.T) {
-	ds := gridDS(t)
-	g, err := workload.LoadGraph(ds)
-	if err != nil {
-		t.Fatalf("LoadGraph: %v", err)
-	}
-	if c := g.DirectedTriangles(); c != 0 {
-		t.Errorf("DirectedTriangles on grid = %d, want 0", c)
-	}
-	if c := g.UndirectedTriangles(); c != 0 {
-		t.Errorf("UndirectedTriangles on grid = %d, want 0", c)
-	}
-
-	// The generator records this as an invariant; cross-check.
-	inv := ds.Manifest().Invariants.TriangleCount
-	if inv != nil && *inv != 0 {
-		t.Errorf("manifest TriangleCount = %d, want 0", *inv)
-	}
-}
-
-// TestTriangleERPositive checks that the directed triangle reference on the ER
-// graph returns a positive count (proving the oracle works on a graph with actual
-// triangles) and matches the oracle independently.
-func TestTriangleERPositive(t *testing.T) {
-	ds := erDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-er"), "micro-triangle")
-	ref, err := q.Reference.Compute(ds, nil)
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	if len(ref.Rows) != 1 || len(ref.Rows[0]) != 1 {
-		t.Fatalf("unexpected answer shape: %v", ref.Rows)
-	}
-	n, ok := ref.Rows[0][0].(int64)
-	if !ok {
-		t.Fatalf("triangle count is %T, want int64", ref.Rows[0][0])
-	}
-	if n <= 0 {
-		t.Errorf("triangle count = %d, want > 0 on N=30 P=0.15 ER", n)
-	}
-
-	g, err := workload.LoadGraph(ds)
-	if err != nil {
-		t.Fatalf("LoadGraph: %v", err)
-	}
-	// The reference returns count(*), which is 3 matches per distinct directed
-	// triangle (one per rotation), so it is 3x the distinct oracle count.
-	if got := 3 * g.DirectedTriangles(); got != n {
-		t.Errorf("oracle 3*DirectedTriangles = %d, reference returned %d", got, n)
-	}
-}
-
-// TestMicroGridHasGapQueries proves the four v1 gap queries are registered in
-// micro-grid alongside the original five.
-func TestMicroGridHasGapQueries(t *testing.T) {
-	w := mustLookup(t, "micro-grid")
-	for _, id := range []string{"micro-sp-bidir", "micro-point", "micro-point-miss", "micro-scan"} {
-		if _, ok := w.Query(id); !ok {
-			t.Errorf("micro-grid missing query %q", id)
+	q, _ := pl.Query("micro-sp")
+	for _, p := range pool {
+		if _, err := q.Reference.Compute(ds, p); err != nil {
+			t.Errorf("micro-sp reference for %v: %v", p, err)
 		}
 	}
 }
 
-// TestCuratePointPools proves curation writes the point and point-miss pools and
-// that every miss id is genuinely absent from the graph.
-func TestCuratePointPools(t *testing.T) {
-	ds := gridDS(t)
-	if err := workload.Curate(ds, 77); err != nil {
-		t.Fatalf("Curate: %v", err)
+// TestERTriangles checks the triangle references on a small ER draw: the
+// directed count is exactly three times the oracle's distinct directed
+// triangles, non-zero at this density, and zero on the (acyclic) grid.
+func TestERTriangles(t *testing.T) {
+	ds := genDS(t, gen.Config{Kind: "er", N: 30, P: 0.15, Seed: 42})
+	er, err := workload.Lookup("micro-er")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
 	}
 	g, err := workload.LoadGraph(ds)
 	if err != nil {
 		t.Fatalf("LoadGraph: %v", err)
 	}
 
-	pointPool, err := ds.Params("micro-point")
-	if err != nil {
-		t.Fatalf("Params(micro-point): %v", err)
+	dir := oneCount(t, "micro-triangle", ref(t, er, "micro-triangle", ds, nil))
+	if want := 3 * g.DirectedTriangles(); dir != want {
+		t.Errorf("micro-triangle = %d, want 3*%d", dir, g.DirectedTriangles())
 	}
-	if len(pointPool) == 0 {
-		t.Fatal("micro-point pool is empty")
+	if dir == 0 {
+		t.Error("micro-triangle = 0 on ER(30, 0.15); degenerate fixture")
 	}
-	for i, p := range pointPool {
-		id, ok := p["id"].(string)
-		if !ok {
-			t.Errorf("pointPool[%d] missing string id: %v", i, p)
-			continue
-		}
-		if !g.HasNode(id) {
-			t.Errorf("pointPool[%d] id %q is not in the graph", i, id)
-		}
+	und := oneCount(t, "micro-triangle-undirected", ref(t, er, "micro-triangle-undirected", ds, nil))
+	if und < dir/3 {
+		t.Errorf("undirected triangles %d < distinct directed %d; impossible", und, dir/3)
 	}
 
-	missPool, err := ds.Params("micro-point-miss")
-	if err != nil {
-		t.Fatalf("Params(micro-point-miss): %v", err)
+	// The right/down grid is a DAG: no directed triangles, and 4-cycles only,
+	// so no undirected triangles either.
+	grid := genDS(t, gen.Config{Kind: "grid", Rows: 4, Cols: 4})
+	if n := oneCount(t, "micro-triangle", ref(t, er, "micro-triangle", grid, nil)); n != 0 {
+		t.Errorf("micro-triangle on grid = %d, want 0", n)
 	}
-	if len(missPool) == 0 {
-		t.Fatal("micro-point-miss pool is empty")
-	}
-	for i, p := range missPool {
-		id, ok := p["id"].(string)
-		if !ok {
-			t.Errorf("missPool[%d] missing string id: %v", i, p)
-			continue
-		}
-		if g.HasNode(id) {
-			t.Errorf("missPool[%d] id %q exists; should be a miss", i, id)
-		}
-	}
-}
-
-// TestPointGridHit checks the point lookup returns one row for an existing id on
-// the 5x5 grid.
-func TestPointGridHit(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-point")
-	ref, err := q.Reference.Compute(ds, target.Params{"id": "7"})
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	assertScalar(t, ref, int64(7))
-}
-
-// TestPointMissGridZero checks the negative lookup returns no row for an absent
-// id, and errors when handed a present id (a corrupt pool).
-func TestPointMissGridZero(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-point-miss")
-	ref, err := q.Reference.Compute(ds, target.Params{"id": "9999"})
-	if err != nil {
-		t.Fatalf("Compute(absent): %v", err)
-	}
-	if len(ref.Rows) != 0 {
-		t.Errorf("miss returned %d rows, want 0", len(ref.Rows))
-	}
-	if _, err := q.Reference.Compute(ds, target.Params{"id": "0"}); err == nil {
-		t.Error("Compute with a present id should error (corrupt miss pool), got nil")
-	}
-}
-
-// TestSPBidirGridReverse checks that the bidirectional shortest path from "24" to
-// "0" is 8: unreachable in the directed DAG (micro-sp) but reachable in 8 hops
-// when edges are undirected.
-func TestSPBidirGridReverse(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-sp-bidir")
-	ref, err := q.Reference.Compute(ds, target.Params{"src": "24", "dst": "0"})
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	assertScalar(t, ref, int64(8))
-}
-
-// TestScanGridWholeGraph checks the scan-and-aggregate over the 5x5 grid: 25
-// nodes with ids 0..24, so count=25 and avg=12.0.
-func TestScanGridWholeGraph(t *testing.T) {
-	ds := gridDS(t)
-	q := mustQuery(t, mustLookup(t, "micro-grid"), "micro-scan")
-	ref, err := q.Reference.Compute(ds, nil)
-	if err != nil {
-		t.Fatalf("Compute: %v", err)
-	}
-	if len(ref.Rows) != 1 || len(ref.Rows[0]) != 2 {
-		t.Fatalf("answer shape: want 1x2, got %v", ref.Rows)
-	}
-	if got := ref.Rows[0][0]; got != int64(25) {
-		t.Errorf("count = %v, want 25", got)
-	}
-	if got := ref.Rows[0][1]; got != float64(12) {
-		t.Errorf("avgId = %v, want 12.0", got)
-	}
-}
-
-// TestMicroDegreeSkewRegistered proves the two degree-contrast workloads are in
-// the registry, name the power-law and uniform generators, and carry the shared
-// traversal subset that lets their rows be read side by side.
-func TestMicroDegreeSkewRegistered(t *testing.T) {
-	shared := []string{"micro-khop1", "micro-khop2", "micro-khop3", "micro-varlen", "micro-point", "micro-point-miss"}
-
-	pw := mustLookup(t, "micro-powerlaw")
-	if pw.Dataset != "powerlaw" {
-		t.Errorf("micro-powerlaw.Dataset = %q, want %q", pw.Dataset, "powerlaw")
-	}
-	pwExtra := []string{"micro-sp", "micro-sp-bidir", "micro-triangle", "micro-triangle-undirected"}
-	for _, id := range append(append([]string{}, shared...), pwExtra...) {
-		if _, ok := pw.Query(id); !ok {
-			t.Errorf("micro-powerlaw missing query %q", id)
-		}
-	}
-
-	uni := mustLookup(t, "micro-uniform")
-	if uni.Dataset != "uniform" {
-		t.Errorf("micro-uniform.Dataset = %q, want %q", uni.Dataset, "uniform")
-	}
-	for _, id := range shared {
-		if _, ok := uni.Query(id); !ok {
-			t.Errorf("micro-uniform missing query %q", id)
-		}
-	}
-	// The flat-degree control runs only the degree-comparable subset, not sp.
-	if _, ok := uni.Query("micro-sp"); ok {
-		t.Error("micro-uniform should not carry micro-sp (sp lives on grid and power-law)")
-	}
-}
-
-// TestMicroPowerLawCurates runs curation on the generated power-law graph and
-// checks the khop seeds resolve through the khop1 reference, which depends on the
-// seed being a real node. This exercises the whole path the degree-skew workload
-// relies on: generate, curate degree bands, draw a seed, compute the reference.
-func TestMicroPowerLawCurates(t *testing.T) {
-	ds := powerLawDS(t)
-	if err := workload.Curate(ds, 7); err != nil {
-		t.Fatalf("Curate: %v", err)
-	}
-	g, err := workload.LoadGraph(ds)
-	if err != nil {
-		t.Fatalf("LoadGraph: %v", err)
-	}
-
-	khop, err := ds.Params("micro-khop")
-	if err != nil {
-		t.Fatalf("Params(micro-khop): %v", err)
-	}
-	if len(khop) == 0 {
-		t.Fatal("micro-khop pool is empty on the power-law graph")
-	}
-	q := mustQuery(t, mustLookup(t, "micro-powerlaw"), "micro-khop1")
-	lo, hi := 1<<30, 0
-	for i, p := range khop {
-		seed, ok := p["seed"].(string)
-		if !ok {
-			t.Fatalf("khop[%d] missing string seed: %v", i, p)
-		}
-		if !g.HasNode(seed) {
-			t.Errorf("khop[%d] seed %q is not a node", i, seed)
-		}
-		ref, err := q.Reference.Compute(ds, target.Params{"seed": seed})
-		if err != nil {
-			t.Fatalf("khop1 reference on seed %q: %v", seed, err)
-		}
-		if got := ref.Rows[0][0].(int64); int(got) != g.OutDegree(seed) {
-			t.Errorf("khop1(%q) = %d, want OutDegree %d", seed, got, g.OutDegree(seed))
-		}
-		d := g.OutDegree(seed)
-		if d < lo {
-			lo = d
-		}
-		if d > hi {
-			hi = d
-		}
-	}
-	// The degree bands must span a range on a skewed graph: the low band lands on
-	// the degree-1 leaves that dominate a power law, the high band on the heavier
-	// tail. A collapsed range would mean the banding picked from one degree only.
-	// (At gamma 2.5 the tail is thin, so the high band reaches the low single
-	// digits, not the rare hubs; lifting hub coverage is a curation follow-up.)
-	if hi <= lo {
-		t.Errorf("curated out-degrees did not span a range: [%d,%d]; degree banding collapsed", lo, hi)
-	}
-}
-
-// TestTrianglePowerLaw proves the triangle references run on the scale-free graph
-// and agree with the oracle. This is the WCOJ showcase doc 05 section 2.5 puts on
-// the power-law graph: the 2-path intermediate a binary join materializes is
-// largest here, so the count must be exact and oracle-checked regardless of how
-// the engine plans the join.
-func TestTrianglePowerLaw(t *testing.T) {
-	// A denser power-law graph than powerLawDS (MinDeg 2, not 1) so the undirected
-	// triangle count is comfortably non-zero; the WCOJ contrast needs real
-	// triangles to count, and a MinDeg-1 graph is mostly disconnected leaves.
-	dir := t.TempDir()
-	wr, err := dataset.NewWriter(dir)
-	if err != nil {
-		t.Fatalf("NewWriter: %v", err)
-	}
-	cfg := gen.Config{Kind: "powerlaw", N: 400, Gamma: 2.5, MinDeg: 2, MaxDeg: 80, Seed: 7}
-	if _, err := gen.Generate(context.Background(), cfg, wr); err != nil {
-		t.Fatalf("Generate powerlaw: %v", err)
-	}
-	ds, err := dataset.Open(dir)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	g, err := workload.LoadGraph(ds)
-	if err != nil {
-		t.Fatalf("LoadGraph: %v", err)
-	}
-	w := mustLookup(t, "micro-powerlaw")
-
-	dirRef, err := mustQuery(t, w, "micro-triangle").Reference.Compute(ds, nil)
-	if err != nil {
-		t.Fatalf("micro-triangle reference: %v", err)
-	}
-	if got := dirRef.Rows[0][0].(int64); got != g.DirectedTriangles() {
-		t.Errorf("directed triangle reference = %d, oracle = %d", got, g.DirectedTriangles())
-	}
-
-	undRef, err := mustQuery(t, w, "micro-triangle-undirected").Reference.Compute(ds, nil)
-	if err != nil {
-		t.Fatalf("micro-triangle-undirected reference: %v", err)
-	}
-	if got := undRef.Rows[0][0].(int64); got != g.UndirectedTriangles() {
-		t.Errorf("undirected triangle reference = %d, oracle = %d", got, g.UndirectedTriangles())
-	}
-	// A scale-free graph with MinDeg >= 2 has real triangles; if the undirected
-	// count were zero the dataset would not exercise the WCOJ contrast at all.
-	if g.UndirectedTriangles() == 0 {
-		t.Error("power-law graph has no undirected triangles; the WCOJ showcase is vacuous")
-	}
-}
-
-// TestMicroUniformCurates is the flat-degree counterpart: curation on the uniform
-// graph yields valid khop seeds, and the spread of their out-degrees is narrow,
-// which is what makes it the control for the power-law skew.
-func TestMicroUniformCurates(t *testing.T) {
-	ds := uniformDS(t)
-	if err := workload.Curate(ds, 7); err != nil {
-		t.Fatalf("Curate: %v", err)
-	}
-	g, err := workload.LoadGraph(ds)
-	if err != nil {
-		t.Fatalf("LoadGraph: %v", err)
-	}
-
-	khop, err := ds.Params("micro-khop")
-	if err != nil {
-		t.Fatalf("Params(micro-khop): %v", err)
-	}
-	if len(khop) == 0 {
-		t.Fatal("micro-khop pool is empty on the uniform graph")
-	}
-	lo, hi := 1<<30, 0
-	for i, p := range khop {
-		seed, ok := p["seed"].(string)
-		if !ok {
-			t.Fatalf("khop[%d] missing string seed: %v", i, p)
-		}
-		if !g.HasNode(seed) {
-			t.Errorf("khop[%d] seed %q is not a node", i, seed)
-		}
-		d := g.OutDegree(seed)
-		if d < lo {
-			lo = d
-		}
-		if d > hi {
-			hi = d
-		}
-	}
-	if hi != lo {
-		t.Errorf("uniform out-degree spread across curated seeds = [%d,%d]; expected flat (every node the same degree)", lo, hi)
-	}
-}
-
-// TestResolveDialectCarriesReference checks that Resolve for Cypher picks the
-// query text and carries the reference answer through unchanged.
-func TestResolveDialectCarriesReference(t *testing.T) {
-	w := mustLookup(t, "micro-grid")
-	q := mustQuery(t, w, "micro-khop1")
-
-	ref := &target.Answer{Columns: []string{"n"}, Rows: [][]target.Value{{int64(3)}}}
-	tq, params, ok := q.Resolve(workload.Cypher, ref)
-	if !ok {
-		t.Fatal("Resolve(Cypher) not ok")
-	}
-	if tq.ID != "micro-khop1" || tq.Class != target.Traversal {
-		t.Errorf("resolved id/class = %q/%v", tq.ID, tq.Class)
-	}
-	if tq.Reference != ref {
-		t.Error("reference was not carried through Resolve")
-	}
-	if params != nil {
-		t.Errorf("params = %v, want nil (query has no ParamSource)", params)
-	}
-
-	// A dialect with no text is a blank cell, not a failure.
-	if _, _, ok := q.Resolve(workload.AGE, nil); ok {
-		t.Error("Resolve(AGE) ok, want blank cell (no AGE text)")
+	if n := oneCount(t, "micro-triangle-undirected", ref(t, er, "micro-triangle-undirected", grid, nil)); n != 0 {
+		t.Errorf("micro-triangle-undirected on grid = %d, want 0", n)
 	}
 }

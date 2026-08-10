@@ -1,135 +1,71 @@
 package measure
 
 import (
-	"math"
+	"math/rand"
+	"sort"
 	"time"
 
-	"github.com/tamnd/graph-bench/target"
-	"github.com/tamnd/graph-bench/workload"
+	"github.com/tamnd/graph-bench/engine"
 )
 
-// BuildMixedSchedule builds a weighted, interleaved Op slice for a mixed
-// workload run. It draws from wl.Queries using the firing weights in wl.Mix,
-// resolving each query's text for the given dialect. Queries with no Mix entry
-// are skipped (they do not appear in the mixed schedule).
+// BuildMixedSchedule builds a deterministic weighted interleave for a mixed
+// workload run. perQuery maps a query id to its ready-made ops for that query
+// (parameters already drawn, dialect already resolved by the caller — dialect
+// resolution is not this package's job in v0.3.0). weights gives each query
+// id's firing weight; ids with a non-positive weight or no ops are skipped.
 //
-// totalCount is the total number of ops in the schedule (before warmup). The
-// count for each query is proportional to its Mix weight (rounded to the
-// nearest integer, with a minimum of 1 for any query with a non-zero weight).
-// The ops are interleaved in round-robin order by query so each query is
-// evenly distributed across the schedule window rather than clustered.
+// Each of the totalCount slots is drawn from the weighted distribution using
+// a PRNG seeded with seed, so the mix converges to the weights while the
+// interleaving stays irregular the way real traffic is — and two builds with
+// the same inputs and seed produce the identical schedule (the seed goes into
+// the Condition stamp as MixSeed, spec 08 §7). A query's ops are consumed in
+// order, cycling when the draw count exceeds the ops provided.
 //
-// rate and warmup are forwarded to BuildSchedule after interleaving.
-// The returned slice has Offset already set.
-func BuildMixedSchedule(wl *workload.Workload, dialect workload.Dialect, totalCount int, rate float64, warmup time.Duration) []Op {
-	if len(wl.Mix) == 0 || totalCount <= 0 {
+// rate and warmup are forwarded to BuildSchedule after interleaving; the
+// returned slice has Offset already set.
+func BuildMixedSchedule(perQuery map[string][]engine.Op, weights map[string]float64, seed int64, totalCount int, rate float64, warmup time.Duration) []Op {
+	if totalCount <= 0 || len(weights) == 0 {
 		return nil
 	}
 
-	// Normalize weights to per-query counts.
+	// Deterministic id order: map iteration order must not shape the schedule.
+	ids := make([]string, 0, len(weights))
+	for id, w := range weights {
+		if w > 0 && len(perQuery[id]) > 0 {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return nil
+	}
 	var totalWeight float64
-	for _, w := range wl.Mix {
-		totalWeight += w
-	}
-	if totalWeight <= 0 {
-		return nil
+	for _, id := range ids {
+		totalWeight += weights[id]
 	}
 
-	type slot struct {
-		q     *workload.WorkloadQuery
-		count int
-	}
-	var slots []slot
-	remaining := totalCount
-	for _, q := range wl.Queries {
-		w, ok := wl.Mix[q.ID]
-		if !ok || w <= 0 {
-			continue
-		}
-		frac := w / totalWeight
-		cnt := int(math.Round(frac * float64(totalCount)))
-		if cnt < 1 {
-			cnt = 1
-		}
-		slots = append(slots, slot{q: q, count: cnt})
-		remaining -= cnt
-	}
-	// Distribute rounding remainder to the highest-weight query.
-	if remaining != 0 && len(slots) > 0 {
-		slots[0].count += remaining
-		if slots[0].count < 0 {
-			slots[0].count = 0
-		}
-	}
-
-	// Interleave: round-robin across slots. This spreads each query type
-	// evenly through time instead of clustering all of one type together.
-	var ops []Op
-	maxCount := 0
-	for _, sl := range slots {
-		if sl.count > maxCount {
-			maxCount = sl.count
-		}
-	}
-	idx := make([]int, len(slots)) // per-slot param cursor
-	for round := 0; round < maxCount; round++ {
-		for si, sl := range slots {
-			if round >= sl.count {
-				continue
+	rng := rand.New(rand.NewSource(seed))
+	cursor := make([]int, len(ids)) // per-query op cursor
+	ops := make([]Op, 0, totalCount)
+	for n := 0; n < totalCount; n++ {
+		r := rng.Float64() * totalWeight
+		pick := len(ids) - 1
+		for i, id := range ids {
+			r -= weights[id]
+			if r < 0 {
+				pick = i
+				break
 			}
-			var params target.Params
-			if sl.q.Params != nil {
-				params = sl.q.Params.Next()
-			}
-			q, p, ok := sl.q.ResolveRun(dialect, nil)
-			if !ok {
-				// Query has no text for this dialect; skip it.
-				continue
-			}
-			if p == nil {
-				p = params
-			}
-			_ = idx[si] // silence unused warning
-			ops = append(ops, Op{
-				Class:   sl.q.Class,
-				QueryID: sl.q.ID,
-				Query:   q,
-				Params:  p,
-			})
 		}
+		pool := perQuery[ids[pick]]
+		ops = append(ops, Op{Op: pool[cursor[pick]%len(pool)]})
+		cursor[pick]++
 	}
 	return BuildSchedule(ops, rate, warmup)
 }
 
-// BuildIsolatedOps builds an Op slice for an isolated run of a single
-// WorkloadQuery. It draws count parameter sets from the query's pool in
-// order. Ops are returned without Offset set; the caller calls BuildSchedule.
-func BuildIsolatedOps(q *workload.WorkloadQuery, dialect workload.Dialect, count int) []Op {
-	if count <= 0 {
-		return nil
-	}
-	query, _, ok := q.ResolveRun(dialect, nil)
-	if !ok {
-		return nil
-	}
-	ops := make([]Op, 0, count)
-	for i := 0; i < count; i++ {
-		var params target.Params
-		if q.Params != nil {
-			params = q.Params.Next()
-		}
-		ops = append(ops, Op{
-			Class:   q.Class,
-			QueryID: q.ID,
-			Query:   query,
-			Params:  params,
-		})
-	}
-	return ops
-}
-
-// MixedResult pairs the Result from a mixed run with the Workload whose Mix
-// was used so the caller can annotate the condition stamp and report.
+// MixedResult pairs the Result from a mixed run with the per-query isolation
+// pass so the report can render write-interference factors.
 type MixedResult struct {
 	Result
 	// IsolatedByQuery holds per-query Results from the isolation pass that was

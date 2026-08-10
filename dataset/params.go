@@ -5,13 +5,16 @@ import (
 	"errors"
 	"os"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
+// Pool is one curated parameter pool: an ordered slice of parameter bindings.
+// The slice order is the deterministic curation order, so every engine draws
+// the identical sequence (ADR-8, spec 05 §4).
+type Pool = []map[string]engine.Value
+
 // paramsFile is the on-disk representation of a dataset's curated parameter
-// pools. It lives at params.json beside manifest.json. Each key maps to an
-// ordered slice of parameter sets; the slice order is the deterministic curation
-// order so two runs on the same dataset use the same draws.
+// pools. It lives at params.json beside manifest.json.
 //
 // Example (a grid dataset curated for the micro workload):
 //
@@ -20,14 +23,14 @@ import (
 //	  "micro-sp":   [{"src": "0", "dst": "8"}, {"src": "1", "dst": "5"}]
 //	}
 //
-// The values are raw JSON ([]string or other JSON scalars) mapped to their
-// target.Value equivalents by the reader.
+// The values are raw JSON scalars mapped to their engine.Value equivalents by
+// the reader.
 type paramsFile map[string][]map[string]any
 
 // readParamsPool reads the params.json file and returns the pool under key, or
 // nil when the file does not exist or the key is absent. An existing but
 // unreadable file is an error.
-func readParamsPool(path, key string) ([]target.Params, error) {
+func readParamsPool(path, key string) (Pool, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -43,9 +46,9 @@ func readParamsPool(path, key string) ([]target.Params, error) {
 	if !ok || len(raw) == 0 {
 		return nil, nil
 	}
-	out := make([]target.Params, len(raw))
+	out := make(Pool, len(raw))
 	for i, m := range raw {
-		p := make(target.Params, len(m))
+		p := make(map[string]engine.Value, len(m))
 		for k, v := range m {
 			p[k] = jsonValue(v)
 		}
@@ -55,10 +58,10 @@ func readParamsPool(path, key string) ([]target.Params, error) {
 }
 
 // WriteParamsPool merges the given pools into params.json at path, creating or
-// overwriting the file. Each key in pools is written (or overwritten); keys not
-// in pools are preserved from an existing file. This is the writer side curate.go
-// calls after computing a pool.
-func WriteParamsPool(path string, pools map[string][]target.Params) error {
+// overwriting the file. Each key in pools is written (or overwritten); keys
+// not in pools are preserved from an existing file. This is the writer side
+// the curation flow calls after computing a pool.
+func WriteParamsPool(path string, pools map[string]Pool) error {
 	var pf paramsFile
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -90,12 +93,13 @@ func WriteParamsPool(path string, pools map[string][]target.Params) error {
 	return os.WriteFile(path, append(b, '\n'), 0o644)
 }
 
-// jsonValue converts a JSON-unmarshaled interface{} value to the most specific
-// target.Value equivalent: a JSON number that fits int64 becomes int64, a float
-// that does not stays float64, a string stays string. JSON objects and arrays
-// are kept as-is (map[string]any, []any), since curated parameter values are
-// scalars in practice and these forms are not expected in params.json.
-func jsonValue(v any) target.Value {
+// jsonValue converts a JSON-unmarshaled value to the most specific
+// engine.Value equivalent: a JSON number that fits int64 becomes int64, a
+// float that does not stays float64, a string stays string. JSON objects and
+// arrays are kept as-is (map[string]any, []any), since curated parameter
+// values are scalars in practice and these forms are not expected in
+// params.json.
+func jsonValue(v any) engine.Value {
 	switch x := v.(type) {
 	case float64:
 		if i := int64(x); float64(i) == x {

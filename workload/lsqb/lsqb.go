@@ -1,221 +1,136 @@
-// Package lsqb holds the nine Labelled Subgraph Query Benchmark queries over the
-// SNB schema, registered as the "lsqb" workload. LSQB queries run in isolation
-// (no Mix), each returning a count of pattern matches, validated against an
-// engine-independent count reference. See notes/Spec/2060/bench/05-workloads.md
-// section 4 for the full design and the per-query rationale.
+// Package lsqb registers the LSQB-shaped join workload (spec 07 §3): nine
+// parameterless count(*) queries whose only work is multi-way join
+// evaluation — no filtering, no property access, no result shaping — so they
+// isolate the optimizer's join-ordering and the executor's join throughput.
 //
-// The nine queries cover the spectrum from tree-shaped joins (Q1-Q4, where join
-// ordering is the bottleneck) to cyclic patterns (Q5-Q7, Q9, where worst-case-
-// optimal joins beat binary plans) to shared-substructure (Q8, where
-// factorization avoids redundant work). They are the standards-anchored version
-// of the WCOJ and factorization micro-benchmarks, on real SNB labels.
+// The original LSQB runs over the LDBC SNB schema. graph-bench's smoke-scale
+// social generator emits a reduced schema (Person/Post/Forum with
+// KNOWS/HAS_CREATOR/LIKES/HAS_MEMBER/CONTAINER_OF), so the nine queries here
+// keep the v1 join shapes — trees, diamonds, triangles, and a four-cycle of
+// increasing arity — but bind them to that schema. Fidelity is therefore
+// "spec-following", not "faithful": the shapes and the count-only discipline
+// are LSQB's, the labels are ours. No anti-join (q6/q9 in upstream LSQB use
+// negation) appears because v1 carried none.
+//
+// Every query is Class Aggregation per the harness taxonomy: a single
+// aggregate row over an unbounded match set. References come from the
+// straight-line counting oracles in oracle.go, computed off the canonical
+// CSV.
 package lsqb
 
 import (
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/workload"
 )
 
 func init() {
-	workload.Register(lsqbWorkload)
+	workload.Register(lsqbWorkload())
 }
 
-var lsqbWorkload = &workload.Workload{
-	Name:    "lsqb",
-	Title:   "LSQB subgraph queries (Q1-Q9) over the SNB schema",
-	Dataset: "snb-sf1", // resolved by dataset/ldbc for production runs
-
-	// No Mix: all nine queries run in isolation so a regression is attributed to
-	// one query, not lost in a blend.
-	Queries: []*workload.WorkloadQuery{
-		q1(), q2(), q3(), q4(), q5(), q6(), q7(), q8(), q9(),
-	},
-}
-
-// q1: a tree: person, their city, their university, the country.
-// Probes tree join ordering; no cycle.
-func q1() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q1",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (p:Person)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(:Country),
-      (p)-[:STUDY_AT]->(:University)
-RETURN count(*) AS cnt`,
-		},
-		Params:    workload.NewFixed(nil), // no parameters: counts the whole graph
-		Reference: countRefOracle("lsqb-q1"),
-	}
-}
-
-// q2: a message, its creator, the creator's city, a tag on the message.
-// A four-way tree with two fan-outs from the message node.
-func q2() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q2",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (m:Message)-[:HAS_CREATOR]->(p:Person)-[:IS_LOCATED_IN]->(:City),
-      (m)-[:HAS_TAG]->(:Tag)
-RETURN count(*) AS cnt`,
-		},
-		Params:    workload.NewFixed(nil),
-		Reference: countRefOracle("lsqb-q2"),
-	}
-}
-
-// q3: a forum, its moderator, a member, a message the member posted in the forum.
-// Probes a longer tree with a container join.
-func q3() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q3",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (f:Forum)-[:HAS_MODERATOR]->(:Person),
-      (f)-[:HAS_MEMBER]->(p:Person),
-      (f)-[:CONTAINER_OF]->(m:Message)-[:HAS_CREATOR]->(p)
-RETURN count(*) AS cnt`,
-		},
-		Params:    workload.NewFixed(nil),
-		Reference: countRefOracle("lsqb-q3"),
-	}
-}
-
-// q4: a message, its tag, the tag's class, the creator's country.
-// A deeper tree with two label hierarchies; probes multi-level join chains.
-func q4() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q4",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (m:Message)-[:HAS_TAG]->(:Tag)-[:HAS_TYPE]->(:TagClass),
-      (m)-[:HAS_CREATOR]->(:Person)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(:Country)
-RETURN count(*) AS cnt`,
-		},
-		Params:    workload.NewFixed(nil),
-		Reference: countRefOracle("lsqb-q4"),
-	}
-}
-
-// q5: a friendship triangle (three persons mutually knowing each other).
-// The canonical 3-clique; the quintessential WCOJ query.
-func q5() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q5",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a)
-RETURN count(*) AS cnt`,
-		},
-		Params:    workload.NewFixed(nil),
-		Reference: countRefOracle("lsqb-q5"),
-	}
-}
-
-// q6: a triangle of persons who each created a message with a shared tag.
-// Cycle plus content joins; mixed WCOJ and binary.
-func q6() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q6",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a),
-      (a)<-[:HAS_CREATOR]-(:Message)-[:HAS_TAG]->(t:Tag),
-      (b)<-[:HAS_CREATOR]-(:Message)-[:HAS_TAG]->(t),
-      (c)<-[:HAS_CREATOR]-(:Message)-[:HAS_TAG]->(t)
-RETURN count(*) AS cnt`,
-		},
-		Params:    workload.NewFixed(nil),
-		Reference: countRefOracle("lsqb-q6"),
-	}
-}
-
-// q7: a four-cycle of persons (a knows b knows c knows d knows a).
-// A larger cycle; probes WCOJ generalization beyond 3-clique.
-func q7() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q7",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(d:Person)-[:KNOWS]-(a)
-RETURN count(*) AS cnt`,
-		},
-		Params:    workload.NewFixed(nil),
-		Reference: countRefOracle("lsqb-q7"),
-	}
-}
-
-// q8: a person, two of their messages, a tag shared by both messages.
-// A shared substructure (the person and tag appear twice in the pattern);
-// probes factorization.
-func q8() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q8",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (p:Person)<-[:HAS_CREATOR]-(m1:Message)-[:HAS_TAG]->(t:Tag),
-      (p)<-[:HAS_CREATOR]-(m2:Message)-[:HAS_TAG]->(t)
+// lsqbWorkload assembles the workload: nine fixed (parameterless) count
+// queries over the social-1k recipe, verified at full strength (every query
+// has exactly one parameter binding, so one verification covers it).
+func lsqbWorkload() *workload.Workload {
+	return &workload.Workload{
+		Name:     "lsqb",
+		Title:    "LSQB: labelled subgraph join counts",
+		Family:   "lsqb",
+		Dataset:  "social-1k",
+		Fidelity: "spec-following",
+		Queries: []*workload.Query{
+			countQuery("lsqb-q1",
+				// Tree: containment chain extended by the creator's likes.
+				`MATCH (f:Forum)-[:CONTAINER_OF]->(m:Post)-[:HAS_CREATOR]->(p:Person)-[:LIKES]->(:Post)
+RETURN count(*) AS cnt`),
+			countQuery("lsqb-q2",
+				// Post hub with two branches: creator's friendships and likers.
+				`MATCH (m:Post)-[:HAS_CREATOR]->(p:Person)-[:KNOWS]->(:Person), (m)<-[:LIKES]-(:Person)
+RETURN count(*) AS cnt`),
+			countQuery("lsqb-q3",
+				// Diamond: the member is also the creator of a contained post.
+				`MATCH (f:Forum)-[:HAS_MEMBER]->(p:Person), (f)-[:CONTAINER_OF]->(m:Post)-[:HAS_CREATOR]->(p)
+RETURN count(*) AS cnt`),
+			countQuery("lsqb-q4",
+				// Deeper tree: friend-of-friend chain plus likes and containment.
+				`MATCH (m:Post)-[:HAS_CREATOR]->(:Person)-[:KNOWS]->(:Person)-[:KNOWS]->(:Person), (m)<-[:LIKES]-(:Person), (m)<-[:CONTAINER_OF]-(:Forum)
+RETURN count(*) AS cnt`),
+			countQuery("lsqb-q5",
+				// The undirected KNOWS triangle: the cyclic-join stress case.
+				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a)
+RETURN count(*) AS cnt`),
+			countQuery("lsqb-q6",
+				// Triangle joined with each member's post in a shared forum.
+				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a),
+      (f:Forum)-[:CONTAINER_OF]->(ma:Post)-[:HAS_CREATOR]->(a),
+      (f)-[:CONTAINER_OF]->(mb:Post)-[:HAS_CREATOR]->(b),
+      (f)-[:CONTAINER_OF]->(mc:Post)-[:HAS_CREATOR]->(c)
+RETURN count(*) AS cnt`),
+			countQuery("lsqb-q7",
+				// The undirected KNOWS four-cycle: the longer cyclic join.
+				//
+				// The four relationships are named and required pairwise
+				// distinct rather than left anonymous, because engines disagree
+				// about what an anonymous cyclic pattern means. Cypher specifies
+				// relationship isomorphism — no relationship may be reused
+				// within a MATCH — and Neo4j enforces it; Kuzu evaluates the
+				// same text as a join with no such restriction, which counts
+				// every closed four-walk, including a-b-a-d-a traversing one
+				// relationship twice. On social-1k that is 6828772 against
+				// 5872264: a 16% spread that is a semantic disagreement, not an
+				// engine being wrong, and comparing the two numbers would be
+				// comparing answers to different questions. Spelling the
+				// constraint out makes the query mean one thing everywhere.
+				//
+				// Only the four-cycle needs this. A closed three-walk in a
+				// loop-free graph is always a triangle, so q5/q6/q9 cannot
+				// admit a repeated relationship and the two semantics coincide
+				// there — which is why they agree today and get no predicate.
+				`MATCH (a:Person)-[r1:KNOWS]-(b:Person)-[r2:KNOWS]-(c:Person)-[r3:KNOWS]-(d:Person)-[r4:KNOWS]-(a)
+WHERE r1 <> r2 AND r1 <> r3 AND r1 <> r4 AND r2 <> r3 AND r2 <> r4 AND r3 <> r4
+RETURN count(*) AS cnt`),
+			countQuery("lsqb-q8",
+				// Shared substructure: two distinct posts by one person in one forum.
+				`MATCH (f:Forum)-[:CONTAINER_OF]->(m1:Post)-[:HAS_CREATOR]->(p:Person),
+      (f)-[:CONTAINER_OF]->(m2:Post)-[:HAS_CREATOR]->(p)
 WHERE m1 <> m2
-RETURN count(*) AS cnt`,
+RETURN count(*) AS cnt`),
+			countQuery("lsqb-q9",
+				// Triangle with a shared forum membership and a common liked post.
+				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a),
+      (f:Forum)-[:HAS_MEMBER]->(a), (f)-[:HAS_MEMBER]->(b), (f)-[:HAS_MEMBER]->(c),
+      (a)-[:LIKES]->(m:Post), (b)-[:LIKES]->(m), (c)-[:LIKES]->(m)
+RETURN count(*) AS cnt`),
 		},
-		Params:    workload.NewFixed(nil),
-		Reference: countRefOracle("lsqb-q8"),
+		Analytics:       true,
+		ValidationScale: "social-1k",
 	}
 }
 
-// q9: a dense cyclic pattern with a shared forum and shared tag.
-// A KNOWS triangle whose members share a Forum via HAS_MEMBER and share a Tag
-// via the tag attached to a message each created. The hardest LSQB query:
-// cycle + multiple binary joins on top.
-func q9() *workload.WorkloadQuery {
-	return &workload.WorkloadQuery{
-		ID:    "lsqb-q9",
-		Class: target.Subgraph,
-		Texts: map[workload.Dialect]string{
-			workload.Cypher: `MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a),
-      (f:Forum)-[:HAS_MEMBER]->(a),
-      (f)-[:HAS_MEMBER]->(b),
-      (f)-[:HAS_MEMBER]->(c),
-      (a)<-[:HAS_CREATOR]-(ma:Message)-[:HAS_TAG]->(t:Tag),
-      (b)<-[:HAS_CREATOR]-(mb:Message)-[:HAS_TAG]->(t),
-      (c)<-[:HAS_CREATOR]-(mc:Message)-[:HAS_TAG]->(t)
-RETURN count(*) AS cnt`,
+// countQuery builds one parameterless counting query. Cypher-only: the texts
+// use no parameters and no engine-specific types, so every engine reaches
+// them through its Cypher fallback (ladybug's Kuzu dialect accepts this
+// subset unchanged; zu has no primitive for these shapes, so its ZuQL slot
+// stays empty by design).
+func countQuery(id, cypher string) *workload.Query {
+	return &workload.Query{
+		ID:    id,
+		Class: engine.Aggregation,
+		Texts: map[engine.Dialect]string{
+			engine.Cypher: cypher,
 		},
-		Params:    workload.NewFixed(nil),
-		Reference: countRefOracle("lsqb-q9"),
-	}
-}
-
-// countRef returns the base RefStrategy shared by every LSQB count query: each
-// returns a single integer row (count(*) AS cnt), compared under numeric
-// coercion so an engine that returns the count as a float still validates. Its
-// Compute is nil (validation skipped); countRefOracle layers the oracle on top.
-// Every LSQB query now wires countRefOracle, so none ship without a reference.
-func countRef() workload.RefStrategy {
-	return workload.RefStrategy{
-		Compare: workload.CompareSpec{
-			Ordered:   false,
-			CoerceNum: true, // some engines return count(*) as float64
+		Params: workload.Fixed{},
+		Reference: &workload.RefStrategy{
+			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
+				n, err := CountOracle(id, ds)
+				if err != nil {
+					return nil, err
+				}
+				return &workload.Answer{
+					Columns: []string{"cnt"},
+					Rows:    [][]engine.Value{{n}},
+				}, nil
+			},
+			Compare: workload.CompareSpec{Ordered: true, CoerceNum: true},
 		},
-		Compute: nil,
 	}
-}
-
-// countRefOracle returns a RefStrategy whose Compute runs the engine-independent
-// CountOracle for the given query id. Every LSQB query wires it, so a run
-// validates the engine's count against the CSV oracle rather than skipping the
-// check. The single count(*) AS cnt row is wrapped in the canonical answer.
-func countRefOracle(queryID string) workload.RefStrategy {
-	r := countRef()
-	r.Compute = func(ds target.Dataset, _ target.Params) (*target.Answer, error) {
-		n, err := CountOracle(queryID, ds)
-		if err != nil {
-			return nil, err
-		}
-		return &target.Answer{
-			Columns: []string{"cnt"},
-			Rows:    [][]target.Value{{n}},
-		}, nil
-	}
-	return r
 }

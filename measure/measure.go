@@ -1,23 +1,30 @@
 // Package measure holds the open-model load generator, latency capture with
-// coordinated-omission correction, nearest-rank percentiles, and the result
-// schema. The types in this file are the five-metric output contract: every
-// measured run produces a Result that carries the per-class latency distribution,
-// throughput, errors, cold stats, load stats, and the full condition stamp (F9).
+// coordinated-omission correction, nearest-rank percentiles, the analytics
+// repetition protocol, and the result schema. The types in this file are the
+// six-metric output contract (spec 08 §1): every measured run produces a
+// Result carrying the per-class latency distribution, throughput, errors,
+// cold stats, load stats, and the full Condition stamp (08 §7).
 //
-// See notes/Spec/2060/bench/06-metrics-and-measurement.md for the full design.
+// See notes/Spec/2064g/bench/08-measurement-and-gates.md for the full design.
 package measure
 
 import (
 	"math"
+	"os"
+	"os/exec"
+	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
-// LatencyModel names which clock a run's latencies were measured against. A
-// report or gate uses it to refuse comparing a service-time number to an
-// open-model number, which are not the same quantity and must never be divided.
+// LatencyModel names which clock a run's latencies were measured against
+// (spec 08 §2). A report or gate uses it to refuse comparing a service-time
+// number to an open-model number, which are not the same quantity and must
+// never be divided.
 type LatencyModel string
 
 const (
@@ -37,13 +44,13 @@ const (
 // measured against the run's LatencyModel: from intended arrival for an
 // open-model (rate-limited) run, from actual dispatch for a count-mode run.
 // A non-nil Err means the query failed and the sample is counted in Errors
-// but excluded from the latency percentiles.
+// but excluded from the latency percentiles (spec 08 §1, F10).
 //
-// QueryID is the workload query id (e.g. "snb-is2", "lsqb-q5"). It is empty
-// for ad-hoc op slices built without a workload query. The per-query report
-// uses it to aggregate ByQuery; the gate and per-class report use only Class.
+// QueryID is the workload query id (e.g. "is3", "lsqb-q5"). It is empty for
+// ad-hoc op slices built without a workload query. The per-query report uses
+// it to aggregate ByQuery; the gate and per-class report use only Class.
 type Sample struct {
-	Class   target.Class
+	Class   engine.Class
 	QueryID string
 	Latency time.Duration
 	Rows    int
@@ -56,7 +63,7 @@ type Sample struct {
 // the measured window; zero for a single-client latency-only run or when
 // the window duration was not supplied.
 type Stat struct {
-	Class         target.Class
+	Class         engine.Class
 	Count         int
 	Errors        int
 	Min           time.Duration
@@ -72,75 +79,154 @@ type Stat struct {
 }
 
 // Result is the complete outcome of one measured run: per-class statistics,
-// per-query statistics, cold-cache first-access statistics (F5), load stats,
-// the latency-under-load curve, and the full condition stamp. Warmup samples
-// are already excluded from Stats; every figure is from the steady-state window
-// only. Result serializes to JSON for the lineage (doc 08) and is the input
-// the gate (doc 07) checks.
+// per-query statistics, cold-cache first-access statistics (F4: cold and warm
+// stay separate sections), load stats, the latency-under-load curve, and the
+// full Condition stamp. Warmup samples are already excluded from Stats; every
+// figure is from the steady-state window only.
 type Result struct {
-	Stats     map[target.Class]Stat // per-class latency distribution + throughput
+	Stats     map[engine.Class]Stat // per-class latency distribution + throughput
 	ByQuery   map[string]Stat       // per-query-id latency; populated when Sample.QueryID is set
-	Cold      map[target.Class]Stat // cold-cache first-access (F5); empty for warm-only runs
-	Load      target.LoadStats      // load time and on-disk size (section 1)
+	Cold      map[engine.Class]Stat // cold-cache first-access; empty for warm-only runs
+	Load      engine.LoadStats      // load time and on-disk size (spec 08 §1 metric 3/4)
 	Resource  Resource              // memory and disk cost of the run (resource.go)
-	Sweep     []SweepPoint          // latency-under-load curve (section 6.4)
+	Sweep     []SweepPoint          // latency-under-load curve (sweep.go)
 	Latency   LatencyModel          // which clock the latencies were measured against
-	Condition Condition             // the full stamp (F9)
+	Condition Condition             // the full stamp (spec 08 §7)
 }
 
 // SweepPoint is one concurrency point of the latency-under-load curve: the
 // concurrency, the achieved throughput, and the p99 at that point, per class.
 type SweepPoint struct {
 	Concurrency int
-	Class       target.Class
+	Class       engine.Class
 	Throughput  float64
 	P99         time.Duration
 }
 
-// Condition is the stamp every published number carries (F9). It is captured at
-// measurement time and is immutable after that. A Result whose Condition has
-// any required field empty is marked incomplete and is not eligible for the lineage.
-type Condition struct {
-	// Engine
-	Engine        string            // Target.Name(): "gr", "gr-bolt", "neo4j", "memgraph"
-	EngineVersion string            // Target.Version(): queried live from the engine
-	Plane         string            // "inproc", "bolt", "native"
-	Config        map[string]string // declared, published per-engine config (F8)
-	Tuned         bool              // tuned run shown beside out-of-the-box, never instead (F8)
+// Hardware describes the machine a run was measured on. It is collected by
+// CollectHardware, never hand-entered (spec 08 §7).
+type Hardware struct {
+	CPU      string // CPU model string, "unknown" when unreadable
+	Cores    int    // logical core count
+	RAMBytes int64  // physical memory, -1 when unreadable
+	OS       string // runtime.GOOS
+	Arch     string // runtime.GOARCH
+}
 
-	// Harness
+// Condition is the stamp every published number carries (spec 08 §7). It is
+// captured at measurement time and immutable after that. The runner's
+// buildCondition has a test asserting no field is zero-valued after a real
+// run — v1 shipped empty Hardware/Seed fields for a year.
+type Condition struct {
+	// Harness.
 	HarnessVersion string // graph-bench version
 	HarnessCommit  string // git commit of the harness build
 
-	// Data
-	Dataset         string // dataset name, e.g. "snb" or "rmat"
+	// Engine.
+	Engine        string            // engine.Info().Name: "zu", "neo4j", "ladybug", "memgraph"
+	EngineVersion string            // Session.Version(): queried live from the engine
+	Plane         string            // "inproc", "bolt", "subprocess", "native"
+	DialectUsed   map[string]string // query id -> dialect its text was resolved to
+	Config        map[string]string // declared, published per-engine config (F8)
+	Tuned         bool              // tuned run shown beside out-of-the-box, never instead (F8)
+
+	// Data.
+	Dataset         string // dataset name, e.g. "snb-sf1", "grid"
 	Scale           string // scale factor, e.g. "SF1", "scale-20"
 	DatasetChecksum string // content checksum of the materialized dataset (F2)
+	ParamsChecksum  string // checksum of the parameter pools the run drew from
 
-	// Workload
-	Workload string            // workload name, e.g. "snb-short", "lsqb", "micro-khop"
-	Params   map[string]string // workload parameters that shaped the run
+	// Workload.
+	Workload string // workload name, e.g. "snb-short", "lsqb", "micro-read"
+	MixSeed  int64  // seed of the mixed-schedule PRNG (mixed.go)
 
-	// Cache and load model
-	Cache       string  // "cold" or "warm" (F5)
-	OfferedRate float64 // open-model offered queries/second
-	Concurrency []int   // the concurrency points swept
+	// Measurement model.
+	LatencyModel   LatencyModel // "service-time" or "open-model" (spec 08 §2)
+	Rate           float64      // open-model offered queries/second, 0 in count mode
+	Concurrency    []int        // the concurrency points run or swept
+	WarmupOutcome  string       // "stable" or "capped" (spec 08 §3)
+	Cache          string       // "cold", "cool", or "warm" (spec 08 §4)
+	ColdProtocol   string       // page-cache drop protocol used: "purge", "drop_caches", "none"
+	ValidationMode string       // "full" or "sampled" (spec 08 §5)
+	Repetitions    int          // analytics repetition count (spec 08 §4)
 
-	// Hardware and platform
-	Hardware  string // CPU model, core count, RAM, storage class (F3)
-	OS        string // OS and version
-	GoVersion string // Go toolchain version
+	// Platform and time.
+	Hardware   Hardware  // collected, not hand-entered (spec 08 §7)
+	StartedAt  time.Time // when the measured window opened
+	FinishedAt time.Time // when the measured window closed
+}
 
-	// Statistics
-	Repetitions int       // measured repetition count (section 7.1)
-	Seed        int64     // fixed seed for parameter selection (section 7.3)
-	Warmup      string    // "dynamic" or "fixed-20pct" (section 4.2)
-	Timestamp   time.Time // when the run was measured
+// CollectHardware populates a Hardware stamp from the runtime and, best
+// effort, the platform (sysctl on darwin, /proc on linux). It never returns
+// empty strings: an unreadable CPU model reads "unknown", unreadable RAM
+// reads -1, so an incomplete stamp is visible instead of silently blank.
+func CollectHardware() Hardware {
+	h := Hardware{
+		CPU:      cpuModel(),
+		Cores:    runtime.NumCPU(),
+		RAMBytes: ramBytes(),
+		OS:       runtime.GOOS,
+		Arch:     runtime.GOARCH,
+	}
+	if h.CPU == "" {
+		h.CPU = "unknown"
+	}
+	return h
+}
+
+// cpuModel reads the CPU model string from the platform, or "unknown".
+func cpuModel() string {
+	switch runtime.GOOS {
+	case "darwin":
+		if out, err := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output(); err == nil {
+			if s := strings.TrimSpace(string(out)); s != "" {
+				return s
+			}
+		}
+	case "linux":
+		if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if k, v, ok := strings.Cut(line, ":"); ok && strings.TrimSpace(k) == "model name" {
+					if s := strings.TrimSpace(v); s != "" {
+						return s
+					}
+				}
+			}
+		}
+	}
+	return "unknown"
+}
+
+// ramBytes reads physical memory in bytes from the platform, or -1.
+func ramBytes() int64 {
+	switch runtime.GOOS {
+	case "darwin":
+		if out, err := exec.Command("sysctl", "-n", "hw.memsize").Output(); err == nil {
+			if n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); err == nil && n > 0 {
+				return n
+			}
+		}
+	case "linux":
+		if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if v, ok := strings.CutPrefix(line, "MemTotal:"); ok {
+					fields := strings.Fields(v)
+					if len(fields) >= 1 {
+						if kb, err := strconv.ParseInt(fields[0], 10, 64); err == nil && kb > 0 {
+							return kb * 1024
+						}
+					}
+				}
+			}
+		}
+	}
+	return -1
 }
 
 // percentile returns the nearest-rank percentile of an already-sorted slice of
-// durations. p is in [0, 1]. An empty slice returns 0. The formula rounds up
-// so p=1.0 returns the maximum: rank = ceil(n*p), clamped to [1, n].
+// durations (spec 08 §1: rank = ceil(n*p), clamped to [1, n], computed on the
+// raw sample array, never on histograms). p is in [0, 1]. An empty slice
+// returns 0. The formula rounds up so p=1.0 returns the maximum.
 func percentile(sorted []time.Duration, p float64) time.Duration {
 	n := len(sorted)
 	if n == 0 {
@@ -158,9 +244,9 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 
 // summarizeGroup turns a raw sample slice into a Stat. A non-nil Err counts
 // toward Count and Errors but is excluded from the percentile slice, so the
-// percentiles describe completed queries only. Throughput is successful queries
-// per second over window; zero when window is zero.
-func summarizeGroup(class target.Class, group []Sample, window time.Duration) Stat {
+// percentiles describe completed queries only (F10). Throughput is successful
+// queries per second over window; zero when window is zero.
+func summarizeGroup(class engine.Class, group []Sample, window time.Duration) Stat {
 	stat := Stat{Class: class, Count: len(group)}
 	lat := make([]time.Duration, 0, len(group))
 	var sum time.Duration
@@ -213,8 +299,8 @@ func stddev(lat []time.Duration, mean time.Duration) time.Duration {
 // statistics. A sample with a non-nil Err counts toward Count and Errors but
 // is excluded from the latency slice. Throughput is successful queries per
 // second over window; zero when window is zero.
-func summarize(samples []Sample, window time.Duration) (byClass map[target.Class]Stat, byQuery map[string]Stat) {
-	classBuckets := map[target.Class][]Sample{}
+func summarize(samples []Sample, window time.Duration) (byClass map[engine.Class]Stat, byQuery map[string]Stat) {
+	classBuckets := map[engine.Class][]Sample{}
 	queryBuckets := map[string][]Sample{}
 	for _, s := range samples {
 		classBuckets[s.Class] = append(classBuckets[s.Class], s)
@@ -222,7 +308,7 @@ func summarize(samples []Sample, window time.Duration) (byClass map[target.Class
 			queryBuckets[s.QueryID] = append(queryBuckets[s.QueryID], s)
 		}
 	}
-	byClass = make(map[target.Class]Stat, len(classBuckets))
+	byClass = make(map[engine.Class]Stat, len(classBuckets))
 	for class, group := range classBuckets {
 		byClass[class] = summarizeGroup(class, group, window)
 	}

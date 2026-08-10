@@ -6,10 +6,11 @@
 # adapter reads NEO4J_USER and NEO4J_PASS to match it.
 #
 # Pin the tag rather than tracking :latest so a benchmark result names the exact
-# server it ran against. Neo4j moved to calendar versioning; 2026.05 is the
-# current release line. If you want a long-support pin instead, swap in the LTS
-# tag neo4j:5.26-community (latest 5.26.27), which the same config works against.
-FROM neo4j:2026.05-community
+# server it ran against (spec 01 §3: one pin table, engine/pins.go is the
+# authority). Neo4j uses calendar versioning; 2026.06.0 is the pinned release.
+# If you want a long-support pin instead, swap in the LTS tag 5.26-community —
+# the same config works, but the run is then off-pin and reports must say so.
+FROM neo4j:2026.06.0-community
 
 # Pull APOC core into the plugins directory the image already puts on the path.
 ENV NEO4J_PLUGINS='["apoc"]'

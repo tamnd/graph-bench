@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tamnd/graph-bench/target"
+	"github.com/tamnd/graph-bench/engine"
 )
 
 // memWriter is an in-memory gen.Writer for the tests: it captures each file's
-// rows so a test can assert on the emitted bytes and counts without touching the
-// disk. It is intentionally separate from the dataset package's file Writer so
-// the generators are tested in isolation from the on-disk format.
+// rows so a test can assert on the emitted bytes and counts without touching
+// the disk. It is intentionally separate from the dataset package's file
+// Writer so the generators are tested in isolation from the on-disk format.
 type memWriter struct {
 	files map[string]*memRows // keyed by "nodes/<label>" or "rels/<type>"
 	nodes int64
@@ -22,29 +22,29 @@ type memWriter struct {
 }
 
 type memRows struct {
-	header []target.Column
+	header []engine.Column
 	rows   [][]string
 	count  *int64
 }
 
 func newMemWriter() *memWriter { return &memWriter{files: map[string]*memRows{}} }
 
-func (w *memWriter) NodeFile(label string, header []target.Column) (RowWriter, error) {
+func (w *memWriter) NodeFile(label string, header []engine.Column) (RowWriter, error) {
 	mr := &memRows{header: header, count: &w.nodes}
 	w.files["nodes/"+label] = mr
 	return mr, nil
 }
 
-func (w *memWriter) RelFile(typ string, header []target.Column) (RowWriter, error) {
+func (w *memWriter) RelFile(typ, start, end string, header []engine.Column) (RowWriter, error) {
 	mr := &memRows{header: header, count: &w.edges}
 	w.files["rels/"+typ] = mr
 	return mr, nil
 }
 
-func (w *memWriter) Finalize(partial *target.Manifest) (*target.Manifest, error) {
+func (w *memWriter) Finalize(partial *engine.Manifest) (*engine.Manifest, error) {
 	m := *partial
-	m.NodeCount = w.nodes
-	m.EdgeCount = w.edges
+	m.Invariants.NodeCount = w.nodes
+	m.Invariants.EdgeCount = w.edges
 	return &m, nil
 }
 
@@ -82,8 +82,9 @@ func (w *memWriter) bytesOf() string {
 	return b.String()
 }
 
-// run generates a config into a fresh memWriter and returns it with the manifest.
-func run(t *testing.T, cfg Config) (*memWriter, *target.Manifest) {
+// run generates a config into a fresh memWriter and returns it with the
+// manifest.
+func run(t *testing.T, cfg Config) (*memWriter, *engine.Manifest) {
 	t.Helper()
 	w := newMemWriter()
 	m, err := Generate(context.Background(), cfg, w)
@@ -93,9 +94,9 @@ func run(t *testing.T, cfg Config) (*memWriter, *target.Manifest) {
 	return w, m
 }
 
-// TestDeterminism is the bit-reproducibility contract: the same config produces
-// byte-identical output on two independent runs. This is what the regression
-// gate depends on (spec doc 04 section 3).
+// TestDeterminism is the bit-reproducibility contract: the same config
+// produces byte-identical output on two independent runs, for every
+// generator. This is what the regression gate depends on (spec 05 §2).
 func TestDeterminism(t *testing.T) {
 	cfgs := []Config{
 		{Kind: "uniform", Seed: 42, N: 500, Degree: 6},
@@ -104,9 +105,21 @@ func TestDeterminism(t *testing.T) {
 		{Kind: "grid", Seed: 1, Rows: 20, Cols: 30},
 		{Kind: "grid", Seed: 1, Rows: 20, Cols: 30, Diagonal: true},
 		{Kind: "rmat", Seed: 123, Scale: 10, EdgeFactor: 8},
+		{Kind: "rmat", Seed: 123, Scale: 10, EdgeFactor: 8, Weighted: true},
+		{Kind: "urand", Seed: 11, Scale: 10, EdgeFactor: 8},
+		{Kind: "fin", Seed: 5, Accounts: 200, Days: 3, TxPerDay: 100},
+		{Kind: "lb", Seed: 8, N: 300},
+		{Kind: "social", Seed: 13, Persons: 100, AvgFriends: 5, PostsPerPerson: 3},
 	}
 	for _, cfg := range cfgs {
-		t.Run(cfg.Kind, func(t *testing.T) {
+		name := cfg.Kind
+		if cfg.Weighted {
+			name += "-weighted"
+		}
+		if cfg.Diagonal {
+			name += "-diagonal"
+		}
+		t.Run(name, func(t *testing.T) {
 			w1, _ := run(t, cfg)
 			w2, _ := run(t, cfg)
 			if w1.bytesOf() != w2.bytesOf() {
@@ -131,15 +144,12 @@ func TestSeedChangesOutput(t *testing.T) {
 func TestUniformInvariants(t *testing.T) {
 	cfg := Config{Kind: "uniform", Seed: 42, N: 1000, Degree: 7}
 	w, m := run(t, cfg)
-	if m.NodeCount != cfg.N {
-		t.Errorf("NodeCount = %d, want %d", m.NodeCount, cfg.N)
+	if m.Invariants.NodeCount != cfg.N {
+		t.Errorf("NodeCount = %d, want %d", m.Invariants.NodeCount, cfg.N)
 	}
 	wantEdges := cfg.N * int64(cfg.Degree)
-	if m.EdgeCount != wantEdges {
-		t.Errorf("EdgeCount = %d, want %d", m.EdgeCount, wantEdges)
-	}
-	if got := *m.Invariants.EdgeCount; got != wantEdges {
-		t.Errorf("Invariants.EdgeCount = %d, want %d", got, wantEdges)
+	if m.Invariants.EdgeCount != wantEdges {
+		t.Errorf("EdgeCount = %d, want %d", m.Invariants.EdgeCount, wantEdges)
 	}
 	// No self-loops, no duplicate edges, and each source has exactly Degree.
 	rels := w.files["rels/"+relType]
@@ -171,11 +181,11 @@ func TestGridInvariants(t *testing.T) {
 	_, m := run(t, Config{Kind: "grid", Rows: int(rows), Cols: int(cols)})
 	wantNodes := rows * cols
 	wantEdges := rows*(cols-1) + cols*(rows-1)
-	if m.NodeCount != wantNodes {
-		t.Errorf("NodeCount = %d, want %d", m.NodeCount, wantNodes)
+	if m.Invariants.NodeCount != wantNodes {
+		t.Errorf("NodeCount = %d, want %d", m.Invariants.NodeCount, wantNodes)
 	}
-	if m.EdgeCount != wantEdges {
-		t.Errorf("EdgeCount = %d, want %d", m.EdgeCount, wantEdges)
+	if m.Invariants.EdgeCount != wantEdges {
+		t.Errorf("EdgeCount = %d, want %d", m.Invariants.EdgeCount, wantEdges)
 	}
 	if got := *m.Invariants.Diameter; got != (rows-1)+(cols-1) {
 		t.Errorf("Diameter = %d, want %d", got, (rows-1)+(cols-1))
@@ -185,20 +195,21 @@ func TestGridInvariants(t *testing.T) {
 	}
 }
 
-// TestRMATInvariants checks RMAT's node and edge counts and that every endpoint
-// is within the 2^Scale id space.
+// TestRMATInvariants checks RMAT's node and edge counts and that every
+// endpoint is within the 2^Scale id space.
 func TestRMATInvariants(t *testing.T) {
 	cfg := Config{Kind: "rmat", Seed: 123, Scale: 12, EdgeFactor: 8}
 	w, m := run(t, cfg)
 	wantNodes := int64(1) << uint(cfg.Scale)
 	wantEdges := int64(cfg.EdgeFactor) * wantNodes
-	if m.NodeCount != wantNodes {
-		t.Errorf("NodeCount = %d, want %d", m.NodeCount, wantNodes)
+	if m.Invariants.NodeCount != wantNodes {
+		t.Errorf("NodeCount = %d, want %d", m.Invariants.NodeCount, wantNodes)
 	}
-	if m.EdgeCount != wantEdges {
-		t.Errorf("EdgeCount = %d, want %d", m.EdgeCount, wantEdges)
+	if m.Invariants.EdgeCount != wantEdges {
+		t.Errorf("EdgeCount = %d, want %d", m.Invariants.EdgeCount, wantEdges)
 	}
-	// Edges are sorted by (source, target); confirm the order and the id range.
+	// Edges are sorted by (source, target); confirm the order and the id
+	// range.
 	rels := w.files["rels/"+relType]
 	var prevU, prevV int64 = -1, -1
 	for _, row := range rels.rows {
@@ -214,24 +225,67 @@ func TestRMATInvariants(t *testing.T) {
 	}
 }
 
-// TestERExpectedEdgeCount checks the realized edge count is within a few standard
-// deviations of the closed-form expectation p*N*(N-1), so the geometric-skip
-// sampler matches G(n,p).
+// TestRMATWeighted checks the weighted variant keeps the identical edge set
+// as the unweighted one for the same seed (the weights are drawn after every
+// structural draw) and that every weight is in the GAP 1..255 range.
+func TestRMATWeighted(t *testing.T) {
+	base := Config{Kind: "rmat", Seed: 123, Scale: 10, EdgeFactor: 8}
+	weighted := base
+	weighted.Weighted = true
+	wu, _ := run(t, base)
+	ww, m := run(t, weighted)
+
+	plain := wu.files["rels/"+relType]
+	wtd := ww.files["rels/"+relType]
+	if len(plain.rows) != len(wtd.rows) {
+		t.Fatalf("edge counts differ: %d unweighted vs %d weighted", len(plain.rows), len(wtd.rows))
+	}
+	for i, row := range wtd.rows {
+		if row[0] != plain.rows[i][0] || row[1] != plain.rows[i][1] {
+			t.Fatalf("edge %d differs: %v vs %v", i, row[:2], plain.rows[i][:2])
+		}
+		w := mustAtoi(t, row[3])
+		if w < 1 || w > 255 {
+			t.Fatalf("weight %d outside 1..255", w)
+		}
+	}
+	if hdr := wtd.header[len(wtd.header)-1]; hdr.Name != "w" || hdr.Type != "INT64" {
+		t.Errorf("weighted rel header ends in %v, want w:INT64", hdr)
+	}
+	if m.Params["weighted"] != "true" {
+		t.Errorf("weighted param = %q, want true", m.Params["weighted"])
+	}
+	if _, ok := run2Params(t, base)["weighted"]; ok {
+		t.Error("unweighted rmat records a weighted param (would change v1 checksums)")
+	}
+}
+
+// run2Params regenerates a config and returns its manifest params.
+func run2Params(t *testing.T, cfg Config) map[string]string {
+	t.Helper()
+	_, m := run(t, cfg)
+	return m.Params
+}
+
+// TestERExpectedEdgeCount checks the realized edge count is within a few
+// standard deviations of the closed-form expectation p*N*(N-1), so the
+// geometric-skip sampler matches G(n,p).
 func TestERExpectedEdgeCount(t *testing.T) {
 	cfg := Config{Kind: "er", Seed: 5, N: 2000, P: 0.01}
 	_, m := run(t, cfg)
 	nf := float64(cfg.N)
 	expected := cfg.P * nf * (nf - 1)
-	stddev := expected // variance ~ expected for small p; use a loose 5-sigma-ish band
+	stddev := expected // variance ~ expected for small p; use a loose band
 	low := expected - 0.2*stddev
 	high := expected + 0.2*stddev
-	got := float64(m.EdgeCount)
+	got := float64(m.Invariants.EdgeCount)
 	if got < low || got > high {
-		t.Errorf("EdgeCount = %d, want within [%.0f, %.0f] of expected %.0f", m.EdgeCount, low, high, expected)
+		t.Errorf("EdgeCount = %d, want within [%.0f, %.0f] of expected %.0f", m.Invariants.EdgeCount, low, high, expected)
 	}
 }
 
-// TestUnknownGenerator confirms an unknown kind is a clear error, not a panic.
+// TestUnknownGenerator confirms an unknown kind is a clear error, not a
+// panic.
 func TestUnknownGenerator(t *testing.T) {
 	if _, err := New("nope"); err == nil {
 		t.Error("New(\"nope\") returned nil error, want unknown-generator error")
