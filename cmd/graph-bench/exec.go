@@ -355,6 +355,7 @@ var syntheticDefaults = map[string]gen.Config{
 	"er":       {Kind: "er", N: 10000, P: 0.001, Seed: 1},
 	"rmat":     {Kind: "rmat", Scale: 14, EdgeFactor: 16, Seed: 1},
 	"powerlaw": {Kind: "powerlaw", N: 5000, Gamma: 2.5, MinDeg: 1, MaxDeg: 500, Seed: 1},
+	"uniform":  {Kind: "uniform", N: 5000, Degree: 10, Seed: 1},
 }
 
 // buildCondition fills in the Condition stamp for a result.
