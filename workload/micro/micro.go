@@ -265,7 +265,10 @@ var edgeQuery = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (a:Node {id: $src})-[:EDGE]->(b:Node {id: $dst}) RETURN count(*) > 0 AS found`,
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($src AS INT64)})-[:EDGE]->(b:Node {id: CAST($dst AS INT64)}) RETURN count(*) > 0 AS found`,
-		engine.ZuQL:   `MATCH (a:node {id: $src})-[:edge]->(b:node {id: $dst}) RETURN count(*) > 0 AS found`,
+		// zu's binder only takes a bare aggregate call in a RETURN item, so
+		// the comparison moves one stage down: count in a WITH, compare in
+		// the RETURN. Same probe, same two rows of work, different spelling.
+		engine.ZuQL: `MATCH (a:node {id: $src})-[:edge]->(b:node {id: $dst}) WITH count(*) AS c RETURN c > 0 AS found`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
