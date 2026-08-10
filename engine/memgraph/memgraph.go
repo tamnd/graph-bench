@@ -186,11 +186,13 @@ func (s *session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats
 	}, nil
 }
 
-// createIndex creates the per-label id index. Memgraph has no IF NOT
-// EXISTS clause, so an "already exists" error from a warm instance is
-// tolerated; every other error is fatal.
+// createIndex creates the per-label id index. It goes through RunDDL
+// because Memgraph rejects index DDL inside an explicit transaction,
+// which is what runWrite opens. Memgraph has no IF NOT EXISTS clause,
+// so an "already exists" error from a warm instance is tolerated;
+// every other error is fatal.
 func (s *session) createIndex(ctx context.Context, label string) error {
-	err := s.runWrite(ctx, indexStatement(label))
+	err := s.pool.RunDDL(ctx, indexStatement(label))
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
 		return fmt.Errorf("memgraph: create index on %s: %w", label, err)
 	}
