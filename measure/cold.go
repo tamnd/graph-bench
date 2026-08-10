@@ -35,12 +35,12 @@ func ColdRun(ctx context.Context, sess engine.Session, ops []Op, timeout time.Du
 		}
 		qctx, cancel := context.WithTimeout(ctx, timeout)
 		s := Sample{Class: op.Op.Class, QueryID: op.Op.QueryID}
-		intended := time.Now()
+		intended := tick()
 		res, err := sess.Exec(qctx, op.Op)
 		if err == nil {
 			s.Rows = drainAndClose(res)
 		}
-		s.Latency = time.Since(intended)
+		s.Latency = intended.elapsed()
 		cancel()
 		s.Err = err
 		samples = append(samples, s)
