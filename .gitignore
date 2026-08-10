@@ -12,3 +12,6 @@
 
 # Editor and OS noise
 .DS_Store
+
+# gr CPU profiles written by the SF1 profiling test
+*.prof

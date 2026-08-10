@@ -88,12 +88,15 @@ func (t *Target) Setup(ctx context.Context, config target.Config) (target.Driver
 	if mem {
 		db, err = grdb.Open(":memory:.gr", grdb.Options{VFS: vfs.NewMem()})
 	} else {
-		db, err = grdb.Open(path, grdb.Options{})
+		// Size the buffer pool to the database on disk so a large database is not
+		// read back through a starved cache; on a fresh path the file does not
+		// exist yet and the pool stays at gr's default until the load reopens it.
+		db, err = grdb.Open(path, grdb.Options{MaxPoolPages: configuredPoolPages(config, path)})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("gr: open %q: %w", path, err)
 	}
-	return &driver{db: db, path: path, mem: mem}, nil
+	return &driver{db: db, path: path, mem: mem, config: config}, nil
 }
 
 // Load ingests the dataset. A file-backed dataset (one with a directory of
@@ -150,6 +153,9 @@ type driver struct {
 	db   *grdb.DB
 	path string
 	mem  bool
+	// config is kept so the bulk loader's reopen can size the buffer pool to the
+	// freshly built database file the same way Setup sizes it on an existing one.
+	config target.Config
 }
 
 var _ target.Driver = (*driver)(nil)
