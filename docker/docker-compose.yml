@@ -11,7 +11,7 @@
 # Bring them up with:   docker compose -f docker/docker-compose.yml up -d --build
 # Then run the bench from the repo root, for example:
 #   NEO4J_PASS=benchbench go run -tags bolt ./cmd/graph-bench \
-#       run --workload micro-grid --engines neo4j,memgraph --count 30
+#       run --workload micro-read --engines neo4j,memgraph --count 30
 services:
   neo4j:
     build:

@@ -98,7 +98,13 @@ shell)
   i=0
   while IFS= read -r line; do
     case "$line" in
-    BAD*) echo '{"error":"parse error near BAD"}' ;;
+    *BAD*) echo '{"error":"parse error near BAD"}' ;;
+    *'"src":'*)
+      # Answers with the bound $src value, proving the parameter
+      # traveled inside the frame and not just the statement text.
+      v=$(printf '%s' "$line" | sed 's/.*"src"://; s/[,}].*//')
+      echo "{\"columns\":[\"src\"],\"rows\":[[$v]]}"
+      ;;
     *) i=$((i+1)); echo "{\"columns\":[\"i\"],\"rows\":[[$i]]}" ;;
     esac
   done
@@ -390,6 +396,21 @@ func TestShellModeRoundTrip(t *testing.T) {
 	if got := exec1("MATCH (n)\n\tRETURN n"); got != int64(2) {
 		t.Fatalf("second exec = %#v, want 2", got)
 	}
+	// Parameters ride inside the frame; the fake answers with the bound
+	// value, so a pass here means the binder on the other side saw it.
+	res, err := s.Exec(ctx, engine.Op{
+		QueryID: "q",
+		Text:    "MATCH (n {id: $src}) RETURN n.id",
+		Params:  map[string]engine.Value{"src": int64(41)},
+	})
+	if err != nil {
+		t.Fatalf("Exec with params: %v", err)
+	}
+	if !res.Next() || res.Row()[0] != int64(41) {
+		t.Fatalf("param round trip = %#v, want 41", res.Row())
+	}
+	res.Close()
+
 	// An {"error": ...} line surfaces as an error without killing the child.
 	if _, err := s.Exec(ctx, engine.Op{QueryID: "q", Text: "BAD ("}); err == nil ||
 		!strings.Contains(err.Error(), "parse error") {

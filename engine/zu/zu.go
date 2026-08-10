@@ -12,8 +12,9 @@
 // bare and only trusts it when it does not reply "unknown command"):
 //
 //   - shell mode: one persistent `zu shell <db> --format jsonl` child for
-//     the whole session; one statement per line in, one JSON result
-//     object per line out. No spawn cost in any timed region.
+//     the whole session; one query frame per line in, carrying the text
+//     and its parameters, one JSON result object per line out. No spawn
+//     cost in any timed region.
 //   - query mode: `zu query <db> -c <text> --format json` per operation.
 //     Process spawn is part of the measured cost — that IS the plane
 //     (F3); Session.Calibrate reports the spawn floor so the runner can

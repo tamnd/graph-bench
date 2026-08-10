@@ -61,7 +61,7 @@ jobs:
       - name: smoke run
         run: |
           go run -tags bolt ./cmd/graph-bench run \
-            --workload micro-grid --engines ${{ matrix.engine }} \
+            --workload micro-read --engines ${{ matrix.engine }} \
             --count 30 --out /tmp/results
         env:
           NEO4J_URI: bolt://localhost:7687
@@ -86,10 +86,10 @@ jobs:
         continue-on-error: true
         id: zubuild
 
-      - name: smoke run (primitive mode)
+      - name: smoke run (mode probed at start, shell once zu head has it)
         if: steps.zubuild.outcome == 'success'
         run: |
           go run ./cmd/graph-bench run \
-            --workload micro-grid --engines zu --count 30 --out /tmp/results
+            --workload micro-read --engines zu --count 30 --out /tmp/results
         env:
           ZU_BIN: /tmp/zu/target/release/zu

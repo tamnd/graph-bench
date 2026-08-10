@@ -89,18 +89,28 @@ func (s *Session) teardownShellLocked() string {
 	return strings.TrimSpace(sh.stderr.String())
 }
 
-// escapeStatement folds a statement onto one line for the jsonl shell
-// protocol: backslash, newline, and tab are escaped.
-var escapeStatement = strings.NewReplacer("\\", `\\`, "\n", `\n`, "\t", `\t`).Replace
+// shellFrame is one request line on the jsonl shell protocol. The
+// params travel inside the frame, because every pooled query's text
+// names them ($id, $seed, $src) and zu's binder rejects unbound
+// parameters; a bare statement line has nowhere to put them.
+type shellFrame struct {
+	Op     string                  `json:"op"`
+	Q      string                  `json:"q"`
+	Params map[string]engine.Value `json:"params,omitempty"`
+}
 
-// execShell writes one statement line to the persistent shell and reads
+// execShell writes one query frame to the persistent shell and reads
 // one JSON result line back. On ctx cancellation the child is killed
 // (a fresh one starts lazily on the next op).
 func (s *Session) execShell(ctx context.Context, op engine.Op) (engine.Result, error) {
 	if err := s.startShellLocked(); err != nil {
 		return nil, err
 	}
-	if _, err := io.WriteString(s.sh.in, escapeStatement(op.Text)+"\n"); err != nil {
+	frame, err := json.Marshal(shellFrame{Op: "query", Q: op.Text, Params: op.Params})
+	if err != nil {
+		return nil, fmt.Errorf("zu: query %q has a parameter JSON cannot carry: %w", op.QueryID, err)
+	}
+	if _, err := io.WriteString(s.sh.in, string(frame)+"\n"); err != nil {
 		stderr := s.teardownShellLocked()
 		return nil, fmt.Errorf("zu: shell write failed: %v (stderr: %s)", err, stderr)
 	}
