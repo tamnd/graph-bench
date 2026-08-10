@@ -67,9 +67,17 @@ func New() *Engine { return &Engine{} }
 // constant.
 func (e *Engine) Info() engine.Info {
 	return engine.Info{
-		Name:     "zu",
-		Plane:    engine.Subprocess,
-		Dialects: []engine.Dialect{engine.ZuQL, engine.Cypher},
+		Name:  "zu",
+		Plane: engine.Subprocess,
+		// zuQL only, with no Cypher fallback. zu's parser accepts a Cypher
+		// shape for the subset it implements, but it is not Cypher: labels
+		// are case-sensitive and the loader names its tables "node" and
+		// "edge", so a text written for Neo4j fails on the label alone. A
+		// one-dialect chain makes a query with no zuQL text SKIP with reason
+		// "no-dialect-text", which is the honest outcome. With Cypher in the
+		// chain it would instead FAIL, and one FAIL discards the measurement
+		// for every query in the workload.
+		Dialects: []engine.Dialect{engine.ZuQL},
 		Caps: engine.Capabilities{
 			Transactions:   false,
 			BulkLoad:       true,

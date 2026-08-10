@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -129,9 +131,29 @@ func (s *Session) execShell(ctx context.Context, op engine.Op) (engine.Result, e
 
 // ---- query mode -----------------------------------------------------
 
-// execQuery spawns `zu query <db> -c <text> --format json` for one op.
+// execQuery spawns `zu query <db> -c <text> --format json` for one op,
+// with one -p flag per parameter.
+//
+// The parameters are not optional decoration: every pooled query's text
+// names them ($id, $seed, $src), and zu's binder rejects a statement
+// whose parameters were never bound rather than treating them as null.
+// Passing the text alone would fail every pooled query in the workload,
+// which is a FAIL, which discards the measurement for all of them.
 func (s *Session) execQuery(ctx context.Context, op engine.Op) (engine.Result, error) {
-	cmd := exec.CommandContext(ctx, s.bin, "query", s.dbPath, "-c", op.Text, "--format", "json")
+	args := make([]string, 0, 6+2*len(op.Params))
+	args = append(args, "query", s.dbPath, "-c", op.Text, "--format", "json")
+	// Sorted so the command line is a function of the op alone: the same
+	// op produces the same argv on every repetition and every host, which
+	// is what makes a failure reproducible from the run log.
+	for _, name := range slices.Sorted(maps.Keys(op.Params)) {
+		text, ok := formatParam(op.Params[name])
+		if !ok {
+			return nil, fmt.Errorf("zu: query %q parameter %q is %T, which the CLI cannot carry",
+				op.QueryID, name, op.Params[name])
+		}
+		args = append(args, "-p", name+"="+text)
+	}
+	cmd := exec.CommandContext(ctx, s.bin, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -312,6 +334,36 @@ func paramString(params map[string]engine.Value, keys ...string) (string, bool) 
 		}
 	}
 	return "", false
+}
+
+// formatParam renders one parameter value for a `-p name=value` flag.
+// zu types the value by what the text parses as (integer, then float,
+// then string), so an int64 arrives as an int and a string as a string
+// without any marker in between. A float that happens to be integral is
+// written with a decimal point on purpose: dropping it would silently
+// change the parameter's type on the other side.
+func formatParam(v engine.Value) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case int64:
+		return strconv.FormatInt(t, 10), true
+	case int:
+		return strconv.Itoa(t), true
+	case float64:
+		s := strconv.FormatFloat(t, 'f', -1, 64)
+		if !strings.ContainsAny(s, ".eE") {
+			s += ".0"
+		}
+		return s, true
+	default:
+		// Booleans deliberately fall through. zu's CLI types a parameter
+		// by what it parses as, and "true" parses as a string there, so
+		// sending one would bind a string where the query wants a bool
+		// and compare wrong. No workload passes one; an error here is a
+		// clearer answer than a quiet mistype.
+		return "", false
+	}
 }
 
 // asValue decodes a primitive-output token into the value model:
