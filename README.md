@@ -18,6 +18,183 @@ It is the benchmarking sibling of `gr` the way `githome-bench` is to `githome`: 
 
 It is not a leaderboard that crowns a winner, not a vendor benchmark, and not a correctness suite. It reports a matrix and lets the reader draw conclusions.
 
+## Measured results
+
+Every number below came out of this harness on 2026-08-12. Each one is service-time latency at the stated percentile, after a fixed 2 second warmup, with no engine tuning (`tuned=false` in the result files). Nothing is timed before it is verified: the harness computes the answer itself from the canonical CSV and compares it to what the engine returned, and a query that fails verification is reported as a failure instead of a latency. The verification dialect is recorded per query, so a fast number can always be traced to the text the engine actually ran.
+
+The result JSON for each table is under `results/<workload>/<scale>/`, named by timestamp, engine, plane, and dataset checksum.
+
+### Which engine ran where
+
+| Engine | Plane | Version | Machine | Scale | Workloads measured |
+| --- | --- | --- | --- | --- | --- |
+| zu | subprocess | 0.0.1 | laptop and desktop | smoke and sf1 | micro-read, micro-er, micro-powerlaw |
+| zu-capi | in-process, cgo | 0.0.1 | laptop | smoke | micro-read, micro-er, micro-powerlaw |
+| ladybug | in-process, cgo | 0.19.1 | laptop | smoke | micro-read, micro-er, micro-powerlaw |
+| Neo4j | Bolt | 2026.06.0 | desktop | sf1 | micro-read, micro-er |
+| Memgraph | Bolt | not measured | desktop | sf1 | none, see below |
+
+zu and zu-capi are the same engine, the same build, and the same query texts. The only difference is how the harness reaches it: `zu` drives the CLI over a pipe, one frame per query, and `zu-capi` links libzu and calls it directly, which is the plane ladybug runs on. Having both in one table is what makes the ladybug comparison an engine comparison instead of a transport comparison.
+
+zu is the only engine measured on both machines, because it is the only one that needs no server and no cgo. ladybug is not in the Neo4j tables and Neo4j is not in the ladybug tables: the laptop had no Docker running for a Neo4j server, and the desktop had no liblbug built for the cgo adapter. Neo4j also has no micro-powerlaw numbers, since that workload was only run on the laptop.
+
+The laptop tables and the desktop tables are different machines at different scales. Compare engines within one table. Do not read a zu number from one table against a zu number from the other, and do not put ladybug's laptop numbers next to Neo4j's desktop numbers, because nothing in that comparison is held constant.
+
+### How to read the tables
+
+The `zu speedup` column is the other engine's p50 divided by zu's p50 on the same plane: against ladybug it uses the in-process zu number, against Neo4j it uses the subprocess zu number, since that is the only zu plane measured on the desktop. Above 1.0 means zu is faster by that factor, below 1.0 means zu is slower. Rows in **bold** are the ones where zu loses. The class rows (point-read, traversal, aggregation, subgraph) are the harness's own rollups over the queries in that class and are reported as the harness renders them, not recomputed here. Where a p50 renders in milliseconds with two decimals, the ratio inherits that rounding and is marked as approximate.
+
+The plane matters, and on the laptop it is now measured instead of argued about. ladybug runs in-process through cgo and pays nothing to reach the engine. Neo4j runs over Bolt and pays a socket round trip per query. zu is in the laptop tables twice, once over the subprocess plane and once in-process, so the transport cost is a column you can read rather than a caveat you have to trust. On the desktop only the subprocess plane was measured, so every zu number in the Neo4j tables still carries a frame cost of roughly 13µs that Neo4j's numbers do not have.
+
+### Apple silicon laptop, zu 0.0.1 against ladybug 0.19.1
+
+Smoke scale, macOS, all three columns from one run of the harness on the same machine, the same datasets, and the same process. `zu` is the subprocess plane and `zu-capi` is the same build linked in-process through libzu, which is the plane ladybug runs on. The speedup column compares ladybug against `zu-capi`, so both sides pay the same transport, which is none.
+
+**micro-read**, dataset `grid-30x30` (checksum `eb8d5d60`), fidelity harness-native. ladybug answered seven of the nine queries through its kuzu dialect and the two scans through Cypher; both zu columns answered all nine through zuQL.
+
+| Query | ladybug p50 | ladybug p99 | zu p50 | zu p99 | zu-capi p50 | zu-capi p99 | zu-capi speedup |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| point-read (class) | 57.8µs | 277.5µs | 35.2µs | 46.3µs | 23.2µs | 30.3µs | 2.5x |
+| traversal (class) | 517.1µs | 1234.1µs | 19.7µs | 36.6µs | 5.5µs | 20.3µs | 94.0x |
+| aggregation (class) | 167.7µs | 236.9µs | 19.8µs | 34.0µs | 4.2µs | 18.1µs | 39.9x |
+| micro-point | 50.1µs | 77.9µs | 43.0µs | 47.6µs | 29.2µs | 30.8µs | 1.7x |
+| micro-point-miss | 52.0µs | 76.2µs | 35.2µs | 41.0µs | 23.2µs | 23.6µs | 2.2x |
+| micro-edge | 234.0µs | 292.0µs | 26.1µs | 31.1µs | 14.5µs | 15.9µs | 16.1x |
+| micro-khop1 | 185.4µs | 238.9µs | 32.7µs | 36.6µs | 19.8µs | 21.0µs | 9.4x |
+| micro-khop2 | 616.9µs | 907.0µs | 17.7µs | 22.7µs | 4.8µs | 5.4µs | 128.5x |
+| micro-khop3 | 1061.0µs | 1348.3µs | 19.3µs | 68.4µs | 5.6µs | 6.0µs | 189.5x |
+| micro-varlen | 436.8µs | 550.8µs | 19.1µs | 21.9µs | 5.3µs | 6.1µs | 82.4x |
+| micro-scan-count | 127.8µs | 236.9µs | 15.8µs | 19.8µs | 3.6µs | 4.2µs | 35.5x |
+| micro-scan-stats | 172.7µs | 221.7µs | 29.6µs | 34.0µs | 17.5µs | 18.1µs | 9.9x |
+
+**micro-er**, dataset `er-n1000-p0.01` (checksum `d3c97598`, 1000 nodes, 10219 edges), fidelity harness-native. Both triangle counts verified against the harness's own counting oracle, zu through zuQL and ladybug through Cypher.
+
+| Query | ladybug p50 | ladybug p99 | zu p50 | zu p99 | zu-capi p50 | zu-capi p99 | zu-capi speedup |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| subgraph (class) | 9.12ms | 14.61ms | 1.30ms | 22.27ms | 0.92ms | 23.39ms | ~9.9x |
+| micro-triangle | 5.84ms | 9.12ms | 0.99ms | 1.30ms | 0.86ms | 0.92ms | 6.8x |
+| **micro-triangle-undirected** | **13.69ms** | **14.86ms** | **21.44ms** | **22.29ms** | **22.45ms** | **23.58ms** | **0.6x** |
+
+**micro-powerlaw**, dataset `powerlaw-n1000-g2.5` (checksum `82425f5a`), fidelity harness-native.
+
+| Query | ladybug p50 | ladybug p99 | zu p50 | zu p99 | zu-capi p50 | zu-capi p99 | zu-capi speedup |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| point-read (class) | 50.5µs | 102.7µs | 39.6µs | 55.8µs | 26.5µs | 30.7µs | 1.9x |
+| traversal (class) | 548.5µs | 1361.2µs | 18.3µs | 55.5µs | 5.7µs | 27.8µs | 96.2x |
+| subgraph (class) | 1.45ms | 7.00ms | 0.15ms | 2.19ms | 0.13ms | 2.23ms | ~11x |
+| micro-point | 52.0µs | 77.7µs | 43.1µs | 63.9µs | 28.8µs | 30.7µs | 1.8x |
+| micro-point-miss | 49.5µs | 128.5µs | 35.5µs | 44.5µs | 23.5µs | 27.8µs | 2.1x |
+| micro-khop1 | 180.5µs | 267.4µs | 31.5µs | 42.4µs | 19.6µs | 24.8µs | 9.2x |
+| micro-khop2 | 646.5µs | 1029.3µs | 16.4µs | 22.4µs | 4.9µs | 12.0µs | 131.9x |
+| micro-khop3 | 1156.0µs | 1450.4µs | 18.4µs | 55.5µs | 5.5µs | 28.6µs | 210.2x |
+| micro-varlen | 456.6µs | 671.8µs | 17.0µs | 70.8µs | 4.9µs | 43.8µs | 93.2x |
+| micro-triangle | 1451.0µs | 1998.5µs | 132.0µs | 150.8µs | 119.4µs | 130.2µs | 12.2x |
+| micro-triangle-undirected | 6.32ms | 7.08ms | 2.08ms | 2.19ms | 2.17ms | 2.26ms | 2.9x |
+| micro-sp | 538.0µs | 1120.1µs | SKIP | SKIP | SKIP | SKIP | no-shortest-paths |
+| micro-sp-bidir | 685.1µs | 1247.2µs | SKIP | SKIP | SKIP | SKIP | no-shortest-paths |
+
+### What the subprocess plane costs
+
+The two zu columns above are the same engine, so the difference between them is transport and nothing else. On micro-read, per query, p50:
+
+| Query | zu p50 | zu-capi p50 | frame cost |
+| --- | --- | --- | --- |
+| micro-point | 43.0µs | 29.2µs | 13.8µs |
+| micro-point-miss | 35.2µs | 23.2µs | 12.0µs |
+| micro-edge | 26.1µs | 14.5µs | 11.6µs |
+| micro-khop1 | 32.7µs | 19.8µs | 12.9µs |
+| micro-khop2 | 17.7µs | 4.8µs | 12.9µs |
+| micro-khop3 | 19.3µs | 5.6µs | 13.7µs |
+| micro-varlen | 19.1µs | 5.3µs | 13.8µs |
+| micro-scan-count | 15.8µs | 3.6µs | 12.2µs |
+| micro-scan-stats | 29.6µs | 17.5µs | 12.1µs |
+
+It is a flat 12µs to 14µs, which is what a JSON frame down a pipe and back costs, and it does not scale with the query. That is most of the answer on the cheap reads: `micro-scan-count` spends 3.6µs in the engine and 12.2µs in the pipe, so over the subprocess plane it looks four times slower than it is. On anything that takes a millisecond the frame disappears into the noise, which is why the triangle rows barely move between the two columns.
+
+The in-process adapter does not change any conclusion against ladybug, it sharpens them. Every win gets larger, the one loss gets larger too, and no result flips.
+
+### 32 core desktop, zu 0.0.1 against Neo4j 2026.06.0
+
+sf1 scale, Ubuntu under WSL2, Neo4j in Docker on the same machine reached over Bolt at `bolt://127.0.0.1:7687`.
+
+**micro-read**, dataset `grid-100x100` (checksum `fd000c2a`), fidelity harness-native. Neo4j answered every query through Cypher.
+
+| Query | neo4j p50 | neo4j p99 | zu p50 | zu p99 | zu speedup |
+| --- | --- | --- | --- | --- | --- |
+| point-read (class) | 592.6µs | 1044.9µs | 80.2µs | 287.7µs | 7.4x |
+| traversal (class) | 612.3µs | 1126.5µs | 59.1µs | 175.8µs | 10.4x |
+| aggregation (class) | 0.68ms | 9.59ms | 0.08ms | 0.40ms | ~8.5x |
+| micro-point | 608.4µs | 973.5µs | 98.4µs | 323.0µs | 6.2x |
+| micro-point-miss | 539.6µs | 734.3µs | 75.2µs | 178.0µs | 7.2x |
+| micro-edge | 631.0µs | 1083.3µs | 70.8µs | 242.2µs | 8.9x |
+| micro-khop1 | 601.0µs | 965.6µs | 80.8µs | 234.9µs | 7.4x |
+| micro-khop2 | 627.1µs | 1070.3µs | 54.7µs | 248.0µs | 11.5x |
+| micro-khop3 | 672.1µs | 1311.9µs | 53.0µs | 115.3µs | 12.7x |
+| micro-varlen | 583.5µs | 1074.1µs | 54.2µs | 162.2µs | 10.8x |
+| micro-scan-count | 519.7µs | 684.2µs | 49.3µs | 83.8µs | 10.5x |
+| micro-scan-stats | 1.38ms | 9.59ms | 0.11ms | 0.40ms | ~12.5x |
+
+**micro-er**, dataset `er-n10000-p0.001` (checksum `ba0384b0`, 10000 nodes, 99770 edges), fidelity harness-native.
+
+| Query | neo4j p50 | neo4j p99 | zu p50 | zu p99 | zu speedup |
+| --- | --- | --- | --- | --- | --- |
+| subgraph (class) | 143.79ms | 1119.85ms | 3.24ms | 89.61ms | 44.4x |
+| micro-triangle | 143.33ms | 182.61ms | 3.17ms | 3.90ms | 45.2x |
+| micro-triangle-undirected | 1100.43ms | 1119.85ms | 78.47ms | 89.61ms | 14.0x |
+
+Memgraph was in the same run and never came up. Its managed container reported no 7687/tcp binding and the fallback URI at 7688 refused the connection, so it produced no numbers and the run exited with an engine failure. That is a harness bug on this host, not a Memgraph result, and it is tracked as such.
+
+### What does not run yet
+
+A workload only produces numbers for an engine that has text in that engine's dialect chain. There is no silent fallback: if the chain has nothing, the query reports SKIP with a reason, and the reason is in the result file. The table below is the same for `zu` and `zu-capi`, since coverage is a property of the engine and its dialect, not of the plane it is reached over.
+
+| Workload | zu | reason |
+| --- | --- | --- |
+| micro-read, micro-uniform, micro-er, micro-powerlaw, micro-mix | runs | zuQL text present |
+| micro-sp, micro-sp-bidir | SKIP | `no-shortest-paths` |
+| lsqb (q1 to q9) | SKIP | `no-dialect-text` |
+| snb-short, snb-complex, snb-bi, snb-mix, snb-update | SKIP | `no-dialect-text` |
+| linkbench, fb-read, fb-write | SKIP | `no-dialect-text` |
+| galytics, galytics-w, gap, g500 | SKIP | `missing-algorithm:*` |
+
+The labelled workloads are the larger of the two gaps. zu's loader takes a two column edge list, so a dataset with several node labels and several relationship types flattens into one node table and one edge table, and the LSQB and SNB texts have nothing to bind to. Covering them needs a labelled load path first and the dialect texts second.
+
+### The gap being worked on
+
+`micro-triangle-undirected` on the ER graph is the only query in the tables above where zu loses. The query is the undirected triangle with an ordering predicate on the `id` property and a `count(DISTINCT [a.id, b.id, c.id])` on top.
+
+Running zu's own `explain_analyze` on the 1k ER graph puts 16.27ms of the 29.79ms total in one place: the `b.id < c.id` filter, over 217664 rows, about 75ns a row. The pattern matching is not the problem. The expand that feeds that filter costs 3.90ms and the join that closes the triangle costs 4.56ms. The filter is slow because that plan shape falls back to the row-at-a-time engine, where each property read walks a hash map for the table, a name scan for the column, and a block decode. The fix is to resolve the column once and read the ids in bulk, which is what the vectorized path already does for the shapes it covers.
+
+The in-process column confirms the diagnosis. 22.45ms in-process against 21.44ms over the subprocess plane is the same number twice, within run to run noise, because a 13µs frame is nothing next to a 20ms query. There is no transport to blame here and no transport to win back. It is 16ms of property reads in the wrong loop.
+
+### Reproducing
+
+The two comparison sets above:
+
+```
+cargo build --release -p zu-capi        # in the zu repo, builds libzu
+go build -tags "ladybug zuinproc" -o gb ./cmd/graph-bench
+./gb run --workload micro-read --engines zu,zu-capi,ladybug
+./gb run --workload micro-er --engines zu,zu-capi,ladybug
+./gb run --workload micro-powerlaw --engines zu,zu-capi,ladybug
+```
+
+```
+go build -tags bolt -o gb ./cmd/graph-bench
+docker compose -f docker/docker-compose.yml up -d neo4j
+NEO4J_URI=bolt://127.0.0.1:7687 ./gb run --workload micro-read --engines zu,neo4j
+NEO4J_URI=bolt://127.0.0.1:7687 ./gb run --workload micro-er --engines zu,neo4j
+```
+
+Setting `NEO4J_URI` is not optional today. Without it the harness starts its own managed container, and on both hosts tried that container came up on a mapped port the harness then could not reach, which fails the run before any query is measured.
+
+Any saved result re-renders without re-running:
+
+```
+./gb report --file results/micro-er/smoke/20260812T013611Z-ladybug-inproc-d3c97598.json
+./gb compare --files results/micro-er/smoke/20260812T013607Z-zu-subprocess-d3c97598.json,results/micro-er/smoke/20260812T013611Z-ladybug-inproc-d3c97598.json
+```
+
 ## Status
 
 The core is in place. Milestones M1-M7 are merged; M8 (first published cross-engine result) is in progress.
@@ -25,17 +202,19 @@ The core is in place. Milestones M1-M7 are merged; M8 (first published cross-eng
 What works today:
 
 - `generate` -- materializes any of five synthetic graph types (uniform, power-law, ER, grid, RMAT) to the canonical CSV layout with a content-verified manifest.
-- `list workloads` -- shows all registered workloads (micro, lsqb, snb-short, snb-complex, snb-write, snb-mix).
+- `list workloads` -- shows all registered workloads across the micro, lsqb, snb, linkbench, finbench, galytics, gap, and g500 families.
 - `list engines` -- shows the registered engine adapters and their build tags.
+- `run --workload micro-er --engines zu,ladybug` -- loads, verifies, and measures, then writes the result JSON. This produced every number in the results section above.
 - `report --file result.json` -- re-renders any saved JSON result in table, Markdown, CSV, or JSON.
 - `compare --files a.json,b.json` -- puts two or more result sets side by side with optional Bolt plane-overhead section.
 - `gate --file result.json --point-read-budget 1ms` -- checks p99 against per-class budgets and exits 2 on violations.
 
 What is not yet wired:
 
-- `run` -- flag surface is complete; engine execution requires an adapter import. The gr in-process adapter exists (`adapter/gr`); the run command stub will be connected in the next slice.
+- Managed containers -- the Bolt engines only work against a server the caller points them at with `NEO4J_URI` or `MEMGRAPH_URI`. Left to start their own container, both fail to bind a reachable port.
+- Dialect coverage -- zu has text for the micro family only, so the labelled workloads skip. See the coverage table above.
 - LDBC SNB SF1 pin -- the URL and checksums in `dataset/ldbc/pins/snb-sf1.json` are placeholders until the first verified dataset run.
-- First published cross-engine result in the lineage.
+- First published cross-engine result in the lineage. The tables above are a working run on developer machines, not a controlled-machine publication.
 
 The spec roadmap is at `notes/Spec/2060/bench/10-roadmap.md`.
 
@@ -62,12 +241,30 @@ go build ./...
 go test ./...
 ```
 
-The default build is pure Go with no cgo and no dependency beyond the standard library, the CLI framework, and `gr`. Adapters for other engines sit behind build tags (`bolt`, `kuzu`, `duckpgq`, `age`) so they never enter the default binary.
+The default build is pure Go with no cgo and no dependency beyond the standard library and the CLI framework. It drives zu over the subprocess plane. Adapters that need a driver or cgo sit behind build tags so they never enter the default binary.
 
-To include the Bolt adapters (Neo4j, Memgraph, gr-bolt):
+To include the Bolt adapters (Neo4j, Memgraph):
 
 ```
 go build -tags bolt ./...
+```
+
+To include the in-process ladybug adapter, which links liblbug through cgo:
+
+```
+go build -tags ladybug ./...
+```
+
+To include the in-process zu adapter, which links libzu through cgo and registers as `zu-capi`:
+
+```
+go build -tags zuinproc ./...
+```
+
+It expects a sibling zu checkout built with `cargo build --release -p zu-capi`. Anywhere else, point the flags at the header and the library:
+
+```
+CGO_CFLAGS="-I$ZU_INCLUDE" CGO_LDFLAGS="-L$ZU_LIB -lzu -Wl,-rpath,$ZU_LIB" go build -tags zuinproc ./...
 ```
 
 ## Spec

@@ -5,7 +5,9 @@
 //
 // Bolt-plane adapters (neo4j, memgraph) register in engines_bolt.go under
 // -tags bolt; the Ladybug in-process adapter self-registers via its own init
-// and is blank-imported in engines_ladybug.go under -tags ladybug.
+// and is blank-imported in engines_ladybug.go under -tags ladybug. The same
+// zu engine reached in-process through libzu registers as "zu-capi" in
+// engines_zuinproc.go under -tags zuinproc.
 package main
 
 import (

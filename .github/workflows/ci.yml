@@ -51,3 +51,8 @@ jobs:
       # parses and vets so tag rot is caught without the library installed.
       - name: vet (ladybug tag, no link)
         run: go vet -tags ladybug ./engine/ladybug/ || echo "::warning::ladybug vet skipped (liblbug not present)"
+
+      # Same for the zuinproc tag: it needs libzu and its header from a zu
+      # checkout, which CI does not have.
+      - name: vet (zuinproc tag, no link)
+        run: go vet -tags zuinproc ./engine/zu/ || echo "::warning::zuinproc vet skipped (libzu not present)"
