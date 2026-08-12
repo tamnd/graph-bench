@@ -36,6 +36,8 @@ func newDoctorCmd() *cobra.Command {
 			fmt.Fprintln(w)
 			doctorLadybug(w)
 			fmt.Fprintln(w)
+			doctorLibzu(w)
+			fmt.Fprintln(w)
 			doctorDriver(w)
 			fmt.Fprintln(w)
 			doctorPins(w)
@@ -55,6 +57,7 @@ func doctorEnv(w io.Writer) {
 		"NEO4J_URI", "NEO4J_USER", "NEO4J_PASS",
 		"MEMGRAPH_URI",
 		"LBUG_INCLUDE", "LBUG_LIB",
+		"ZU_INCLUDE", "ZU_LIB",
 		"GRAPH_BENCH_DATA",
 		"GRAPH_BENCH_SKIP_DOCKER",
 	}
@@ -153,6 +156,47 @@ func doctorLadybug(w io.Writer) {
 		}
 	}
 	fmt.Fprintln(w, "  not found (ladybug build tag will not link)")
+}
+
+// doctorLibzu looks for the libzu shared library and header the zuinproc
+// build tag links against ($ZU_LIB / $ZU_INCLUDE first, then the sibling
+// zu checkout the #cgo lines default to).
+func doctorLibzu(w io.Writer) {
+	fmt.Fprintln(w, "libzu:")
+	libDirs := []string{"../zu/target/release", "../zu/target/debug"}
+	if d := os.Getenv("ZU_LIB"); d != "" {
+		libDirs = append([]string{d}, libDirs...)
+	}
+	lib := findFirst(libDirs, []string{"libzu.dylib", "libzu.so"})
+	if lib == "" {
+		fmt.Fprintln(w, "  library                   not found (zuinproc build tag will not link)")
+	} else {
+		fmt.Fprintf(w, "  library                   %s\n", lib)
+	}
+
+	incDirs := []string{"../zu/crates/zu-capi/include"}
+	if d := os.Getenv("ZU_INCLUDE"); d != "" {
+		incDirs = append([]string{d}, incDirs...)
+	}
+	hdr := findFirst(incDirs, []string{"zu.h"})
+	if hdr == "" {
+		fmt.Fprintln(w, "  header                    not found (build it: cargo build --release -p zu-capi)")
+		return
+	}
+	fmt.Fprintf(w, "  header                    %s\n", hdr)
+}
+
+// findFirst returns the first dir/name pair that exists, or "".
+func findFirst(dirs, names []string) string {
+	for _, dir := range dirs {
+		for _, name := range names {
+			p := filepath.Join(dir, name)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	return ""
 }
 
 // doctorDriver reports the Bolt driver version compiled into this binary,

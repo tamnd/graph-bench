@@ -51,3 +51,64 @@ jobs:
       # parses and vets so tag rot is caught without the library installed.
       - name: vet (ladybug tag, no link)
         run: go vet -tags ladybug ./engine/ladybug/ || echo "::warning::ladybug vet skipped (liblbug not present)"
+
+      # Same for the zuinproc tag: it needs libzu and its header from a zu
+      # checkout. The zu-inproc job below builds those for real; this step
+      # keeps the fast lane honest about tag rot if that job is ever cut.
+      - name: vet (zuinproc tag, no link)
+        run: go vet -tags zuinproc ./engine/zu/ || echo "::warning::zuinproc vet skipped (libzu not present)"
+
+  # The in-process zu adapter is the plane the ladybug comparison is made
+  # on, so it gets built and run for real, not just vetted. zu is public,
+  # so this lane checks it out beside graph-bench (the layout the #cgo
+  # lines default to), builds the CLI for the load path and libzu for the
+  # query path, and runs one smoke workload end to end. A verification
+  # failure or a link failure fails the job.
+  zu-inproc:
+    name: zu inproc (libzu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: graph-bench
+
+      - uses: actions/checkout@v5
+        with:
+          repository: tamnd/zu
+          path: zu
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: graph-bench/go.mod
+          cache: true
+          cache-dependency-path: graph-bench/go.sum
+
+      - name: cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            zu/target
+          key: ${{ runner.os }}-cargo-zu-${{ hashFiles('zu/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-zu-
+
+      - name: build zu cli and libzu
+        working-directory: zu
+        run: cargo build --release -p zu-cli -p zu-capi
+
+      - name: build graph-bench with the zuinproc tag
+        working-directory: graph-bench
+        run: go build -tags zuinproc -o gb ./cmd/graph-bench
+
+      - name: adapter unit tests
+        working-directory: graph-bench
+        env:
+          ZU_BIN: ${{ github.workspace }}/zu/target/release/zu
+        run: go test -tags zuinproc ./engine/zu/ -timeout 10m
+
+      - name: smoke run on the in-process plane
+        working-directory: graph-bench
+        env:
+          ZU_BIN: ${{ github.workspace }}/zu/target/release/zu
+        run: ./gb run --workload micro-read --scale smoke --engines zu-capi --out results
