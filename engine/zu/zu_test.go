@@ -462,3 +462,126 @@ func TestPrimitiveQueriesHelper(t *testing.T) {
 		t.Error(`CanRun("bi14") = true, want false`)
 	}
 }
+
+// propDataset is one rel table with typed property columns, which is the
+// shape whose properties travel with the edges.
+type propDataset struct {
+	dir     string
+	relFile string
+	props   []engine.Column
+	rels    int
+}
+
+func (d *propDataset) Name() string               { return "prop-ds" }
+func (d *propDataset) Checksum() string           { return "sha256:test" }
+func (d *propDataset) Dir() string                { return d.dir }
+func (d *propDataset) Manifest() *engine.Manifest { return nil }
+func (d *propDataset) Schema() engine.Schema {
+	rels := map[string]engine.RelSchema{
+		"LINK": {Files: []string{"rels/LINK.csv"}, Start: "Obj", End: "Obj", Properties: d.props},
+	}
+	if d.rels > 1 {
+		rels["OWNS"] = engine.RelSchema{Files: []string{"rels/OWNS.csv"}, Start: "Obj", End: "Obj"}
+	}
+	return engine.Schema{Rels: rels}
+}
+func (d *propDataset) NodeFiles(string) ([]string, error)               { return nil, nil }
+func (d *propDataset) RelFiles(string) ([]string, error)                { return []string{d.relFile}, nil }
+func (d *propDataset) Params(string) ([]map[string]engine.Value, error) { return nil, nil }
+func (d *propDataset) Statements() []string                             { return nil }
+
+const linkCSV = ":START_ID,:END_ID,:TYPE,ltype:INT64,payload:STRING\n" +
+	"0,1,LINK,3,alpha\n1,2,LINK,4,beta\n2,3,LINK,3,gamma\n"
+
+func writeLinks(t *testing.T) (dir, relFile string) {
+	t.Helper()
+	dir = t.TempDir()
+	relFile = filepath.Join(dir, "LINK.csv")
+	if err := os.WriteFile(relFile, []byte(linkCSV), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir, relFile
+}
+
+func TestLoadKeepsEdgeProperties(t *testing.T) {
+	requireUnix(t)
+	dir, relFile := writeLinks(t)
+	s := start(t, writeFake(t, fakePrimitive))
+	ds := &propDataset{dir: dir, relFile: relFile, props: []engine.Column{
+		{Name: "ltype", Type: "INT64"}, {Name: "payload", Type: "STRING"},
+	}}
+	stats, err := s.Load(context.Background(), ds)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if stats.Method != "copy (edge properties)" {
+		t.Errorf("Method = %q, want copy (edge properties)", stats.Method)
+	}
+	got, err := os.ReadFile(filepath.Join(s.workDir, "edges.csv"))
+	if err != nil {
+		t.Fatalf("materialized file: %v", err)
+	}
+	// The header travels verbatim: it is what names and types the
+	// columns, and a copy that lost it would load the edges and none of
+	// their values.
+	if string(got) != linkCSV {
+		t.Errorf("materialized:\n%q\nwant:\n%q", got, linkCSV)
+	}
+}
+
+func TestLoadFallsBackWhenCopyRefusesTheProperties(t *testing.T) {
+	requireUnix(t)
+	dir, relFile := writeLinks(t)
+	// zu copy refuses edge properties on a file that names a pair twice.
+	// The stub refuses every csv, which is the same path.
+	refuses := strings.Replace(fakePrimitive, `copy)
+  edges="$4"; out="$5"`, `copy)
+  edges="$4"; out="$5"
+  case "$edges" in
+    *.csv) echo "zu copy: invalid argument: edge (1, 2) appears twice" 1>&2; exit 1 ;;
+  esac`, 1)
+	if refuses == fakePrimitive {
+		t.Fatal("the stub's copy arm moved, so this test is not testing the fallback")
+	}
+	s := start(t, writeFake(t, refuses))
+	ds := &propDataset{dir: dir, relFile: relFile, props: []engine.Column{
+		{Name: "ltype", Type: "INT64"},
+	}}
+	stats, err := s.Load(context.Background(), ds)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if stats.Method != "copy (edge properties dropped)" {
+		t.Errorf("Method = %q, want copy (edge properties dropped)", stats.Method)
+	}
+	if stats.Edges != 3 {
+		t.Errorf("Edges = %d, want 3", stats.Edges)
+	}
+}
+
+func TestPropRel(t *testing.T) {
+	int64Col := []engine.Column{{Name: "ltype", Type: "INT64"}}
+	cases := []struct {
+		name string
+		ds   *propDataset
+		want bool
+	}{
+		{"one rel with properties", &propDataset{props: int64Col}, true},
+		{"one rel with no properties", &propDataset{}, false},
+		{"two rel tables", &propDataset{props: int64Col, rels: 2}, false},
+		{"a type zu copy has no column for", &propDataset{
+			props: []engine.Column{{Name: "at", Type: "DATETIME"}},
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			typ, ok := propRel(tc.ds)
+			if ok != tc.want {
+				t.Fatalf("propRel = %q, %v, want ok %v", typ, ok, tc.want)
+			}
+			if ok && typ != "LINK" {
+				t.Errorf("propRel = %q, want LINK", typ)
+			}
+		})
+	}
+}

@@ -53,7 +53,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -147,11 +146,11 @@ func (s *inprocSession) Begin(ctx context.Context, mode engine.AccessMode) (engi
 // plane can be told apart from a subprocess run in the stamped condition.
 func (s *inprocSession) Calibrate(ctx context.Context) time.Duration { return 0 }
 
-// Load bulk-loads through the CLI, the same edge list and the same
-// `zu copy --reorder degree` the subprocess adapter uses, then drops any
-// open session so the next query opens the file that copy just wrote.
-// libzu has no load entry point; when it grows one this moves in-process
-// too. Load is outside every timed region either way.
+// Load bulk-loads through the CLI, the same materialization and the same
+// `zu copy --reorder degree` the subprocess adapter uses, edge properties
+// included, then drops any open session so the next query opens the file
+// that copy just wrote. libzu has no load entry point; when it grows one
+// this moves in-process too. Load is outside every timed region either way.
 func (s *inprocSession) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,19 +162,12 @@ func (s *inprocSession) Load(ctx context.Context, ds engine.Dataset) (engine.Loa
 			"zu-capi: dataset %q is statements-only; libzu has no write surface yet, run it on the zu subprocess adapter", ds.Name())
 	}
 
-	edgesPath := filepath.Join(s.workDir, "edges.txt")
-	counted, err := materializeEdges(ds, edgesPath)
+	stats, err := copyDataset(ctx, "zu-capi", s.bin, s.workDir, s.dbPath, ds)
 	if err != nil {
 		return engine.LoadStats{}, err
 	}
-	start := time.Now()
-	out, err := exec.CommandContext(ctx, s.bin,
-		"copy", "--reorder", "degree", edgesPath, s.dbPath).CombinedOutput()
-	if err != nil {
-		return engine.LoadStats{}, fmt.Errorf("zu-capi: copy failed: %v\n%s", err, out)
-	}
 	s.closeSessionLocked()
-	return parseCopyStats(string(out), s.dbPath, time.Since(start), counted), nil
+	return stats, nil
 }
 
 // Exec runs one operation as a prepared statement: compile on the first

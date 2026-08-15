@@ -19,10 +19,20 @@ import (
 )
 
 // Load bulk-loads the dataset with zu's documented best practice (F2):
-// materialize the canonical rel files into one 2-column whitespace edge
-// list and run `zu copy --reorder degree`. String ids map to themselves;
-// zu copy keys them. LoadStats come from copy's own stats output, with
-// liberal fallbacks (file size via os.Stat, wall-clock duration).
+// materialize the canonical rel files into one edge list and run
+// `zu copy --reorder degree`. String ids map to themselves; zu copy keys
+// them. LoadStats come from copy's own stats output, with liberal
+// fallbacks (file size via os.Stat, wall-clock duration).
+//
+// A dataset with one rel table that carries properties keeps them: the
+// materialized file is a canonical CSV with its typed header, which zu
+// copy reads as edge property columns, and a query can then read an
+// edge's values. Anything else flattens to the 2-column whitespace list,
+// because zu copy builds one edge table and addresses an edge property
+// by the endpoint pair, so a second rel table has nowhere to go and a
+// pair named twice has no one row to hold the values. That last one is
+// only visible to copy, so a load that trips it retries flat and says so
+// in Method rather than failing the run.
 //
 // Statements-only datasets need a statement executor: in shell or query
 // mode each setup statement runs through Exec (Method "statements");
@@ -31,21 +41,87 @@ func (s *Session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats
 	if ds.Dir() == "" {
 		return s.loadStatements(ctx, ds)
 	}
+	return copyDataset(ctx, "zu", s.bin, s.workDir, s.dbPath, ds)
+}
 
-	edgesPath := filepath.Join(s.workDir, "edges.txt")
+// copyDataset is the whole bulk-load path, shared by both planes: the
+// in-process adapter loads through the CLI too, so it has to make the same
+// choice about edge properties or the two planes would not be measuring the
+// same database. label prefixes the errors with the adapter's name.
+func copyDataset(ctx context.Context, label, bin, workDir, dbPath string, ds engine.Dataset) (engine.LoadStats, error) {
+	if typ, ok := propRel(ds); ok {
+		edgesPath := filepath.Join(workDir, "edges.csv")
+		counted, err := materializeProps(ds, typ, edgesPath)
+		if err != nil {
+			return engine.LoadStats{}, err
+		}
+		start := time.Now()
+		out, err := exec.CommandContext(ctx, bin,
+			"copy", "--reorder", "degree", edgesPath, dbPath).CombinedOutput()
+		if err == nil {
+			stats := parseCopyStats(string(out), dbPath, time.Since(start), counted)
+			stats.Method = "copy (edge properties)"
+			return stats, nil
+		}
+		propErr := fmt.Errorf("%s: copy with edge properties failed: %v\n%s", label, err, out)
+		stats, flatErr := copyFlat(ctx, label, bin, workDir, dbPath, ds)
+		if flatErr != nil {
+			return engine.LoadStats{}, propErr
+		}
+		stats.Method = "copy (edge properties dropped)"
+		return stats, nil
+	}
+
+	return copyFlat(ctx, label, bin, workDir, dbPath, ds)
+}
+
+// copyFlat is the 2-column whitespace path: every rel table's endpoints
+// in one file, no properties.
+func copyFlat(ctx context.Context, label, bin, workDir, dbPath string, ds engine.Dataset) (engine.LoadStats, error) {
+	edgesPath := filepath.Join(workDir, "edges.txt")
 	counted, err := materializeEdges(ds, edgesPath)
 	if err != nil {
 		return engine.LoadStats{}, err
 	}
 
 	start := time.Now()
-	out, err := exec.CommandContext(ctx, s.bin,
-		"copy", "--reorder", "degree", edgesPath, s.dbPath).CombinedOutput()
+	out, err := exec.CommandContext(ctx, bin,
+		"copy", "--reorder", "degree", edgesPath, dbPath).CombinedOutput()
 	if err != nil {
-		return engine.LoadStats{}, fmt.Errorf("zu: copy failed: %v\n%s", err, out)
+		return engine.LoadStats{}, fmt.Errorf("%s: copy failed: %v\n%s", label, err, out)
 	}
-	stats := parseCopyStats(string(out), s.dbPath, time.Since(start), counted)
+	stats := parseCopyStats(string(out), dbPath, time.Since(start), counted)
 	return stats, nil
+}
+
+// zuPropTypes are the header types zu copy reads as an edge property
+// column. A dataset column of any other type keeps the flat path, since
+// zu refuses a header type it has no column for rather than guessing.
+var zuPropTypes = map[string]bool{
+	"INT64": true, "FLOAT64": true, "BOOL": true, "STRING": true,
+}
+
+// propRel names the one rel table whose properties can travel with the
+// edges, and reports whether there is one: exactly one rel table in the
+// dataset, at least one property on it, and every property a type zu
+// copy reads.
+func propRel(ds engine.Dataset) (string, bool) {
+	rels := ds.Schema().Rels
+	if len(rels) != 1 {
+		return "", false
+	}
+	for typ, rel := range rels {
+		if len(rel.Properties) == 0 {
+			return "", false
+		}
+		for _, col := range rel.Properties {
+			if !zuPropTypes[strings.ToUpper(col.Type)] {
+				return "", false
+			}
+		}
+		return typ, true
+	}
+	return "", false
 }
 
 // loadStatements seeds a statements-only dataset by executing each setup
@@ -124,6 +200,79 @@ func materializeEdges(ds engine.Dataset, dst string) (int64, error) {
 		return 0, fmt.Errorf("zu: write edge list: %w", err)
 	}
 	return total, nil
+}
+
+// materializeProps concatenates one rel table's CSV files into a single
+// canonical CSV at dst, header first and every file's own header row
+// dropped, so zu copy sees one file with one typed header. Returns the
+// number of edge rows written.
+func materializeProps(ds engine.Dataset, typ, dst string) (int64, error) {
+	files, err := ds.RelFiles(typ)
+	if err != nil {
+		return 0, fmt.Errorf("zu: rel files for %q: %w", typ, err)
+	}
+	if len(files) == 0 {
+		return 0, fmt.Errorf("zu: rel table %q has no files", typ)
+	}
+
+	f, err := os.Create(dst)
+	if err != nil {
+		return 0, fmt.Errorf("zu: create edge csv: %w", err)
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+
+	var total int64
+	for i, file := range files {
+		n, err := appendRows(w, file, i == 0)
+		if err != nil {
+			return 0, fmt.Errorf("zu: reading %s: %w", file, err)
+		}
+		total += n
+	}
+	if err := w.Flush(); err != nil {
+		return 0, fmt.Errorf("zu: write edge csv: %w", err)
+	}
+	return total, nil
+}
+
+// appendRows copies one rel CSV through verbatim, keeping its header
+// only for the first file of the table. Returns the data rows written.
+func appendRows(w *bufio.Writer, path string, keepHeader bool) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	r := bufio.NewScanner(f)
+	r.Buffer(make([]byte, 0, 64<<10), 16<<20)
+	var n int64
+	first := true
+	for r.Scan() {
+		line := r.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if first {
+			first = false
+			if isHeaderRow(strings.Split(line, ",")) {
+				if !keepHeader {
+					continue
+				}
+				if _, err := w.WriteString(line + "\n"); err != nil {
+					return n, err
+				}
+				continue
+			}
+			return n, fmt.Errorf("no header row, so the property columns have no names")
+		}
+		if _, err := w.WriteString(line + "\n"); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, r.Err()
 }
 
 // appendEdges writes "src dst" lines from one rel CSV's first two

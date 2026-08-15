@@ -13,6 +13,15 @@
 // native counts would carry its own dialect text and disclose the
 // modeling difference per the spec.
 //
+// The three association reads carry a zu text as well, and it names the
+// tables node and edge rather than Obj and LINK: zu is bulk-loaded by
+// zu copy, which builds one node table and one edge table out of the
+// edge list and keys the nodes by the id column, so those are the names
+// the graph has. The pattern, the predicate on the association type and
+// the projection are the same query. The three that read object
+// properties have no zu text, because zu copy loads the rel file and
+// nothing puts the node table's columns in the store yet.
+//
 // Access skew: the curated pools (BuildPools) approximate LinkBench's
 // hot-spot distribution by drawing the hottest sources of the power-law
 // out-link distribution, pre-drawn deterministically so every engine
@@ -105,6 +114,9 @@ func getLink() *workload.Query {
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (:Obj {id: $src})-[l:LINK {ltype: $ltype}]->(:Obj {id: $dst})
 RETURN count(l) AS found`,
+			engine.ZuQL: `MATCH (:node {id: $src})-[l:edge]->(:node {id: $dst})
+WHERE l.ltype = $ltype
+RETURN count(l) AS found`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -150,6 +162,11 @@ WHERE l.ltype = $ltype
 RETURN b.id AS dst, l.time AS time, l.payload AS payload
 ORDER BY time DESC, payload ASC
 LIMIT 10000`,
+			engine.ZuQL: `MATCH (:node {id: $src})-[l:edge]->(b:node)
+WHERE l.ltype = $ltype
+RETURN b.id AS dst, l.time AS time, l.payload AS payload
+ORDER BY time DESC, payload ASC
+LIMIT 10000`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -180,6 +197,9 @@ func countLink() *workload.Query {
 		PoolKey: "lb-count",
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (:Obj {id: $src})-[l:LINK]->(:Obj)
+WHERE l.ltype = $ltype
+RETURN count(l) AS n`,
+			engine.ZuQL: `MATCH (:node {id: $src})-[l:edge]->(:node)
 WHERE l.ltype = $ltype
 RETURN count(l) AS n`,
 		},
