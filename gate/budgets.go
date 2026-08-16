@@ -71,6 +71,17 @@ const (
 	// DefaultFlatnessFactor bounds the small-vs-large dataset latency
 	// ratio for PointRead: an index that works is flat.
 	DefaultFlatnessFactor = 2.0
+
+	// DefaultNoisePercentile is where the suggested noise floor is taken
+	// from the per-query spreads: high enough that the floor covers most
+	// of the suite, low enough that one pathological query does not set
+	// the bar for every other.
+	DefaultNoisePercentile = 90.0
+
+	// Indeterminate is the Violation kind for a difference the gate will
+	// not rule on, because the machine's own run-to-run spread is wider
+	// than the difference. It never fails a run.
+	Indeterminate = "indeterminate"
 )
 
 // Exit codes returned by the gate verb (spec 08 §9).

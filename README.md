@@ -212,6 +212,13 @@ What works today:
 - `report --file result.json` -- re-renders any saved JSON result in table, Markdown, CSV, or JSON.
 - `compare --files a.json,b.json` -- puts two or more result sets side by side with optional Bolt plane-overhead section.
 - `gate --file result.json --point-read-budget 1ms` -- checks p99 against per-class budgets and exits 2 on violations.
+- `noise --results results --engine zu --workload micro-read --scale smoke` -- reads repeated runs of one unchanged binary and reports how much they disagreed, per query and per metric, widest first. It prints a suggested `--noise-floor` for `gate`.
+
+### Noise, and what a regression number is worth
+
+A regression gate compares two numbers and calls the difference a change in the code. That is only true when the machine would have produced the same number twice, and a developer laptop often will not. Run `noise` before trusting a failed gate: it measures the spread across repeated runs of a single binary, which is the floor under every regression the gate can report. If the floor is at or above the regression factor, the gate cannot tell a slower engine from a busier machine, and it says so instead of guessing.
+
+Passing that measured floor to `gate --noise-floor` moves differences inside it out of the violations list and into a separate section, reported and not ruled on. They are not excused: a finding inside the floor is the harness saying this run cannot answer the question, which is a different thing from saying the answer is no. Budget checks and verification integrity are unaffected, because neither is a comparison between two runs. The default is zero, no floor, which is the right setting for the controlled machine the full matrix runs on.
 
 What is not yet wired:
 

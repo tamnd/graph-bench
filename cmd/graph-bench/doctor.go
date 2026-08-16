@@ -143,7 +143,7 @@ func doctorLadybug(w io.Writer) {
 	fmt.Fprintln(w, "liblbug:")
 	var dirs []string
 	if d := os.Getenv("LBUG_LIB"); d != "" {
-		dirs = append(dirs, d)
+		dirs = append(dirs, searchDir(d))
 	}
 	dirs = append(dirs, "/usr/local/lib", "/opt/homebrew/lib", "/usr/lib")
 	for _, dir := range dirs {
@@ -165,7 +165,7 @@ func doctorLibzu(w io.Writer) {
 	fmt.Fprintln(w, "libzu:")
 	libDirs := []string{"../zu/target/release", "../zu/target/debug"}
 	if d := os.Getenv("ZU_LIB"); d != "" {
-		libDirs = append([]string{d}, libDirs...)
+		libDirs = append([]string{searchDir(d)}, libDirs...)
 	}
 	lib := findFirst(libDirs, []string{"libzu.dylib", "libzu.so"})
 	if lib == "" {
@@ -176,7 +176,7 @@ func doctorLibzu(w io.Writer) {
 
 	incDirs := []string{"../zu/crates/zu-capi/include"}
 	if d := os.Getenv("ZU_INCLUDE"); d != "" {
-		incDirs = append([]string{d}, incDirs...)
+		incDirs = append([]string{searchDir(d)}, incDirs...)
 	}
 	hdr := findFirst(incDirs, []string{"zu.h"})
 	if hdr == "" {
@@ -184,6 +184,19 @@ func doctorLibzu(w io.Writer) {
 		return
 	}
 	fmt.Fprintf(w, "  header                    %s\n", hdr)
+}
+
+// searchDir turns a path from the environment into a directory to search. The
+// cgo lines want $ZU_LIB and friends to name a directory, because they go
+// straight into -L and -I, but a reader with the library in front of them
+// reaches for its full path, and being wrong about that used to look like the
+// variable had been ignored: doctor would report the sibling checkout while
+// the environment pointed somewhere else entirely.
+func searchDir(p string) string {
+	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		return filepath.Dir(p)
+	}
+	return p
 }
 
 // findFirst returns the first dir/name pair that exists, or "".

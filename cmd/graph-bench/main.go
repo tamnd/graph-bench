@@ -52,6 +52,7 @@ func newRootCmd() *cobra.Command {
 		newReportCmd(),
 		newCompareCmd(),
 		newGateCmd(),
+		newNoiseCmd(),
 		newDoctorCmd(),
 	)
 	return root
