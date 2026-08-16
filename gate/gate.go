@@ -10,9 +10,13 @@ import (
 	"github.com/tamnd/graph-bench/verify"
 )
 
-// Violation is one gate failure with enough context to act on.
+// Violation is one gate finding with enough context to act on. All kinds but
+// "indeterminate" are failures.
 type Violation struct {
-	// Kind is "budget", "regression", "flatness", or "verification".
+	// Kind is "budget", "regression", "flatness", "verification", or
+	// "indeterminate". The last one is a measurement the gate declines to
+	// rule on because the machine it ran on is noisier than the difference
+	// being claimed; it is reported and does not fail the run.
 	Kind string
 
 	// Where names the query or class the violation is about.
@@ -33,10 +37,14 @@ type Decision struct {
 }
 
 // ExitCode maps the decision to the process exit code (spec 08 §9):
-// verification failures dominate budget/regression violations.
+// verification failures dominate budget/regression violations, and
+// indeterminate findings decide nothing.
 func (d Decision) ExitCode() int {
 	code := ExitPass
 	for _, v := range d.Violations {
+		if v.Kind == Indeterminate {
+			continue
+		}
 		if v.Kind == "verification" {
 			return ExitVerification
 		}
@@ -45,7 +53,26 @@ func (d Decision) ExitCode() int {
 	return code
 }
 
-func (d Decision) Pass() bool { return len(d.Violations) == 0 }
+func (d Decision) Pass() bool { return len(d.Failures()) == 0 }
+
+// Failures are the findings that fail the run.
+func (d Decision) Failures() []Violation { return d.byKind(false) }
+
+// Undecided are the findings the gate refused to rule on, because the
+// difference is smaller than the run-to-run spread the machine was measured
+// to have. They are the answer to "is this a regression or is this the
+// laptop", and the honest answer is that this run cannot tell.
+func (d Decision) Undecided() []Violation { return d.byKind(true) }
+
+func (d Decision) byKind(indeterminate bool) []Violation {
+	var out []Violation
+	for _, v := range d.Violations {
+		if (v.Kind == Indeterminate) == indeterminate {
+			out = append(out, v)
+		}
+	}
+	return out
+}
 
 // Options tunes the gate.
 type Options struct {
@@ -56,6 +83,19 @@ type Options struct {
 	// FlatnessFactor bounds the small-vs-large PointRead latency ratio;
 	// 0 means DefaultFlatnessFactor.
 	FlatnessFactor float64
+
+	// NoiseFloor is the run-to-run spread the machine running the gate was
+	// measured to have, as a factor: 1.8 means two runs of one unchanged
+	// binary have been seen to differ by 1.8x. A ratio over the regression
+	// factor but within this is reported as indeterminate rather than as a
+	// regression, because a gate cannot honestly call a difference it could
+	// have produced by running the same binary twice. Zero disables the
+	// check and every ratio over the factor is a regression, which is the
+	// right default for the controlled machine the full matrix runs on.
+	//
+	// Measure it, do not guess it: `graph-bench noise` runs one engine
+	// repeatedly and prints the floor its numbers support.
+	NoiseFloor float64
 }
 
 func (o Options) regression() float64 {
@@ -138,14 +178,25 @@ func CheckRegression(res, baseline measure.Result, opts Options) []Violation {
 			if was <= 0 {
 				return
 			}
-			if ratio := float64(now) / float64(was); ratio > factor {
-				out = append(out, Violation{
-					Kind:  "regression",
-					Where: id,
-					Detail: fmt.Sprintf("%s %v vs baseline %v (%.2fx > %.2fx allowed)",
-						metric, now, was, ratio, factor),
-				})
+			ratio := float64(now) / float64(was)
+			if ratio <= factor {
+				return
 			}
+			if opts.NoiseFloor > 0 && ratio <= opts.NoiseFloor {
+				out = append(out, Violation{
+					Kind:  Indeterminate,
+					Where: id,
+					Detail: fmt.Sprintf("%s %v vs baseline %v (%.2fx > %.2fx allowed, but within the %.2fx noise floor)",
+						metric, now, was, ratio, factor, opts.NoiseFloor),
+				})
+				return
+			}
+			out = append(out, Violation{
+				Kind:  "regression",
+				Where: id,
+				Detail: fmt.Sprintf("%s %v vs baseline %v (%.2fx > %.2fx allowed)",
+					metric, now, was, ratio, factor),
+			})
 		}
 		check("p50", stat.P50, base.P50)
 		check("p99", stat.P99, base.P99)

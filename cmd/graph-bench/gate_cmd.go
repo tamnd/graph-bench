@@ -30,6 +30,7 @@ func newGateCmd() *cobra.Command {
 		gateEngine string
 		wlFilter   string
 		regression float64
+		noiseFloor float64
 	)
 	cmd := &cobra.Command{
 		Use:   "gate",
@@ -82,18 +83,32 @@ func newGateCmd() *cobra.Command {
 				d.Violations = append(d.Violations, gate.CheckBudgets(res, plane, doc.Workload)...)
 				if base, ok := baseDocs[doc.Workload]; ok {
 					d.Violations = append(d.Violations,
-						gate.CheckRegression(res, docToResult(base), gate.Options{RegressionFactor: regression})...)
+						gate.CheckRegression(res, docToResult(base), gate.Options{
+							RegressionFactor: regression,
+							NoiseFloor:       noiseFloor,
+						})...)
 				}
 				d.Violations = append(d.Violations, checkDocVerification(doc, baseDocs[doc.Workload])...)
 			}
 
 			out := cmd.OutOrStdout()
+			// Findings inside the noise floor are printed either way: they
+			// are the difference between a run that passed and a run that
+			// passed because the machine could not tell.
+			if undecided := d.Undecided(); len(undecided) > 0 {
+				fmt.Fprintf(out, "gate: %s: %d finding(s) inside the %.2fx noise floor, not ruled on:\n",
+					gateEngine, len(undecided), noiseFloor)
+				for _, v := range undecided {
+					fmt.Fprintf(out, "  %s\n", v)
+				}
+			}
+			failures := d.Failures()
 			if d.Pass() {
 				fmt.Fprintf(out, "gate: %s: all checks passed (%d workload(s))\n", gateEngine, len(docs))
 				return nil
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "gate: %s: %d violation(s):\n", gateEngine, len(d.Violations))
-			for _, v := range d.Violations {
+			fmt.Fprintf(cmd.ErrOrStderr(), "gate: %s: %d violation(s):\n", gateEngine, len(failures))
+			for _, v := range failures {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", v)
 			}
 			return gateErr(d.ExitCode())
@@ -107,6 +122,8 @@ func newGateCmd() *cobra.Command {
 	f.StringVar(&wlFilter, "workload", "", "gate only this workload")
 	f.Float64Var(&regression, "regression-factor", gate.DefaultRegressionFactor,
 		"allowed p50/p99 growth over the baseline")
+	f.Float64Var(&noiseFloor, "noise-floor", 0,
+		"this machine's measured run-to-run spread; differences within it are reported, not failed (see 'graph-bench noise')")
 	return cmd
 }
 
