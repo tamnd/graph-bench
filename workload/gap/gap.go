@@ -305,7 +305,10 @@ func bcQuery() *workload.Query {
 func sourcePool(sources []string) *workload.PoolSource {
 	pool := make([]workload.Params, len(sources))
 	for i, s := range sources {
-		pool[i] = workload.Params{"source": s}
+		// IDValue, not the raw token: a curated pool binds a numeric
+		// id as a number, and an engine with typed parameters is
+		// entitled to the same value from either pool.
+		pool[i] = workload.Params{"source": workload.IDValue(s)}
 	}
 	return workload.NewPoolSource(pool)
 }

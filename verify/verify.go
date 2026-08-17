@@ -143,13 +143,6 @@ const poisonedReason = "teardown-failed"
 func verifyQuery(ctx context.Context, sess engine.Session, info engine.Info, q *workload.Query, ds engine.Dataset, opts Options) QueryReport {
 	rep := QueryReport{QueryID: q.ID}
 
-	// Capability filter before dialect resolution: a missing kernel is
-	// the more precise reason.
-	if q.Algorithm != "" && !info.Caps.HasAlgorithm(q.Algorithm) {
-		rep.Outcome = Skip
-		rep.Reason = "missing-algorithm:" + q.Algorithm
-		return rep
-	}
 	if q.NeedsPathPredicate && !info.Caps.PathPredicates {
 		rep.Outcome = Skip
 		rep.Reason = "no-path-predicates"
@@ -166,10 +159,19 @@ func verifyQuery(ctx context.Context, sess engine.Session, info engine.Info, q *
 		return rep
 	}
 
+	// Text first, capability second. An engine that has a text for an
+	// analytical query can answer it, whether or not it also ships a
+	// kernel under that name: Kùzu has no bfs procedure and still
+	// answers ga-bfs out of a shortest-path expansion. The kernel
+	// capability is only the reason when there is no text to run, where
+	// it is the more precise half of "no-dialect-text".
 	dialect, text, ok := engine.ResolveText(info.Dialects, q.Texts)
 	if !ok {
 		rep.Outcome = Skip
 		rep.Reason = "no-dialect-text"
+		if q.Algorithm != "" && !info.Caps.HasAlgorithm(q.Algorithm) {
+			rep.Reason = "missing-algorithm:" + q.Algorithm
+		}
 		return rep
 	}
 	rep.Dialect, rep.Text = dialect, text

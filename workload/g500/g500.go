@@ -40,9 +40,10 @@ func init() {
 
 // roots is the pre-drawn eight-root pool (PoolKey "root") both kernels
 // share, the Graph500 rule of timing every kernel from the same root
-// set: dense node-id tokens that exist in every rmat-14 graph (id space
-// 0..2^14-1).
-var roots = []string{"0", "1", "2557", "4095", "8191", "9973", "12288", "16383"}
+// set. Every token is under 1024 so the roots exist at rmat-10 as well
+// as rmat-14: --profile fast runs the smoke variant, and a root the
+// smoke graph does not carry fails the oracle rather than the engine.
+var roots = []string{"0", "1", "97", "255", "511", "737", "900", "1023"}
 
 var g500Workload = &workload.Workload{
 	Name:            "g500",
@@ -158,7 +159,10 @@ RETURN src.id AS id, 0 AS distance`,
 func rootPool() *workload.PoolSource {
 	pool := make([]workload.Params, len(roots))
 	for i, r := range roots {
-		pool[i] = workload.Params{"source": r}
+		// IDValue, not the raw token: a curated pool binds a numeric
+		// id as a number, and an engine with typed parameters is
+		// entitled to the same value from either pool.
+		pool[i] = workload.Params{"source": workload.IDValue(r)}
 	}
 	return workload.NewPoolSource(pool)
 }
