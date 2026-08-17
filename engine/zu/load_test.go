@@ -353,18 +353,21 @@ func TestNodesFlagSkipsWhatItCannotDeclare(t *testing.T) {
 	}
 }
 
-// fakeOldCopy is a zu from before --nodes: it refuses the flag the way a
-// hand-rolled argument parser refuses anything it does not know.
+// fakeOldCopy is a zu from before the table flags: it refuses --node,
+// --rel and --nodes the way a hand-rolled argument parser refuses
+// anything it does not know, so a load against it lands on the flat form.
 const fakeOldCopy = `cmd="$1"
 case "$cmd" in
 --version) echo "zu 9.9.9-test" ;;
 help) echo "commands: copy, convert, verify, stat, lookup, neighbors, edge" ;;
 copy)
   for a in "$@"; do
-    if [ "$a" = "--nodes" ]; then
-      echo "usage: zu copy [--reorder degree|bfs|none] <edges> <out.zu1>" 1>&2
-      exit 2
-    fi
+    case "$a" in
+      --node|--nodes|--rel)
+        echo "usage: zu copy [--reorder degree|bfs|none] <edges> <out.zu1>" 1>&2
+        exit 2
+        ;;
+    esac
   done
   for a in "$@"; do edges="$out"; out="$a"; done
   printf 'zu1data' > "$out"
