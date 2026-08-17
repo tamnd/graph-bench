@@ -67,13 +67,33 @@ func bfsKernel() *workload.Query {
 		Params:    rootPool(),
 		Texts: map[engine.Dialect]string{
 			// Memgraph's built-in *BFS expansion; the UNION ALL arm adds the
-			// root's level-0 row the path pattern cannot produce.
-			engine.Cypher: `MATCH p = (src:Node {id: $source})-[:EDGE *BFS]->(n:Node)
+			// root's level-0 row the path pattern cannot produce. MAGE and
+			// not Cypher: this is Memgraph's own path syntax and no other
+			// Cypher engine parses it, so registered as Cypher it made
+			// every one of them FAIL on a parse error where the honest
+			// answer is that they have no spelling for this kernel.
+			engine.MAGE: `MATCH p = (src:Node {id: $source})-[:EDGE *BFS]->(n:Node)
 WHERE n <> src
 RETURN n.id AS id, size(relationships(p)) AS level
 UNION ALL
 MATCH (src:Node {id: $source})
 RETURN src.id AS id, 0 AS level`,
+			// Kuzu has no BFS procedure, so the levels come out of a
+			// shortest-path expansion, which is the same answer by a
+			// longer road: the minimum hop count to every node the root
+			// reaches. The root's own row is the UNION ALL arm, for the
+			// same reason MAGE needs one.
+			engine.KuzuCy: `MATCH (src:Node {id: CAST($source AS INT64)})-[r:EDGE* SHORTEST 1..]->(n:Node)
+RETURN n.id AS id, length(r) AS level
+UNION ALL
+MATCH (src:Node {id: CAST($source AS INT64)})
+RETURN src.id AS id, 0 AS level`,
+			// The kernel spelling, for an engine that has one. Levels
+			// follow stored edge direction and an unreached node comes
+			// back null, which is the row the reference does not have.
+			engine.ZuQL: `CALL bfs('edge', $source) YIELD node, level
+WITH node, level WHERE level IS NOT NULL
+RETURN node.id AS id, level ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, params workload.Params) (*workload.Answer, error) {
@@ -116,7 +136,9 @@ func ssspKernel() *workload.Query {
 		Params:    rootPool(),
 		Texts: map[engine.Dialect]string{
 			// Memgraph's built-in weighted shortest path expansion.
-			engine.Cypher: `MATCH p = (src:Node {id: $source})-[:EDGE *WSHORTEST (r, n | r.w) total]->(n:Node)
+			// Memgraph's own weighted shortest path syntax, under MAGE for
+			// the same reason the kernel above is.
+			engine.MAGE: `MATCH p = (src:Node {id: $source})-[:EDGE *WSHORTEST (r, n | r.w) total]->(n:Node)
 WHERE n <> src
 RETURN n.id AS id, total AS distance
 UNION ALL

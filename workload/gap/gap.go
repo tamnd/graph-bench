@@ -48,9 +48,17 @@ const (
 )
 
 // trialSources is the T=4 pre-selected source pool for gap-bfs and
-// gap-sssp: dense node-id tokens that exist in every urand-14 graph
-// (id space 0..2^14-1).
-var trialSources = []string{"0", "511", "8191", "12800"}
+// gap-sssp: dense node-id tokens that exist in every urand graph this
+// workload binds to.
+//
+// Every token is under 1024, which is the id space of urand-10, the
+// smoke variant this runs at under --profile fast. Two of these used to
+// be picked for the base scale alone and named no node down there, so
+// the run died in the engine with "source names no node" halfway
+// through the measurement. Nothing caught it because verification draws
+// one source and both engines with a bfs kernel arrived after the pool
+// was written.
+var trialSources = []string{"0", "273", "511", "1000"}
 
 // bcSources is the fixed betweenness source sample, the numeric ids
 // BetweennessExact accumulates over.
@@ -85,6 +93,14 @@ RETURN n.id AS id, size(relationships(p)) AS level
 UNION ALL
 MATCH (src:Node {id: $source})
 RETURN src.id AS id, 0 AS level`,
+			// zu answers this with a kernel rather than a pattern. bfs
+			// follows stored edge direction, which is what a level means
+			// here, and a node the source does not reach comes back null
+			// where the reference has no row at all, so the filter is the
+			// same filter.
+			engine.ZuQL: `CALL bfs('edge', $source) YIELD node, level
+WITH node, level WHERE level IS NOT NULL
+RETURN node.id AS id, level ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, params workload.Params) (*workload.Answer, error) {
@@ -219,6 +235,11 @@ RETURN nid AS id, label AS component ORDER BY id`,
 WITH component_id, min(node.id) AS label, collect(node) AS members
 UNWIND members AS m
 RETURN m.id AS id, label AS component ORDER BY id`,
+			// zu names a component by the smallest id in it, which is the
+			// canonical labeling this query wants, so there is nothing to
+			// relabel.
+			engine.ZuQL: `CALL wcc('edge') YIELD node, component
+RETURN node.id AS id, component ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
