@@ -69,8 +69,12 @@ func (e *Engine) Info() engine.Info {
 			ShortestPaths:  true,
 			// The kernels reachable through CALL. louvain is there too
 			// but no workload asks for it under that name.
-			Algorithms:     []string{"bfs", "pagerank", "wcc", "sssp", "cdlp", "lcc", "tc", "bc"},
-			PathPredicates: false,
+			Algorithms: []string{"bfs", "pagerank", "wcc", "sssp", "cdlp", "lcc", "tc", "bc"},
+			// The gate goes inside the brackets, as
+			// -[t:TRANSFER*1..2 WHERE t.ts >= $lo]->, and it takes query
+			// parameters rather than literals only, so the window is
+			// pushed into the expansion instead of filtered after it.
+			PathPredicates: true,
 			MaxConcurrency: 1,
 			Persistent:     true,
 		},

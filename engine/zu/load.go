@@ -18,25 +18,39 @@ import (
 	"github.com/tamnd/graph-bench/engine"
 )
 
-// copyDataset is the whole bulk-load path (F2): materialize the canonical
-// rel files into one edge list and run `zu copy --reorder degree`. String
-// ids map to themselves; zu copy keys them. LoadStats come from copy's own
-// stats output, with liberal fallbacks (file size via os.Stat, wall-clock
-// duration). label prefixes the errors with the adapter's name.
+// copyDataset is the whole bulk-load path (F2), in three forms, best
+// first. LoadStats come from copy's own stats output, with liberal
+// fallbacks (file size via os.Stat, wall-clock duration). label prefixes
+// the errors with the adapter's name.
 //
-// The node tables travel with the edges as `--nodes`, because an edge
-// list stops at its highest endpoint and a node that appears in no edge
-// would never enter the store.
+// The table form is the one that keeps the dataset: one zu node table
+// per label, one rel table per type, each bound to the two node tables
+// its manifest names, with every column zu has a lane for. See
+// copyTables. A dataset whose manifest does not name both ends of a rel
+// type cannot go in that way and falls through.
 //
-// A dataset with one rel table that carries properties keeps them: the
-// materialized file is a canonical CSV with its typed header, which zu
-// copy reads as edge property columns, and a query can then read an
-// edge's values. Anything else flattens to the 2-column whitespace list,
-// because zu copy builds one edge table, so a second rel table has
-// nowhere to go. A copy that fails for any other reason retries flat and
-// says so in Method rather than failing the run, which keeps a dataset
-// measurable on the queries that need no properties.
+// The single-rel form below it is what a dataset of one rel table used
+// to take, and it stays for the datasets whose manifests predate the
+// ends: the materialized file is a canonical CSV with its typed header,
+// which zu copy reads as edge property columns.
+//
+// The flat form is two columns of whitespace and no properties at all,
+// which is the whole of a SNAP or GAP graph and enough for every query
+// that reads no property. The node tables travel with the edges as
+// `--nodes` there, because an edge list stops at its highest endpoint
+// and a node that appears in no edge would never enter the store.
+//
+// A form that fails falls to the next one and says so in Method rather
+// than failing the run, which keeps a dataset measurable on the queries
+// it can still answer.
 func copyDataset(ctx context.Context, label, bin, workDir, dbPath string, ds engine.Dataset) (engine.LoadStats, error) {
+	if stats, err := copyTables(ctx, label, bin, workDir, dbPath, ds); err == nil {
+		return stats, nil
+	}
+	// copy refuses to write over a file it already made, so a form that
+	// got as far as creating one leaves nothing for the next to trip on.
+	_ = os.Remove(dbPath)
+
 	nodes, err := nodesFlag(ds, workDir)
 	if err != nil {
 		return engine.LoadStats{}, err

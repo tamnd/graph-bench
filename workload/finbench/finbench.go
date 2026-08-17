@@ -30,16 +30,18 @@
 //
 // The four windowed variable-length traversals (tcr1, tcr3, tcr4, tcr8) set
 // NeedsPathPredicate, so an engine that cannot filter a variable-length
-// expansion by a run-time predicate SKIPs them rather than answering. They
-// once carried a Kùzu-dialect text that pushed the window into the expansion
-// filter, which is the only correct shape on such an engine — but that
-// filter reads literals only: a query parameter in it is rejected by the
-// binder and an enclosing WITH variable is out of scope, so the text could
-// never be bound to a drawn window. Filtering after the expansion instead is
-// not a workaround but a different question, and it quietly undercounts:
-// measured against the same reference it reported 792 reachable accounts
-// where 853 are reachable in the window, because the engine keeps one path
-// per endpoint pair and the retained path may be the out-of-window one.
+// expansion by a run-time predicate SKIPs them rather than answering. Pushing
+// the window into the expansion is the only correct shape, and the ZuQL texts
+// do it: the predicate sits inside the brackets and takes query parameters,
+// so a drawn window binds. They once carried a Kùzu-dialect text of the same
+// shape, dropped because that filter reads literals only, a query parameter
+// in it being rejected by the binder and an enclosing WITH variable out of
+// scope, so the text could never be bound to a drawn window. Filtering after
+// the expansion instead is not a workaround but a different question, and it
+// quietly undercounts: measured against the same reference it reported 792
+// reachable accounts where 853 are reachable in the window, because the
+// engine keeps one path per endpoint pair and the retained path may be the
+// out-of-window one.
 package finbench
 
 import (
@@ -97,6 +99,14 @@ func tcr1() *workload.Query {
 			engine.Cypher: `MATCH (a:Account {id: $id})-[es:TRANSFER*1..2]->(b:Account)
 WHERE all(t IN es WHERE t.ts >= $startTime AND t.ts < $endTime)
 RETURN count(DISTINCT b.id) AS reached`,
+			// ZuQL puts the per-hop predicate inside the brackets, where
+			// the expansion reads it, so the window is what the walk
+			// follows rather than what a later filter throws away. That
+			// is the same question the portable text asks and not the
+			// same work: filtering after the fact keeps one path per
+			// endpoint and can keep the out-of-window one.
+			engine.ZuQL: `MATCH (a:Account {id: $id})-[t:TRANSFER*1..2 WHERE t.ts >= $startTime AND t.ts < $endTime]->(b:Account)
+RETURN count(DISTINCT b.id) AS reached`,
 		},
 		Reference: countRef("reached", func(g *finGraph, p workload.Params) (int64, error) {
 			id, err := pStr(p, "id")
@@ -121,6 +131,11 @@ func tcr2() *workload.Query {
 		PoolKey: "fb-tcr2",
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (s:Account)-[t:TRANSFER]->(a:Account)
+WHERE t.ts >= $startTime AND t.ts < $endTime
+WITH a, count(DISTINCT s.id) AS sources
+WHERE sources > $threshold
+RETURN a.id AS id, sources`,
+			engine.ZuQL: `MATCH (s:Account)-[t:TRANSFER]->(a:Account)
 WHERE t.ts >= $startTime AND t.ts < $endTime
 WITH a, count(DISTINCT s.id) AS sources
 WHERE sources > $threshold
@@ -181,6 +196,14 @@ RETURN min(length(p)) AS hops`,
 MATCH p = shortestPath((a)-[:TRANSFER*1..4]->(b))
 WHERE all(t IN relationships(p) WHERE t.ts >= $startTime AND t.ts < $endTime)
 RETURN min(length(p)) AS hops`,
+			// The window gates the expansion, so the shortest path this
+			// finds is the shortest windowed one and not the shortest
+			// path that then has to survive a filter. The aggregate is
+			// still what returns, for the unreachable pair: ANY SHORTEST
+			// matches nothing there, and min over nothing is the one row
+			// of null the reference expects.
+			engine.ZuQL: `MATCH p = ANY SHORTEST (a:Account {id: $src})-[t:TRANSFER*1..4 WHERE t.ts >= $startTime AND t.ts < $endTime]->(b:Account {id: $dst})
+RETURN min(path_length(p)) AS hops`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -260,6 +283,18 @@ WHERE m.id <> a.id
 MATCH (m)-[c:TRANSFER]->(a)
 WHERE c.ts >= $startTime AND c.ts < $endTime
 RETURN count(DISTINCT m.id) AS loops`,
+			// The gated expansion answers the reachability half, and the
+			// closing edge is a second MATCH rather than a tail on the
+			// first: a variable-length pattern that ends on an already
+			// bound node does not execute in zu yet. The DISTINCT
+			// between them is what the Cypher 25 text collapses its
+			// frontier for, and costs the same nothing here.
+			engine.ZuQL: `MATCH (a:Account {id: $id})-[t:TRANSFER*1..3 WHERE t.ts >= $startTime AND t.ts < $endTime]->(m:Account)
+WITH DISTINCT a, m
+WHERE m.id <> a.id
+MATCH (m)-[c:TRANSFER]->(a)
+WHERE c.ts >= $startTime AND c.ts < $endTime
+RETURN count(DISTINCT m.id) AS loops`,
 		},
 		Reference: countRef("loops", func(g *finGraph, p workload.Params) (int64, error) {
 			id, err := pStr(p, "id")
@@ -292,6 +327,20 @@ OPTIONAL MATCH (a)-[o:TRANSFER]->(d:Account)
 WHERE o.ts >= $startTime AND o.ts < $endTime
 RETURN inCount, inSum, count(o) AS outCount, coalesce(sum(o.amount), 0.0) AS outSum,
        (coalesce(sum(o.amount), 0.0) > 0 AND inSum > $threshold * coalesce(sum(o.amount), 0.0)) AS breach`,
+			// No coalesce: zu sums an empty group to zero rather than to
+			// null, which is what the coalesce is there to produce, so
+			// the guard has nothing left to guard. The breach test also
+			// moves out of the RETURN, since zu wants a bare aggregate
+			// there and reads the expression from the next scope.
+			engine.ZuQL: `MATCH (a:Account {id: $id})
+OPTIONAL MATCH (s:Account)-[i:TRANSFER]->(a)
+WHERE i.ts >= $startTime AND i.ts < $endTime
+WITH a, count(i) AS inCount, sum(i.amount) AS inSum
+OPTIONAL MATCH (a)-[o:TRANSFER]->(d:Account)
+WHERE o.ts >= $startTime AND o.ts < $endTime
+WITH inCount, inSum, count(o) AS outCount, sum(o.amount) AS outSum
+RETURN inCount, inSum, outCount, outSum,
+       (outSum > 0 AND inSum > $threshold * outSum) AS breach`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -338,6 +387,9 @@ func tcr8() *workload.Query {
 WHERE d.ts >= $startTime AND d.ts < $endTime
   AND all(t IN es WHERE t.ts >= $startTime AND t.ts < $endTime)
 RETURN count(DISTINCT b.id) AS reached`,
+			engine.ZuQL: `MATCH (l:Loan {id: $id})-[d:DEPOSIT]->(a:Account)-[t:TRANSFER*1..2 WHERE t.ts >= $startTime AND t.ts < $endTime]->(b:Account)
+WHERE d.ts >= $startTime AND d.ts < $endTime
+RETURN count(DISTINCT b.id) AS reached`,
 		},
 		Reference: countRef("reached", func(g *finGraph, p workload.Params) (int64, error) {
 			id, err := pStr(p, "id")
@@ -364,6 +416,13 @@ func tcr11() *workload.Query {
 		PoolKey: "fb-tcr11",
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (a:Account {id: $id})-[t1:TRANSFER]->(b:Account)-[t2:TRANSFER]->(c:Account)-[t3:TRANSFER]->(d:Account)
+WHERE t1.ts >= $startTime AND t1.ts < $endTime
+  AND t2.ts >= $startTime AND t2.ts < $endTime
+  AND t3.ts >= $startTime AND t3.ts < $endTime
+  AND t2.amount <= t1.amount * $decay
+  AND t3.amount <= t2.amount * $decay
+RETURN count(DISTINCT d.id) AS reached`,
+			engine.ZuQL: `MATCH (a:Account {id: $id})-[t1:TRANSFER]->(b:Account)-[t2:TRANSFER]->(c:Account)-[t3:TRANSFER]->(d:Account)
 WHERE t1.ts >= $startTime AND t1.ts < $endTime
   AND t2.ts >= $startTime AND t2.ts < $endTime
   AND t3.ts >= $startTime AND t3.ts < $endTime
@@ -404,6 +463,13 @@ WHERE t.ts >= $startTime AND t.ts < $endTime
 WITH a, count(t) AS burst
 WHERE burst > $threshold
 RETURN count(a) AS accounts`,
+			engine.ZuQL: `MATCH (a:Account)
+WHERE a.createTime >= $startTime AND a.createTime < $endTime
+MATCH (a)-[t:TRANSFER]->(:Account)
+WHERE t.ts >= $startTime AND t.ts < $endTime
+WITH a, count(t) AS burst
+WHERE burst > $threshold
+RETURN count(a) AS accounts`,
 		},
 		Reference: countRef("accounts", func(g *finGraph, p workload.Params) (int64, error) {
 			s, e, err := window(p)
@@ -427,6 +493,8 @@ func sr1() *workload.Query {
 		PoolKey: "fb-sr1",
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (a:Account {id: $id})
+RETURN a.id AS id, a.createTime AS createTime, a.isBlocked AS isBlocked`,
+			engine.ZuQL: `MATCH (a:Account {id: $id})
 RETURN a.id AS id, a.createTime AS createTime, a.isBlocked AS isBlocked`,
 		},
 		Reference: &workload.RefStrategy{
@@ -459,6 +527,11 @@ func sr2() *workload.Query {
 		PoolKey: "fb-sr2",
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (a:Account {id: $id})-[t:TRANSFER]->(b:Account)
+WHERE t.ts >= $startTime AND t.ts < $endTime
+RETURN b.id AS dst, t.amount AS amount, t.ts AS ts
+ORDER BY ts DESC, amount DESC, dst ASC
+LIMIT 10`,
+			engine.ZuQL: `MATCH (a:Account {id: $id})-[t:TRANSFER]->(b:Account)
 WHERE t.ts >= $startTime AND t.ts < $endTime
 RETURN b.id AS dst, t.amount AS amount, t.ts AS ts
 ORDER BY ts DESC, amount DESC, dst ASC
