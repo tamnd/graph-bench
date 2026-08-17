@@ -254,6 +254,11 @@ func cdlpQuery() *workload.Query {
 			// validation unless it exposes true label propagation.
 			engine.MAGE: `CALL community_detection.get() YIELD node, community_id
 RETURN node.id AS id, community_id AS community ORDER BY id`,
+			// zu propagates the stored ids, not its own row numbers, so
+			// the smallest-label tie-break decides the same way the
+			// oracle does and no relabeling is possible afterwards.
+			engine.ZuQL: `CALL cdlp('edge') YIELD node, community
+RETURN node.id AS id, community ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
@@ -269,14 +274,18 @@ RETURN node.id AS id, community_id AS community ORDER BY id`,
 }
 
 // lccQuery computes the directed local clustering coefficient of every
-// node. MAGE ships no LCC kernel, so the query carries no text: engines
-// run it only through a declared native "lcc" capability.
+// node. MAGE ships no LCC kernel, so the Cypher engines carry no text
+// and run it only through a declared native "lcc" capability.
 func lccQuery() *workload.Query {
 	return &workload.Query{
 		ID:        "ga-lcc",
 		Class:     engine.Analytical,
 		Algorithm: "lcc",
 		Params:    workload.Fixed{},
+		Texts: map[engine.Dialect]string{
+			engine.ZuQL: `CALL lcc('edge') YIELD node, coefficient
+RETURN node.id AS id, coefficient ORDER BY id`,
+		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
 				g, err := workload.LoadGraph(ds)

@@ -68,9 +68,8 @@ func (e *Engine) Info() engine.Info {
 			VarLengthPaths: true,
 			ShortestPaths:  true,
 			// The kernels reachable through CALL. louvain is there too
-			// but no workload asks for it under that name, and cdlp is
-			// not written yet, so ga-cdlp SKIPs and says so.
-			Algorithms:     []string{"bfs", "pagerank", "wcc", "sssp"},
+			// but no workload asks for it under that name.
+			Algorithms:     []string{"bfs", "pagerank", "wcc", "sssp", "cdlp", "lcc"},
 			PathPredicates: false,
 			MaxConcurrency: 1,
 			Persistent:     true,
