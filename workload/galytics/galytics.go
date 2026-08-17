@@ -182,6 +182,14 @@ UNWIND ranks AS x
 RETURN x.i AS id, x.r/total AS score ORDER BY id`,
 			engine.MAGE: `CALL pagerank.get() YIELD node, rank
 RETURN node.id AS id, rank AS score ORDER BY id`,
+			// zu redistributes the dangling mass, so its ranks already
+			// sum to one and there is nothing to normalize. It stops on
+			// the same criterion this oracle stops on, the largest a
+			// rank moves in a round falling under 1e-12, capped at 100
+			// rounds. It used to stop at a fixed 20 and that is the one
+			// thing that kept it out of this table.
+			engine.ZuQL: `CALL pagerank('edge') YIELD node, rank
+RETURN node.id AS id, rank AS score ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
