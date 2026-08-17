@@ -151,6 +151,7 @@ A workload only produces numbers for an engine that has text in that engine's di
 | Workload | zu | reason |
 | --- | --- | --- |
 | micro-read, micro-uniform, micro-er, micro-powerlaw, micro-mix | runs | zuQL text present |
+| micro-write | runs | zuQL text present, one property update per repetition, on the id column because `zu copy` loads no other node column |
 | micro-sp, micro-sp-bidir | SKIP | `no-shortest-paths` |
 | lsqb (q1 to q9) | SKIP | `no-dialect-text` |
 | snb-short, snb-complex, snb-bi, snb-mix, snb-update | SKIP | `no-dialect-text` |
