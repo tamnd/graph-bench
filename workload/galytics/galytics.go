@@ -58,10 +58,15 @@ const (
 )
 
 // bfsSources is the curated deterministic source pool for ga-bfs and
-// ga-sssp (PoolKey "bfs-source" / "sssp-source"): four dense node-id
-// tokens that exist in every rmat-14 graph (id space 0..2^14-1). A
-// curated dataset pool under the same key overrides the inline pool.
-var bfsSources = []string{"0", "273", "4096", "12345"}
+// ga-sssp (PoolKey "bfs-source" / "sssp-source"). A curated dataset
+// pool under the same key overrides the inline pool.
+//
+// Every token is under 1024, which is the id space of rmat-10, the
+// smoke variant this workload runs at under --profile fast. A pool
+// picked for the base scale alone makes every focused run fail in the
+// oracle with "source not in graph", which is a bug in the pool and
+// reads like a bug in the engine.
+var bfsSources = []string{"0", "273", "512", "1000"}
 
 // unweighted is the "galytics" workload: the five unweighted kernels.
 var unweighted = &workload.Workload{
@@ -108,6 +113,23 @@ RETURN n.id AS id, size(relationships(p)) AS level
 UNION ALL
 MATCH (src:Node {id: $source})
 RETURN src.id AS id, 0 AS level`,
+			// Kùzu has no BFS procedure, so the levels come out of a
+			// shortest-path expansion, which is the same answer by a
+			// longer road: the minimum hop count to every node the
+			// source reaches. The root's own row is the UNION ALL arm,
+			// for the same reason MAGE needs one.
+			engine.KuzuCy: `MATCH (src:Node {id: CAST($source AS INT64)})-[r:EDGE* SHORTEST 1..]->(n:Node)
+RETURN n.id AS id, length(r) AS level
+UNION ALL
+MATCH (src:Node {id: CAST($source AS INT64)})
+RETURN src.id AS id, 0 AS level`,
+			// zu answers this one with a kernel rather than a pattern.
+			// bfs follows stored edge direction, which is what a level
+			// means here; unreached nodes come back null and the
+			// reference omits them, so the WHERE is the same filter.
+			engine.ZuQL: `CALL bfs('edge', $source) YIELD node, level
+WITH node, level WHERE level IS NOT NULL
+RETURN node.id AS id, level ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, params workload.Params) (*workload.Answer, error) {
@@ -196,6 +218,13 @@ RETURN nid AS id, label AS component ORDER BY id`,
 WITH component_id, min(node.id) AS label, collect(node) AS members
 UNWIND members AS m
 RETURN m.id AS id, label AS component ORDER BY id`,
+			// zu names a component by the smallest row in it, which is
+			// the smallest id only when the loader kept ids and rows in
+			// step. The relabel does not assume it did.
+			engine.ZuQL: `CALL wcc('edge') YIELD node, component
+WITH component, min(node.id) AS label, collect(node.id) AS ids
+UNWIND ids AS nid
+RETURN nid AS id, label AS component ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
@@ -362,7 +391,10 @@ func numValue(v engine.Value) (int64, bool) {
 func sourcePool(sources []string) *workload.PoolSource {
 	pool := make([]workload.Params, len(sources))
 	for i, s := range sources {
-		pool[i] = workload.Params{"source": s}
+		// IDValue, not the raw token: a curated pool binds a numeric
+		// id as a number, and an engine with typed parameters is
+		// entitled to the same value from either pool.
+		pool[i] = workload.Params{"source": workload.IDValue(s)}
 	}
 	return workload.NewPoolSource(pool)
 }

@@ -96,10 +96,22 @@ func TestRunPassFailSkip(t *testing.T) {
 				Reference: refConst(nil),
 			},
 			{
+				// No kernel and no text this engine speaks. The kernel
+				// is the more precise half of the reason, so it wins
+				// over the flat "no-dialect-text".
 				ID: "q-skip-algo", Class: engine.Analytical, Algorithm: "pagerank",
-				Texts:     map[engine.Dialect]string{engine.Cypher: "pr"},
+				Texts:     map[engine.Dialect]string{engine.ZuQL: "pr"},
 				Params:    workload.Fixed{P: nil},
 				Reference: refConst(nil),
+			},
+			{
+				// No kernel under this name, but a text this engine can
+				// run, which is the Kùzu-answers-BFS-with-a-pattern
+				// case. The text is the claim, so it runs.
+				ID: "q-algo-by-text", Class: engine.Analytical, Algorithm: "pagerank",
+				Texts:     map[engine.Dialect]string{engine.Cypher: "good"},
+				Params:    workload.Fixed{P: workload.Params{"id": int64(1)}},
+				Reference: refConst([][]engine.Value{{int64(1)}}),
 			},
 		},
 	}
@@ -113,6 +125,7 @@ func TestRunPassFailSkip(t *testing.T) {
 		"q-fail":         Fail,
 		"q-skip-dialect": Skip,
 		"q-skip-algo":    Skip,
+		"q-algo-by-text": Pass,
 	}
 	for id, o := range want {
 		rep, ok := plan.Report(id)
@@ -123,8 +136,8 @@ func TestRunPassFailSkip(t *testing.T) {
 			t.Errorf("%s: outcome %s, want %s (reason %q)", id, rep.Outcome, o, rep.Reason)
 		}
 	}
-	if len(plan.Approved) != 1 || plan.Approved[0].Query.ID != "q-pass" {
-		t.Errorf("approved = %+v, want only q-pass", plan.Approved)
+	if len(plan.Approved) != 2 {
+		t.Errorf("approved = %+v, want q-pass and q-algo-by-text", plan.Approved)
 	}
 	if !plan.Failed() {
 		t.Error("plan.Failed() = false, want true")
