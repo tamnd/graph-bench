@@ -12,10 +12,11 @@
 // runner SKIPs engines that do not declare the capability. Engines that
 // reach kernels through a query surface run the engine.MAGE texts
 // (Memgraph MAGE procedures and Memgraph's *BFS / *WSHORTEST
-// expansions). Triangle count and betweenness carry no text: MAGE has no
-// matching kernel surface (its betweenness is full and normalized, not
-// the GAP source-sampled accumulation), so those cells come only from a
-// declared native capability.
+// expansions). Triangle count and betweenness carry no MAGE text: MAGE
+// has no matching kernel surface (its betweenness is full and
+// normalized, not the GAP source-sampled accumulation), so a MAGE cell
+// there comes only from a declared native capability. Both do carry a
+// zuQL text, since zu has a kernel for each under CALL.
 //
 // GAP sources are pre-selected: the four-entry pools below are the T=4
 // default trials (full tier 64 comes from a curated dataset pool under
@@ -28,6 +29,7 @@ package gap
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/workload"
@@ -63,6 +65,17 @@ var trialSources = []string{"0", "273", "511", "1000"}
 // bcSources is the fixed betweenness source sample, the numeric ids
 // BetweennessExact accumulates over.
 var bcSources = []engine.Value{int64(0), int64(511), int64(8191), int64(12800)}
+
+// bcSourceList renders bcSources as a list literal for a query text.
+// The sample lives in one place and both the oracle and the text read
+// it from there, so neither can be changed without the other following.
+func bcSourceList() string {
+	parts := make([]string, 0, len(bcSources))
+	for _, v := range bcSources {
+		parts = append(parts, fmt.Sprintf("%v", v))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
 
 var gapWorkload = &workload.Workload{
 	Name:            "gap",
@@ -325,7 +338,16 @@ func bcQuery() *workload.Query {
 		ID:        "gap-bc",
 		Class:     engine.Analytical,
 		Algorithm: "bc",
-		Params:    workload.Fixed{P: workload.Params{"sources": bcSources}},
+		Texts: map[engine.Dialect]string{
+			// zu answers this with a kernel. The sources are inline
+			// rather than bound because the adapter has no binding for a
+			// list, and they are formatted from bcSources so the text
+			// and the sample the oracle accumulates over cannot drift
+			// apart.
+			engine.ZuQL: fmt.Sprintf(`CALL betweenness('edge', %s) YIELD node, centrality
+RETURN node.id AS id, centrality ORDER BY id`, bcSourceList()),
+		},
+		Params: workload.Fixed{P: workload.Params{"sources": bcSources}},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, params workload.Params) (*workload.Answer, error) {
 				srcs, err := sourcesOf(params)
