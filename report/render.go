@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/tamnd/graph-bench/engine"
+	"github.com/tamnd/graph-bench/measure"
 )
 
 // Matrix is the comparison grid assembled from one document per engine:
@@ -540,4 +542,187 @@ func RenderOverhead(w io.Writer, docs []*Document) {
 			fmt.Fprintln(w)
 		}
 	}
+}
+
+// --- resources -----------------------------------------------------------
+
+// resourceRow is one line of the resource table: the metric's name, how its
+// values are formatted, and how to pull the value out of a document.
+type resourceRow struct {
+	label  string
+	format func(int64) string
+	value  func(measure.Resource) int64
+}
+
+// resourceRows is the resource table's shape, in reading order: memory first
+// because it is the figure a reader compares engines on, then CPU, then the
+// kernel work that explains a tail nothing in the query text does, then disk.
+// A row whose value is -1 on every document is dropped, so a platform that
+// cannot answer a metric prints a shorter table rather than a column of n/a.
+var resourceRows = []resourceRow{
+	{"peak rss", bytesCell, func(r measure.Resource) int64 { return r.MaxRSSBytes }},
+	{"peak rss (children)", bytesCell, func(r measure.Resource) int64 { return r.ChildMaxRSSBytes }},
+	{"heap live", bytesCell, func(r measure.Resource) int64 { return r.HeapAllocBytes }},
+	{"heap reserved", bytesCell, func(r measure.Resource) int64 { return r.HeapSysBytes }},
+	{"runtime total", bytesCell, func(r measure.Resource) int64 { return r.GoSysBytes }},
+	{"allocated", bytesCell, func(r measure.Resource) int64 { return r.TotalAllocBytes }},
+	{"gc cycles", countCell, func(r measure.Resource) int64 { return r.NumGC }},
+	{"gc pause", nanosCell, func(r measure.Resource) int64 { return r.GCPauseTotalNs }},
+	{"cpu user", nanosCell, func(r measure.Resource) int64 { return r.CPUUserNs }},
+	{"cpu sys", nanosCell, func(r measure.Resource) int64 { return r.CPUSysNs }},
+	{"cpu user (child)", nanosCell, func(r measure.Resource) int64 { return r.ChildCPUUserNs }},
+	{"cpu sys (child)", nanosCell, func(r measure.Resource) int64 { return r.ChildCPUSysNs }},
+	{"minor faults", countCell, func(r measure.Resource) int64 { return r.MinorFaults }},
+	{"major faults", countCell, func(r measure.Resource) int64 { return r.MajorFaults }},
+	{"minor faults (children)", countCell, func(r measure.Resource) int64 { return r.ChildMinorFaults }},
+	{"major faults (children)", countCell, func(r measure.Resource) int64 { return r.ChildMajorFaults }},
+	{"ctx switches (vol)", countCell, func(r measure.Resource) int64 { return r.VoluntaryCtxSwitches }},
+	{"ctx switches (invol)", countCell, func(r measure.Resource) int64 { return r.InvoluntaryCtxSwitches }},
+	{"ctx switches (vol, children)", countCell, func(r measure.Resource) int64 { return r.ChildVoluntaryCtxSwitches }},
+	{"ctx switches (invol, children)", countCell, func(r measure.Resource) int64 { return r.ChildInvoluntaryCtxSwitches }},
+	{"block ops in", countCell, func(r measure.Resource) int64 { return r.BlockInputOps }},
+	{"block ops out", countCell, func(r measure.Resource) int64 { return r.BlockOutputOps }},
+	{"block ops in (children)", countCell, func(r measure.Resource) int64 { return r.ChildBlockInputOps }},
+	{"block ops out (children)", countCell, func(r measure.Resource) int64 { return r.ChildBlockOutputOps }},
+	{"disk read", bytesCell, func(r measure.Resource) int64 { return r.DiskReadBytes }},
+	{"disk write", bytesCell, func(r measure.Resource) int64 { return r.DiskWriteBytes }},
+	{"dataset on disk", bytesCell, func(r measure.Resource) int64 { return r.DatasetBytes }},
+	{"store after load", bytesCell, func(r measure.Resource) int64 { return r.LoadBytes }},
+	{"store after run", bytesCell, func(r measure.Resource) int64 { return r.StoreBytes }},
+	{"store growth", bytesCell, func(r measure.Resource) int64 { return r.StoreGrowthBytes }},
+}
+
+// RenderResources writes the resource table (spec 08 §1 metrics 3/4 and the
+// cost side of §7): one column per engine, one row per metric, over the same
+// documents the latency matrix was built from. It is the answer to "at what
+// price", which the latency table cannot give: two engines with the same p99
+// are not equal if one of them burned four times the CPU or pushed ten times
+// the bytes at the disk to get there.
+//
+// The scope of each figure is the harness process and the children it reaped,
+// so an in-process engine reports itself, a subprocess engine reports itself in
+// the child rows, and a Bolt engine reports its driver and nothing else. That
+// is why the child rows are named rather than folded into the totals.
+//
+// Every counter row is a delta over the engine's own run. The two peak resident
+// rows are not: the kernel keeps one high-water mark per process and does not
+// reset it, so in an invocation that ran several engines a later column's peak
+// includes what an earlier engine reached. The footer says so, and one engine
+// per invocation is the way to attribute a peak.
+func RenderResources(w io.Writer, docs []*Document) {
+	ordered := NewMatrix(docs).Docs
+	if len(ordered) == 0 {
+		return
+	}
+
+	header := []string{"Resource"}
+	for _, d := range ordered {
+		header = append(header, colLabel(d))
+	}
+	rows := [][]string{header}
+	for _, rr := range resourceRows {
+		cells := make([]string, 0, len(ordered))
+		any := false
+		for _, d := range ordered {
+			v := rr.value(d.Resource)
+			if v != -1 {
+				any = true
+			}
+			cells = append(cells, rr.format(v))
+		}
+		if !any {
+			continue
+		}
+		rows = append(rows, append([]string{rr.label}, cells...))
+	}
+	if len(rows) == 1 {
+		fmt.Fprintln(w, "resources: no document carries a resource capture")
+		return
+	}
+
+	widths := make([]int, len(header))
+	for _, r := range rows {
+		for i, c := range r {
+			widths[i] = max(widths[i], utf8.RuneCountInString(c))
+		}
+	}
+	for ri, r := range rows {
+		for i, c := range r {
+			if i > 0 {
+				fmt.Fprint(w, "  ")
+			}
+			fmt.Fprint(w, pad(c, widths[i]))
+		}
+		fmt.Fprintln(w)
+		if ri == 0 {
+			for i, cw := range widths {
+				if i > 0 {
+					fmt.Fprint(w, "  ")
+				}
+				fmt.Fprint(w, strings.Repeat("-", cw))
+			}
+			fmt.Fprintln(w)
+		}
+	}
+	for _, line := range resourceNotes {
+		fmt.Fprintln(w, line)
+	}
+}
+
+// resourceNotes is the scope disclosure printed under the table. Without it a
+// reader takes every row for the engine's own cost, and two of them are not:
+// the peak resident rows are process high-water marks the kernel never resets,
+// and the children rows hold whatever the harness forked, which is the engine
+// on a subprocess plane and a load helper on an in-process one.
+var resourceNotes = []string{
+	"note: every counter row is a delta over that engine's own run.",
+	"      the peak rss rows are process high-water marks the kernel never resets,",
+	"      so run one engine per invocation to attribute a peak to it.",
+	"      children rows are the engine itself on a subprocess plane, a load helper",
+	"      on an in-process plane, and nothing on a Bolt plane: that server was not",
+	"      forked here, so read the server process or its container to size it.",
+}
+
+// bytesCell renders a byte count in the largest unit that keeps it readable,
+// binary units because that is what an allocator and a page cache deal in. A
+// negative count is the "nobody could ask" marker and prints as n/a, except
+// that a store which shrank is a real measurement and keeps its sign.
+func bytesCell(v int64) string {
+	if v == -1 {
+		return "n/a"
+	}
+	sign := ""
+	if v < 0 {
+		sign, v = "-", -v
+	}
+	const unit = 1024
+	if v < unit {
+		return fmt.Sprintf("%s%d B", sign, v)
+	}
+	value := float64(v)
+	for _, suffix := range []string{"KiB", "MiB", "GiB", "TiB"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%s%.1f %s", sign, value, suffix)
+		}
+	}
+	return fmt.Sprintf("%s%.1f PiB", sign, value/unit)
+}
+
+// countCell renders a plain counter, n/a for the unavailable marker.
+func countCell(v int64) string {
+	if v == -1 {
+		return "n/a"
+	}
+	return strconv.FormatInt(v, 10)
+}
+
+// nanosCell renders a nanosecond figure as a duration, n/a for the unavailable
+// marker. A zero is printed as a zero: a run that spent no measurable system
+// time is a result, not a missing reading.
+func nanosCell(v int64) string {
+	if v == -1 {
+		return "n/a"
+	}
+	return time.Duration(v).String()
 }

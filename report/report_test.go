@@ -384,3 +384,93 @@ func TestRenderOverhead(t *testing.T) {
 		t.Errorf("empty overhead not disclosed:\n%s", buf.String())
 	}
 }
+
+// TestRenderResources renders the resource table for two engines and checks the
+// three things that make it readable: a metric every document reports appears
+// with its unit, a metric no document could measure is dropped rather than
+// printed as a column of n/a, and one engine that has a figure the other lacks
+// keeps its row with an n/a beside it.
+func TestRenderResources(t *testing.T) {
+	inproc := FromMeasure("micro-write", "micro", "harness-native",
+		sampleResult("ladybug", "inproc", 4*time.Millisecond), nil)
+	inproc.Resource = measure.Resource{
+		HeapAllocBytes: 1 << 24, MaxRSSBytes: 1 << 26, ChildMaxRSSBytes: -1,
+		CPUUserNs: int64(2 * time.Second), CPUSysNs: int64(500 * time.Millisecond),
+		ChildCPUUserNs: 0, ChildCPUSysNs: 0,
+		MinorFaults: 4096, MajorFaults: 0,
+		VoluntaryCtxSwitches: 128, InvoluntaryCtxSwitches: 7,
+		BlockInputOps: -1, BlockOutputOps: -1,
+		ChildMinorFaults: 0, ChildMajorFaults: 0,
+		ChildVoluntaryCtxSwitches: 0, ChildInvoluntaryCtxSwitches: 0,
+		ChildBlockInputOps: -1, ChildBlockOutputOps: -1,
+		DiskReadBytes: -1, DiskWriteBytes: -1,
+		DatasetBytes: 1 << 22, LoadBytes: 1 << 20, StoreBytes: 1 << 20, StoreGrowthBytes: 0,
+	}
+	sub := FromMeasure("micro-write", "micro", "harness-native",
+		sampleResult("zu", "subprocess", 18*time.Millisecond), nil)
+	sub.Resource = measure.Resource{
+		HeapAllocBytes: 1 << 20, MaxRSSBytes: 1 << 24, ChildMaxRSSBytes: 1 << 25,
+		CPUUserNs: int64(100 * time.Millisecond), CPUSysNs: int64(80 * time.Millisecond),
+		ChildCPUUserNs: int64(3 * time.Second), ChildCPUSysNs: int64(time.Second),
+		MinorFaults: 8192, MajorFaults: 3,
+		VoluntaryCtxSwitches: 4096, InvoluntaryCtxSwitches: 11,
+		BlockInputOps: -1, BlockOutputOps: -1,
+		ChildMinorFaults: 61000, ChildMajorFaults: 12,
+		ChildVoluntaryCtxSwitches: 900, ChildInvoluntaryCtxSwitches: 40,
+		ChildBlockInputOps: -1, ChildBlockOutputOps: -1,
+		DiskReadBytes: -1, DiskWriteBytes: -1,
+		DatasetBytes: 1 << 22, LoadBytes: 1 << 20, StoreBytes: 3 << 20, StoreGrowthBytes: 2 << 20,
+	}
+
+	var buf bytes.Buffer
+	RenderResources(&buf, []*Document{inproc, sub})
+	out := buf.String()
+
+	for _, want := range []string{
+		"peak rss", "64.0 MiB", "16.0 MiB",
+		"peak rss (children)", "32.0 MiB", "n/a",
+		"cpu user", "2s", "100ms",
+		"cpu user (child)", "3s",
+		"major faults", "major faults (children)", "12",
+		"store growth", "2.0 MiB",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("RenderResources output missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"block ops in", "disk read", "disk write"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("RenderResources printed %q, want the row dropped when no document has it:\n%s", unwanted, out)
+		}
+	}
+}
+
+// TestRenderResourcesEmpty says what an empty set renders as: nothing for no
+// documents, and a one-line explanation when the documents carry no capture.
+func TestRenderResourcesEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	RenderResources(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("RenderResources(nil) wrote %q, want nothing", buf.String())
+	}
+
+	blank := &Document{Schema: 3, Workload: "micro-write"}
+	blank.Resource = measure.Resource{
+		HeapAllocBytes: -1, HeapSysBytes: -1, GoSysBytes: -1, TotalAllocBytes: -1,
+		NumGC: -1, GCPauseTotalNs: -1, MaxRSSBytes: -1, ChildMaxRSSBytes: -1,
+		CPUUserNs: -1, CPUSysNs: -1, ChildCPUUserNs: -1, ChildCPUSysNs: -1,
+		MinorFaults: -1, MajorFaults: -1,
+		VoluntaryCtxSwitches: -1, InvoluntaryCtxSwitches: -1,
+		BlockInputOps: -1, BlockOutputOps: -1,
+		ChildMinorFaults: -1, ChildMajorFaults: -1,
+		ChildVoluntaryCtxSwitches: -1, ChildInvoluntaryCtxSwitches: -1,
+		ChildBlockInputOps: -1, ChildBlockOutputOps: -1,
+		DiskReadBytes: -1, DiskWriteBytes: -1,
+		DatasetBytes: -1, LoadBytes: -1, StoreBytes: -1, StoreGrowthBytes: -1,
+	}
+	buf.Reset()
+	RenderResources(&buf, []*Document{blank})
+	if !strings.Contains(buf.String(), "no document carries a resource capture") {
+		t.Errorf("RenderResources with an empty capture wrote %q", buf.String())
+	}
+}

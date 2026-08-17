@@ -144,6 +144,32 @@ sf1 scale, Ubuntu under WSL2, Neo4j in Docker on the same machine reached over B
 
 Memgraph was in the same run and never came up. Its managed container reported no 7687/tcp binding and the fallback URI at 7688 refused the connection, so it produced no numbers and the run exited with an engine failure. That is a harness bug on this host, not a Memgraph result, and it is tracked as such.
 
+### What a run costs
+
+Every `run` prints a resource table under the latency matrix, and every result document carries the same figures. Latency answers how fast, this answers at what price: memory the engine settled at and peaked at, CPU it burned, the kernel work behind the tail, and the bytes it left on disk. Two engines with the same p99 are not equal if one of them spends four times the CPU or three times the memory getting there.
+
+The scope of each figure is the harness process and the children it reaped, so an in-process engine reports itself in the process rows, a subprocess engine reports itself in the children rows, and a Bolt engine reports its driver only, because the server it talks to was never forked by the harness. Every counter is a delta over that engine's own run. The peak resident rows are not deltas, since the kernel keeps one high-water mark per process and never resets it, so a peak belongs to one engine only when one engine ran in that invocation, which is what the table's own footer says.
+
+The write microscope on the laptop, `micro-write` on `lb-10k` at smoke scale, one engine per invocation so the peaks are attributable:
+
+| Resource | ladybug 0.19.1, in-process | zu 0.0.1, subprocess |
+| --- | --- | --- |
+| p50 / p99 | 4.63ms / 7.96ms | 17.77ms / 22.66ms |
+| peak rss, engine side | 208.8 MiB | 24.7 MiB |
+| cpu user, engine side | 199.5ms | 2.233s |
+| cpu sys, engine side | 355.5ms | 175.8ms |
+| minor faults, engine side | 14407 | 4266 |
+| major faults, engine side | 384 | 348 |
+| involuntary switches, engine side | 41145 | 5253 |
+| store after load | 2.9 MiB | 5.5 MiB |
+| store growth over the run | 0 B | 512.0 KiB |
+
+The engine side is the harness process for ladybug, which runs in-process, and the children rows for zu, which runs as a subprocess; the table in the terminal prints both sides for both engines and the reader picks the one that belongs to the plane.
+
+zu holds the graph in an eighth of the memory and takes a third of the minor faults. It also burns four times the CPU and grows its store by two blocks over 200 self-assignments, which is the fold: zu's reader only reads the sealed file, so every commit is followed by a checkpoint, and a checkpoint is three more fsyncs plus a rewrite of the columns the write touched. That is the number to watch as the read path learns to consult overlays, and it is the same finding zu's own write bench reports from the inside.
+
+Disk read and write bytes are per-process kernel counters read from `/proc/self/io`, so they are present on Linux and absent on macOS, where the equivalent lives behind libproc and this harness stays cgo-free by default. A figure a platform cannot answer is -1 in the document and `n/a` in the table, and a row no engine could answer is dropped rather than printed as a column of `n/a`.
+
 ### What does not run yet
 
 A workload only produces numbers for an engine that has text in that engine's dialect chain. There is no silent fallback: if the chain has nothing, the query reports SKIP with a reason, and the reason is in the result file. The table below is the same for `zu` and `zu-capi`, since coverage is a property of the engine and its dialect, not of the plane it is reached over.
