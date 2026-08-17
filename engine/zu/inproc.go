@@ -36,10 +36,14 @@
 //
 // # Threading
 //
-// The header states a session is not thread safe. Exec is mutex
-// serialized and Capabilities.MaxConcurrency stays 1, so calls never
-// overlap. zu's session holds no thread-local state, so serialized calls
-// from different goroutines are fine.
+// A connection may move between threads but must not be used from two at
+// once, and libzu answers ZU_MISUSE_CONCURRENT rather than corrupting a
+// cache when it is. Exec is mutex serialized and
+// Capabilities.MaxConcurrency stays 1, so calls never overlap. A
+// connection holds no thread-local state, so serialized calls from
+// different goroutines are fine. This adapter opens one connection with
+// zu_open_z; when the harness runs concurrent operations it will open a
+// database once and connect per worker instead.
 package zu
 
 // #cgo CFLAGS: -I${SRCDIR}/../../../zu/crates/zu-capi/include
@@ -116,7 +120,7 @@ type inprocSession struct {
 	workDir string
 
 	mu     sync.Mutex
-	sess   *C.zu_session
+	sess   *C.zu_conn
 	stmts  map[string]*C.zu_stmt
 	closed bool
 }
@@ -194,10 +198,10 @@ func (s *inprocSession) Exec(ctx context.Context, op engine.Op) (engine.Result, 
 		return nil, err
 	}
 
-	var cerr *C.char
-	res := C.zu_execute(stmt, &cerr)
-	if res == nil {
-		return nil, takeErr(cerr, "zu-capi: execute failed")
+	var res *C.zu_result
+	var cerr *C.zu_error
+	if st := C.zu_execute(stmt, &res, &cerr); st != C.ZU_OK {
+		return nil, takeErr(st, cerr, "zu-capi: execute failed")
 	}
 	defer C.zu_result_free(res)
 	return decodeResult(res)
@@ -226,12 +230,12 @@ func (s *inprocSession) openLocked() error {
 	}
 	cpath := C.CString(s.dbPath)
 	defer C.free(unsafe.Pointer(cpath))
-	var cerr *C.char
-	sess := C.zu_open(cpath, &cerr)
-	if sess == nil {
-		return takeErr(cerr, fmt.Sprintf("zu-capi: open %q failed", s.dbPath))
+	var conn *C.zu_conn
+	var cerr *C.zu_error
+	if st := C.zu_open_z(cpath, &conn, &cerr); st != C.ZU_OK {
+		return takeErr(st, cerr, fmt.Sprintf("zu-capi: open %q failed", s.dbPath))
 	}
-	s.sess = sess
+	s.sess = conn
 	return nil
 }
 
@@ -243,7 +247,7 @@ func (s *inprocSession) closeSessionLocked() {
 	}
 	s.stmts = nil
 	if s.sess != nil {
-		C.zu_close(s.sess)
+		C.zu_conn_close(s.sess)
 		s.sess = nil
 	}
 }
@@ -256,10 +260,10 @@ func (s *inprocSession) preparedLocked(text string) (*C.zu_stmt, error) {
 	}
 	ctext := C.CString(text)
 	defer C.free(unsafe.Pointer(ctext))
-	var cerr *C.char
-	stmt := C.zu_prepare(s.sess, ctext, &cerr)
-	if stmt == nil {
-		return nil, takeErr(cerr, "zu-capi: prepare failed")
+	var stmt *C.zu_stmt
+	var cerr *C.zu_error
+	if st := C.zu_prepare_z(s.sess, ctext, &stmt, &cerr); st != C.ZU_OK {
+		return nil, takeErr(st, cerr, "zu-capi: prepare failed")
 	}
 	if s.stmts == nil {
 		s.stmts = make(map[string]*C.zu_stmt)
@@ -274,22 +278,23 @@ func (s *inprocSession) preparedLocked(text string) (*C.zu_stmt, error) {
 func bindParams(stmt *C.zu_stmt, params map[string]engine.Value) error {
 	for name, val := range params {
 		cname := C.CString(name)
+		var st C.zu_status
 		switch v := val.(type) {
 		case nil:
-			C.zu_bind_null(stmt, cname)
+			st = C.zu_bind_null_z(stmt, cname)
 		case int:
-			C.zu_bind_i64(stmt, cname, C.int64_t(v))
+			st = C.zu_bind_i64_z(stmt, cname, C.int64_t(v))
 		case int32:
-			C.zu_bind_i64(stmt, cname, C.int64_t(v))
+			st = C.zu_bind_i64_z(stmt, cname, C.int64_t(v))
 		case int64:
-			C.zu_bind_i64(stmt, cname, C.int64_t(v))
+			st = C.zu_bind_i64_z(stmt, cname, C.int64_t(v))
 		case float32:
-			C.zu_bind_f64(stmt, cname, C.double(v))
+			st = C.zu_bind_f64_z(stmt, cname, C.double(v))
 		case float64:
-			C.zu_bind_f64(stmt, cname, C.double(v))
+			st = C.zu_bind_f64_z(stmt, cname, C.double(v))
 		case string:
 			cv := C.CString(v)
-			C.zu_bind_str(stmt, cname, cv)
+			st = C.zu_bind_str_z(stmt, cname, cv)
 			C.free(unsafe.Pointer(cv))
 		case bool:
 			// zuQL has no boolean literal or boolean bind, the same gap
@@ -299,10 +304,16 @@ func bindParams(stmt *C.zu_stmt, params map[string]engine.Value) error {
 			return fmt.Errorf("zu-capi: parameter %q is a bool; zu has no boolean parameters", name)
 		default:
 			cv := C.CString(fmt.Sprint(v))
-			C.zu_bind_str(stmt, cname, cv)
+			st = C.zu_bind_str_z(stmt, cname, cv)
 			C.free(unsafe.Pointer(cv))
 		}
 		C.free(unsafe.Pointer(cname))
+		// The bind calls carry no error handle: a NULL statement, a name
+		// that is not UTF-8, and a closed connection are everything they
+		// can report, so the status is the whole message.
+		if st != C.ZU_OK {
+			return fmt.Errorf("zu-capi: bind %q failed with status %d", name, int(st))
+		}
 	}
 	return nil
 }
@@ -323,18 +334,26 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 	}
 
 	for c := 0; c < cols; c++ {
-		names[c] = C.GoString(C.zu_result_col_name(res, C.uint32_t(c)))
+		var name *C.char
+		var nameLen C.size_t
+		if st := C.zu_result_col_name(res, C.uint32_t(c), &name, &nameLen); st != C.ZU_OK {
+			return nil, fmt.Errorf("zu-capi: column %d has no readable name, status %d", c, int(st))
+		}
+		names[c] = C.GoStringN(name, C.int(nameLen))
 		if rows == 0 {
 			continue
 		}
-		kind := columnKind(res, rows, c)
+		kind, err := columnKind(res, rows, c)
+		if err != nil {
+			return nil, err
+		}
 		switch kind {
 		case C.ZU_TYPE_NULL:
 			// Every cell is null; the rows are already nil.
-		case C.ZU_TYPE_INT, C.ZU_TYPE_BOOL, C.ZU_TYPE_NODE:
-			p := C.zu_result_col_i64(res, C.uint32_t(c))
-			if p == nil {
-				return nil, fmt.Errorf("zu-capi: column %d is not readable as int64", c)
+		case C.ZU_TYPE_INT, C.ZU_TYPE_BOOL:
+			var p *C.int64_t
+			if st := C.zu_result_col_i64(res, C.uint32_t(c), &p); st != C.ZU_OK || p == nil {
+				return nil, fmt.Errorf("zu-capi: column %d is not readable as int64, status %d", c, int(st))
 			}
 			vals := unsafe.Slice((*int64)(unsafe.Pointer(p)), rows)
 			valid := validSlice(res, rows, c)
@@ -348,10 +367,26 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 					out[r][c] = vals[r]
 				}
 			}
+		case C.ZU_TYPE_NODE:
+			// A node is not an integer to the C API: its identity comes
+			// out of the offset accessor, and col_i64 refuses the column
+			// rather than hand back a row number that looks like a value.
+			var p *C.uint64_t
+			if st := C.zu_result_col_node_offset(res, C.uint32_t(c), &p); st != C.ZU_OK || p == nil {
+				return nil, fmt.Errorf("zu-capi: column %d is not readable as a node offset, status %d", c, int(st))
+			}
+			vals := unsafe.Slice((*uint64)(unsafe.Pointer(p)), rows)
+			valid := validSlice(res, rows, c)
+			for r := 0; r < rows; r++ {
+				if valid != nil && valid[r] == 0 {
+					continue
+				}
+				out[r][c] = int64(vals[r])
+			}
 		case C.ZU_TYPE_FLOAT:
-			p := C.zu_result_col_f64(res, C.uint32_t(c))
-			if p == nil {
-				return nil, fmt.Errorf("zu-capi: column %d is not readable as float64", c)
+			var p *C.double
+			if st := C.zu_result_col_f64(res, C.uint32_t(c), &p); st != C.ZU_OK || p == nil {
+				return nil, fmt.Errorf("zu-capi: column %d is not readable as float64, status %d", c, int(st))
 			}
 			vals := unsafe.Slice((*float64)(unsafe.Pointer(p)), rows)
 			valid := validSlice(res, rows, c)
@@ -363,9 +398,9 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 			}
 		case C.ZU_TYPE_STR:
 			for r := 0; r < rows; r++ {
+				var p *C.char
 				var n C.size_t
-				p := C.zu_result_cell_str(res, C.uint64_t(r), C.uint32_t(c), &n)
-				if p == nil {
+				if st := C.zu_result_cell_str(res, C.uint64_t(r), C.uint32_t(c), &p, &n); st != C.ZU_OK || p == nil {
 					continue // null cell, or a non-string cell in a string column
 				}
 				out[r][c] = C.GoStringN(p, C.int(n))
@@ -384,33 +419,41 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 // or ZU_TYPE_NULL when every cell is null. zu returns one type per
 // column in practice, so this is read once and the column is decoded in
 // bulk.
-func columnKind(res *C.zu_result, rows, col int) C.int32_t {
+func columnKind(res *C.zu_result, rows, col int) (C.int32_t, error) {
 	for r := 0; r < rows; r++ {
-		t := C.zu_result_cell_type(res, C.uint64_t(r), C.uint32_t(col))
+		var t C.int32_t
+		if st := C.zu_result_cell_type(res, C.uint64_t(r), C.uint32_t(col), &t); st != C.ZU_OK {
+			return C.ZU_TYPE_NULL, fmt.Errorf("zu-capi: cell type of row %d column %d is unreadable, status %d", r, col, int(st))
+		}
 		if t != C.ZU_TYPE_NULL {
-			return t
+			return t, nil
 		}
 	}
-	return C.ZU_TYPE_NULL
+	return C.ZU_TYPE_NULL, nil
 }
 
 // validSlice returns the column's validity bytes, or nil when the API
 // declines to produce them (then every cell is treated as valid).
 func validSlice(res *C.zu_result, rows, col int) []byte {
-	p := C.zu_result_col_valid(res, C.uint32_t(col))
-	if p == nil {
+	var p *C.uint8_t
+	if st := C.zu_result_col_valid(res, C.uint32_t(col), &p); st != C.ZU_OK || p == nil {
 		return nil
 	}
 	return unsafe.Slice((*byte)(unsafe.Pointer(p)), rows)
 }
 
-// takeErr turns libzu's char** error out-parameter into a Go error and
-// frees it. fallback covers a failure that set no message.
-func takeErr(cerr *C.char, fallback string) error {
+// takeErr turns a failed status and libzu's error handle into a Go error
+// and releases the handle. fallback covers a failure that carried no
+// message, which is every status the engine had nothing to add to.
+func takeErr(st C.zu_status, cerr *C.zu_error, fallback string) error {
 	if cerr == nil {
-		return errors.New(fallback)
+		return fmt.Errorf("%s (status %d)", fallback, int(st))
 	}
-	msg := C.GoString(cerr)
-	C.zu_string_free(cerr)
-	return fmt.Errorf("zu-capi: %s", msg)
+	defer C.zu_error_free(cerr)
+	var n C.size_t
+	p := C.zu_error_message(cerr, &n)
+	if p == nil {
+		return fmt.Errorf("%s (status %d)", fallback, int(st))
+	}
+	return fmt.Errorf("zu-capi: %s", C.GoStringN(p, C.int(n)))
 }
