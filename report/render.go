@@ -260,12 +260,71 @@ func writeFooters(w io.Writer, docs []*Document, prefix, suffix string) {
 		}
 		fmt.Fprintf(w, "%sfidelity: %s: %s%s\n", prefix, wl, fid, suffix)
 	}
+	rss := 0
 	for _, d := range docs {
 		c := d.Condition
 		fmt.Fprintf(w, "%s%s: version %s, dataset %s, latency %s, warmup %s, tuned=%v%s\n",
 			prefix, colLabel(d), orUnknown(c.EngineVersion), checksumPrefix8(c.DatasetChecksum),
 			orUnknown(string(c.LatencyModel)), orUnknown(c.WarmupOutcome), c.Tuned, suffix)
+		if cost := costLine(d); cost != "" {
+			fmt.Fprintf(w, "%s%s: %s%s\n", prefix, colLabel(d), cost, suffix)
+			rss++
+		}
 	}
+	if rss > 1 {
+		fmt.Fprintf(w, "%speak rss is a high-water mark for the whole process, so it is only "+
+			"this engine's alone when the engine ran first; size the others one per run%s\n",
+			prefix, suffix)
+	}
+}
+
+// costLine is the price of the latency above it: what the engine held in
+// memory, what it left on disk, and how long the load took. Latency alone
+// ranks two engines as equal when one of them is paying twice the memory for
+// the same answer, and the number that is not printed is the number nobody
+// optimizes, so it goes next to the table rather than only into the JSON.
+//
+// On the Bolt plane the work happens in a server process and these figures
+// describe the client driver, so the memory is labelled for what it is
+// instead of being read as the engine's footprint.
+func costLine(d *Document) string {
+	r := d.Resource
+	var parts []string
+	mem := "peak rss"
+	if d.Condition.Plane == "bolt" {
+		mem = "client peak rss"
+	}
+	if r.MaxRSSBytes > 0 {
+		parts = append(parts, fmt.Sprintf("%s %s", mem, bytesText(r.MaxRSSBytes)))
+	}
+	if r.HeapAllocBytes > 0 {
+		parts = append(parts, fmt.Sprintf("live heap %s", bytesText(r.HeapAllocBytes)))
+	}
+	if r.LoadBytes > 0 {
+		parts = append(parts, fmt.Sprintf("on disk %s", bytesText(r.LoadBytes)))
+	}
+	if d.Load.Duration > 0 {
+		parts = append(parts, fmt.Sprintf("load %s", d.Load.Duration.Round(time.Millisecond)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, ", ")
+}
+
+// bytesText writes a byte count in the largest binary unit that keeps it
+// above one, so a footprint reads as "68.2 MB" rather than nine digits.
+func bytesText(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	v, exp := float64(n)/unit, 0
+	for v >= unit && exp < 3 {
+		v /= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", v, "KMGT"[exp])
 }
 
 // orUnknown replaces an empty stamp field with "unknown" so an incomplete

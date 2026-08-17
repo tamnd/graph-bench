@@ -314,6 +314,62 @@ func TestRenderTable(t *testing.T) {
 	}
 }
 
+// TestCostFooter asserts the price line beside the latency: the memory the
+// engine held, the disk it left, the load it paid, the Bolt plane labelled
+// for whose memory it is, and the caveat when more than one engine shared
+// the process the high-water mark was taken from.
+func TestCostFooter(t *testing.T) {
+	var buf bytes.Buffer
+	RenderTable(&buf, testMatrix())
+	out := buf.String()
+	for _, want := range []string{
+		"zu/inproc: peak rss 64.0 MB, live heap 16.0 MB, on disk 1.0 MB, load 90ms",
+		"neo4j/bolt: client peak rss 64.0 MB",
+		"peak rss is a high-water mark for the whole process",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q\n%s", want, out)
+		}
+	}
+}
+
+// TestCostFooterOmitsWhatWasNotMeasured: a platform that cannot report peak
+// RSS, and an in-memory engine with nothing on disk, record -1, and a "-1 B"
+// in a footer would read as a measurement.
+func TestCostFooterOmitsWhatWasNotMeasured(t *testing.T) {
+	d := FromMeasure("snb-short", "snb", "spec-following; own scheduler",
+		sampleResult("zu", "inproc", 200*time.Microsecond), nil)
+	d.Resource = measure.Resource{MaxRSSBytes: -1, HeapAllocBytes: 1 << 20, LoadBytes: -1}
+	d.Load.Duration = 0
+	got := costLine(d)
+	if got != "live heap 1.0 MB" {
+		t.Errorf("cost line = %q, want only the one figure that was measured", got)
+	}
+	d.Resource = measure.Resource{MaxRSSBytes: -1, LoadBytes: -1}
+	if got := costLine(d); got != "" {
+		t.Errorf("cost line = %q, want nothing when nothing was measured", got)
+	}
+}
+
+func TestBytesText(t *testing.T) {
+	for _, c := range []struct {
+		n    int64
+		want string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1<<20 + 1<<19, "1.5 MB"},
+		{3 << 30, "3.0 GB"},
+		{5 << 40, "5.0 TB"},
+		{5 << 50, "5120.0 TB"},
+	} {
+		if got := bytesText(c.n); got != c.want {
+			t.Errorf("bytesText(%d) = %q, want %q", c.n, got, c.want)
+		}
+	}
+}
+
 // TestRenderMarkdown asserts the markdown table shape and footers.
 func TestRenderMarkdown(t *testing.T) {
 	var buf bytes.Buffer
