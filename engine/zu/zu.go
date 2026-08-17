@@ -1,54 +1,33 @@
-// Package zu is the graph-bench adapter for the zu engine, driven over
-// the Subprocess plane: it talks to zu the way any user's shell script
-// could, through the zu CLI binary. No build tag; pure Go.
+// Package zu is the graph-bench adapter for the zu engine, driven
+// in-process over libzu (crates/zu-capi): the database opens inside the
+// harness process and every query is a direct C call, with no frame, no
+// pipe, and no child process in the timed region. That is the plane
+// ladybug runs on, so a zu column and a ladybug column in one table
+// compare two engines and not two transports.
 //
-// Binary discovery order (spec 04 §2): Config["bin"] → $ZU_BIN →
+// The session itself is behind the zuinproc build tag, because it needs
+// libzu and its header on the machine. This file is the descriptor, and
+// it builds everywhere: a binary built without the tag still lists zu,
+// and a run against it fails at Start with the build line to use, rather
+// than reporting an unknown engine.
+//
+// There used to be a second adapter here that drove the zu CLI over a
+// pipe, one JSON frame per query. It measured the frame more than the
+// engine (a flat 11µs to 13µs per query, which is several times some of
+// the reads underneath it), and it is gone. The engine binary is still
+// needed: libzu has no bulk-load entry point, so Load shells out to
+// `zu copy --reorder degree` once, outside every timed region, and the
+// discovery order for that binary is Config["bin"] → $ZU_BIN →
 // exec.LookPath("zu") → ../zu/target/release/zu → ../zu/target/debug/zu.
-// Start fails loudly, listing every location it tried.
-//
-// Exec runs in one of three modes, probed at Start from `zu help` and
-// confirmed per verb (today's zu lists "shell" and "query" in help while
-// answering "unknown command", so the probe runs each candidate verb
-// bare and only trusts it when it does not reply "unknown command"):
-//
-//   - shell mode: one persistent `zu shell <db> --format jsonl` child for
-//     the whole session; one query frame per line in, carrying the text
-//     and its parameters, one JSON result object per line out. No spawn
-//     cost in any timed region.
-//   - query mode: `zu query <db> -c <text> --format json` per operation.
-//     Process spawn is part of the measured cost — that IS the plane
-//     (F3); Session.Calibrate reports the spawn floor so the runner can
-//     stamp it alongside, never subtract it.
-//   - primitive mode (today's zu): a fixed mapping from micro-read query
-//     IDs to CLI primitives — "micro-point"/"micro-point-miss" →
-//     `zu lookup`, "micro-khop1" → `zu neighbors`, "micro-edge" →
-//     `zu edge`. Only those IDs run; anything else errors.
-//
-// The runner should pre-filter with PrimitiveQueries / (*Engine).CanRun
-// when the session reports Mode() == "primitive", so unmapped queries
-// SKIP (reason zu-no-query-verb) instead of erroring mid-run.
 package zu
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"slices"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/tamnd/graph-bench/engine"
-)
-
-// Exec modes, probed at Start.
-const (
-	modeShell     = "shell"
-	modeQuery     = "query"
-	modePrimitive = "primitive"
 )
 
 // relFallbacks are the local-build binary locations tried after PATH.
@@ -60,16 +39,19 @@ var relFallbacks = []string{
 // Engine is the zu engine descriptor. Zero value is ready to use.
 type Engine struct{}
 
-// New returns the zu engine descriptor.
+// New returns the zu engine descriptor. Nothing opens until Start.
 func New() *Engine { return &Engine{} }
+
+var _ engine.Engine = (*Engine)(nil)
 
 // Info reports zu's static identity and honest capabilities as of the
 // v0.3.0 pin (spec 04 §2). Every false is a dated fact, not a design
-// constant.
+// constant. MaxConcurrency stays 1 because a libzu connection is not
+// safe to use from two threads at once.
 func (e *Engine) Info() engine.Info {
 	return engine.Info{
 		Name:  "zu",
-		Plane: engine.Subprocess,
+		Plane: engine.InProc,
 		// zuQL only, with no Cypher fallback. zu's parser accepts a Cypher
 		// shape for the subset it implements, but it is not Cypher: labels
 		// are case-sensitive and the loader names its tables "node" and
@@ -92,48 +74,9 @@ func (e *Engine) Info() engine.Info {
 	}
 }
 
-// PrimitiveQueries lists the workload query IDs reachable in primitive
-// mode. The runner uses it to pre-filter when Mode() == "primitive":
-// everything else SKIPs with reason "zu-no-query-verb".
-func PrimitiveQueries() []string {
-	return []string{"micro-point", "micro-point-miss", "micro-khop1", "micro-edge"}
-}
-
-// PrimitiveQueries is the method form of the package-level helper.
-func (e *Engine) PrimitiveQueries() []string { return PrimitiveQueries() }
-
-// CanRun reports whether queryID is reachable in primitive mode — the
-// worst-case exec surface. In shell or query mode every dialect-resolved
-// query runs and this filter does not apply.
-func (e *Engine) CanRun(queryID string) bool {
-	return slices.Contains(PrimitiveQueries(), queryID)
-}
-
-// Start discovers the zu binary, probes the exec mode from `zu help`,
-// and binds a session to a database file: Config["path"] if given, else
-// "bench.zu1" in a fresh temp dir (removed on Close).
-func (e *Engine) Start(ctx context.Context, cfg engine.Config) (engine.Session, error) {
-	bin, err := discoverBinary(cfg)
-	if err != nil {
-		return nil, err
-	}
-	mode, err := probeMode(ctx, bin)
-	if err != nil {
-		return nil, err
-	}
-	workDir, err := os.MkdirTemp("", "graph-bench-zu-")
-	if err != nil {
-		return nil, fmt.Errorf("zu: create work dir: %w", err)
-	}
-	dbPath := cfg.Get("path", "")
-	if dbPath == "" {
-		dbPath = filepath.Join(workDir, "bench.zu1")
-	}
-	return &Session{bin: bin, mode: mode, dbPath: dbPath, workDir: workDir}, nil
-}
-
 // discoverBinary walks the spec'd discovery order and returns the first
-// hit; on failure the error lists everywhere it looked.
+// hit; on failure the error lists everywhere it looked. Only Load needs
+// it, for the copy verb.
 func discoverBinary(cfg engine.Config) (string, error) {
 	var tried []string
 	check := func(desc, path string) (string, bool) {
@@ -169,103 +112,34 @@ func discoverBinary(cfg engine.Config) (string, error) {
 		strings.Join(tried, ", "))
 }
 
-// probeMode runs `zu help` and picks the best available exec mode.
-// A verb listed in help is only believed after running it bare confirms
-// it is implemented: today's zu advertises shell and query in help but
-// answers "unknown command" until their milestones land.
-func probeMode(ctx context.Context, bin string) (string, error) {
-	out, err := exec.CommandContext(ctx, bin, "help").CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("zu: %q help failed: %v (output: %s)", bin, err, bytes.TrimSpace(out))
-	}
-	help := string(out)
-	for _, verb := range []string{modeShell, modeQuery} {
-		if strings.Contains(help, verb) && verbImplemented(ctx, bin, verb) {
-			return verb, nil
-		}
-	}
-	return modePrimitive, nil
+// result is the adapter's engine.Result: a materialized table, since
+// libzu hands back a whole result and the harness iterates it row by row.
+type result struct {
+	cols []string
+	rows [][]engine.Value
+	idx  int
 }
 
-// verbImplemented runs the verb bare (stdin at EOF, so an implemented
-// interactive verb exits immediately on missing args or empty input) and
-// reports whether zu recognizes it.
-func verbImplemented(ctx context.Context, bin, verb string) bool {
-	out, _ := exec.CommandContext(ctx, bin, verb).CombinedOutput()
-	return !strings.Contains(string(out), "unknown command")
-}
+var _ engine.Result = (*result)(nil)
 
-// Session is a live zu session. All Exec calls are mutex-serialized
-// (Capabilities.MaxConcurrency == 1).
-type Session struct {
-	bin     string
-	mode    string
-	dbPath  string
-	workDir string
+// Columns reports the result column names, in order.
+func (r *result) Columns() []string { return r.cols }
 
-	mu     sync.Mutex
-	sh     *shellProc // lazily started persistent shell (shell mode)
-	closed bool
-}
-
-// Mode reports the exec mode probed at Start: "shell", "query", or
-// "primitive". Stamped into the run condition by the runner.
-func (s *Session) Mode() string { return s.mode }
-
-// Bin reports the discovered binary path, for the condition stamp.
-func (s *Session) Bin() string { return s.bin }
-
-// Version reports the live version from `zu --version` ("zu X.Y.Z"),
-// never from a pin.
-func (s *Session) Version(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, s.bin, "--version").Output()
-	if err != nil {
-		return "", fmt.Errorf("zu: --version failed: %w", err)
+// Next advances to the next row and reports whether there was one.
+func (r *result) Next() bool {
+	if r.idx >= len(r.rows) {
+		return false
 	}
-	v := strings.TrimSpace(string(out))
-	return strings.TrimPrefix(v, "zu "), nil
+	r.idx++
+	return true
 }
 
-// Begin always fails: zu has no transactions (Capabilities.Transactions
-// is false and the runner filters writes out before they reach us).
-func (s *Session) Begin(ctx context.Context, mode engine.AccessMode) (engine.Tx, error) {
-	return nil, engine.ErrNoTransactions
-}
+// Row returns the current row, valid until the next Next.
+func (r *result) Row() []engine.Value { return r.rows[r.idx-1] }
 
-// Calibrate measures the per-operation process-spawn floor of the
-// current mode: in query and primitive modes it times five no-op
-// `zu --version` invocations and returns the median. The runner stamps
-// this alongside results (spec 08 §8) — it is reported, never
-// subtracted (F3: the plane is the plane). Shell mode has no per-op
-// spawn, so it returns 0. Best effort: 0 on any error.
-func (s *Session) Calibrate(ctx context.Context) time.Duration {
-	if s.mode == modeShell {
-		return 0
-	}
-	durs := make([]time.Duration, 0, 5)
-	for range 5 {
-		start := time.Now()
-		if err := exec.CommandContext(ctx, s.bin, "--version").Run(); err != nil {
-			return 0
-		}
-		durs = append(durs, time.Since(start))
-	}
-	slices.Sort(durs)
-	return durs[len(durs)/2]
-}
+// Err reports the streaming error, of which there is none: the whole
+// result was materialized before the first Next.
+func (r *result) Err() error { return nil }
 
-// Close kills the persistent shell child (if any) and removes the
-// session's temp dir. Idempotent, safe on a partially failed session.
-func (s *Session) Close(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	s.teardownShellLocked()
-	if s.workDir != "" {
-		os.RemoveAll(s.workDir)
-	}
-	return nil
-}
+// Close releases the result, which the C handle already did.
+func (r *result) Close() error { return nil }

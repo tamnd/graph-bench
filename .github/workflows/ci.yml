@@ -52,9 +52,10 @@ jobs:
       - name: vet (ladybug tag, no link)
         run: go vet -tags ladybug ./engine/ladybug/ || echo "::warning::ladybug vet skipped (liblbug not present)"
 
-      # Same for the zuinproc tag: it needs libzu and its header from a zu
-      # checkout. The zu-inproc job below builds those for real; this step
-      # keeps the fast lane honest about tag rot if that job is ever cut.
+      # Same for the zuinproc tag, which is the only way zu runs at all:
+      # it needs libzu and its header from a zu checkout. The zu-inproc job
+      # below builds those for real; this step keeps the fast lane honest
+      # about tag rot if that job is ever cut.
       - name: vet (zuinproc tag, no link)
         run: go vet -tags zuinproc ./engine/zu/ || echo "::warning::zuinproc vet skipped (libzu not present)"
 
@@ -111,4 +112,4 @@ jobs:
         working-directory: graph-bench
         env:
           ZU_BIN: ${{ github.workspace }}/zu/target/release/zu
-        run: ./gb run --workload micro-read --scale smoke --engines zu-capi --out results
+        run: ./gb run --workload micro-read --scale smoke --engines zu --out results
