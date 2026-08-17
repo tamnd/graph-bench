@@ -1,15 +1,14 @@
 //go:build zuinproc
 
-// In-process zu adapter, over libzu (crates/zu-capi). Same engine as the
-// Subprocess adapter in this package, different plane: the database opens
-// inside the harness process and every query is a direct call, with no
-// frame, no pipe, and no child process in the timed region. That is the
-// plane ladybug runs on, so this is the adapter that makes the two
-// comparable.
+// The live half of the zu adapter, over libzu (crates/zu-capi): the
+// database opens inside the harness process and every query is a direct
+// call, with no frame, no pipe, and no child process in the timed
+// region. That is the plane ladybug runs on, so this is the adapter that
+// makes the two comparable.
 //
-// Build tag: zuinproc (spec 01 §3.2). Registered under the name "zu-capi"
-// so it can sit in
-// the same table as "zu" and show what the subprocess frame costs.
+// Build tag: zuinproc (spec 01 §3.2). The descriptor in zu.go builds
+// without the tag and its Start says what to build, so the engine is
+// never silently missing.
 //
 // # Library location
 //
@@ -65,56 +64,29 @@ import (
 	"github.com/tamnd/graph-bench/engine"
 )
 
-// InprocEngine is the libzu engine descriptor. Zero value is ready to use.
-type InprocEngine struct{}
-
-// NewInproc returns the in-process zu engine descriptor. Nothing opens
-// until Start.
-func NewInproc() *InprocEngine { return &InprocEngine{} }
-
-var _ engine.Engine = (*InprocEngine)(nil)
-
-// Info reports the same engine and the same honest capabilities as the
-// subprocess adapter, on the in-process plane. MaxConcurrency stays 1
-// because a libzu session is not thread safe.
-//
-// The dialect chain stays zuQL only, where spec 01 §3.2 asks for
-// "zuql, cypher". Coverage is a property of the engine, not of the plane
-// it is reached over, and the reason the subprocess adapter gives holds
-// here word for word: a query with no zuQL text would FAIL on the Cypher
-// text instead of SKIPping, and one FAIL discards the measurement for
-// every query in the workload. The chain widens when zu's parser earns
-// it, on both adapters at once.
-func (e *InprocEngine) Info() engine.Info {
-	info := (&Engine{}).Info()
-	info.Name = "zu-capi"
-	info.Plane = engine.InProc
-	return info
-}
-
 // Start discovers the zu binary (Load needs the copy verb) and binds a
 // session to a database file: Config["path"] if given, else "bench.zu1"
 // in a fresh temp dir, removed on Close. The libzu session opens lazily,
 // on the first query after the file exists.
-func (e *InprocEngine) Start(ctx context.Context, cfg engine.Config) (engine.Session, error) {
+func (e *Engine) Start(ctx context.Context, cfg engine.Config) (engine.Session, error) {
 	bin, err := discoverBinary(cfg)
 	if err != nil {
 		return nil, err
 	}
-	workDir, err := os.MkdirTemp("", "graph-bench-zu-capi-")
+	workDir, err := os.MkdirTemp("", "graph-bench-zu-")
 	if err != nil {
-		return nil, fmt.Errorf("zu-capi: create work dir: %w", err)
+		return nil, fmt.Errorf("zu: create work dir: %w", err)
 	}
 	dbPath := cfg.Get("path", "")
 	if dbPath == "" {
 		dbPath = filepath.Join(workDir, "bench.zu1")
 	}
-	return &inprocSession{bin: bin, dbPath: dbPath, workDir: workDir}, nil
+	return &Session{bin: bin, dbPath: dbPath, workDir: workDir}, nil
 }
 
-// inprocSession is one open libzu session plus its prepared-statement
+// Session is one open libzu session plus its prepared-statement
 // cache, keyed by query text the way a real embedding host would keep it.
-type inprocSession struct {
+type Session struct {
 	bin     string
 	dbPath  string
 	workDir string
@@ -125,48 +97,52 @@ type inprocSession struct {
 	closed bool
 }
 
-var _ engine.Session = (*inprocSession)(nil)
+var _ engine.Session = (*Session)(nil)
 
 // Bin reports the discovered binary path, for the condition stamp.
-func (s *inprocSession) Bin() string { return s.bin }
+func (s *Session) Bin() string { return s.bin }
 
 // Mode reports the exec surface, for the condition stamp. There is only
 // one here: direct calls into libzu.
-func (s *inprocSession) Mode() string { return "capi" }
+func (s *Session) Mode() string { return "capi" }
 
 // Version reports the library version from zu_version(), which is the
 // version of the code actually linked in, not of a binary on PATH.
-func (s *inprocSession) Version(ctx context.Context) (string, error) {
+func (s *Session) Version(ctx context.Context) (string, error) {
 	return C.GoString(C.zu_version()), nil
 }
 
 // Begin always fails: zu has no transactions.
-func (s *inprocSession) Begin(ctx context.Context, mode engine.AccessMode) (engine.Tx, error) {
+func (s *Session) Begin(ctx context.Context, mode engine.AccessMode) (engine.Tx, error) {
 	return nil, engine.ErrNoTransactions
 }
 
 // Calibrate reports the per-operation process-spawn floor, which is zero
-// here: nothing spawns per operation. The number exists so a run on this
-// plane can be told apart from a subprocess run in the stamped condition.
-func (s *inprocSession) Calibrate(ctx context.Context) time.Duration { return 0 }
+// here: nothing spawns per operation. The number is still stamped, so a
+// result file says on its face that the measurement carries no transport.
+func (s *Session) Calibrate(ctx context.Context) time.Duration { return 0 }
 
-// Load bulk-loads through the CLI, the same materialization and the same
-// `zu copy --reorder degree` the subprocess adapter uses, edge properties
-// included, then drops any open session so the next query opens the file
-// that copy just wrote. libzu has no load entry point; when it grows one
-// this moves in-process too. Load is outside every timed region either way.
-func (s *inprocSession) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
+// Load bulk-loads a file dataset through the CLI, materializing the
+// canonical rel files into one edge list and running
+// `zu copy --reorder degree`, edge properties included, then drops any
+// open session so the next query opens the file that copy just wrote.
+// libzu has no load entry point; when it grows one this moves in-process
+// too. Load is outside every timed region either way.
+//
+// A statements-only dataset has no directory to copy, and goes through
+// loadStatements instead: one Exec per setup statement, which is a write
+// surface libzu did not have until zu's INSERT landed.
+func (s *Session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return engine.LoadStats{}, errors.New("zu-capi: session is closed")
+		return engine.LoadStats{}, errors.New("zu: session is closed")
 	}
 	if ds.Dir() == "" {
-		return engine.LoadStats{}, fmt.Errorf(
-			"zu-capi: dataset %q is statements-only; libzu has no write surface yet, run it on the zu subprocess adapter", ds.Name())
+		return s.loadStatementsLocked(ctx, ds)
 	}
 
-	stats, err := copyDataset(ctx, "zu-capi", s.bin, s.workDir, s.dbPath, ds)
+	stats, err := copyDataset(ctx, "zu", s.bin, s.workDir, s.dbPath, ds)
 	if err != nil {
 		return engine.LoadStats{}, err
 	}
@@ -174,18 +150,58 @@ func (s *inprocSession) Load(ctx context.Context, ds engine.Dataset) (engine.Loa
 	return stats, nil
 }
 
+// loadStatementsLocked seeds a statements-only dataset by executing each
+// setup statement through libzu. Caller holds s.mu, so it runs the
+// statements through execLocked rather than Exec, which would deadlock.
+func (s *Session) loadStatementsLocked(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
+	start := time.Now()
+	for i, stmt := range ds.Statements() {
+		res, err := s.execLocked(engine.Op{
+			QueryID: fmt.Sprintf("load-statement-%d", i),
+			Class:   engine.Write,
+			Dialect: engine.ZuQL,
+			Text:    stmt,
+		})
+		if err != nil {
+			return engine.LoadStats{}, fmt.Errorf("zu: load statement %d: %w", i, err)
+		}
+		for res.Next() {
+		}
+		errStream := res.Err()
+		res.Close()
+		if errStream != nil {
+			return engine.LoadStats{}, fmt.Errorf("zu: load statement %d: %w", i, errStream)
+		}
+	}
+	bytes := int64(-1)
+	if fi, err := os.Stat(s.dbPath); err == nil {
+		bytes = fi.Size()
+	}
+	return engine.LoadStats{
+		Duration:    time.Since(start),
+		BytesOnDisk: bytes,
+		Method:      "statements",
+	}, nil
+}
+
 // Exec runs one operation as a prepared statement: compile on the first
 // sighting of the text, bind the parameters, execute. Mutex serialized
 // (MaxConcurrency 1). libzu has no cancellation, so the context is
 // checked on the way in and not again until the call returns.
-func (s *inprocSession) Exec(ctx context.Context, op engine.Op) (engine.Result, error) {
+func (s *Session) Exec(ctx context.Context, op engine.Op) (engine.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.execLocked(op)
+}
+
+// execLocked is Exec with the lock already held, so Load can run setup
+// statements without releasing it between them. Caller holds s.mu.
+func (s *Session) execLocked(op engine.Op) (engine.Result, error) {
 	if s.closed {
-		return nil, errors.New("zu-capi: session is closed")
+		return nil, errors.New("zu: session is closed")
 	}
 	if err := s.openLocked(); err != nil {
 		return nil, err
@@ -201,7 +217,7 @@ func (s *inprocSession) Exec(ctx context.Context, op engine.Op) (engine.Result, 
 	var res *C.zu_result
 	var cerr *C.zu_error
 	if st := C.zu_execute(stmt, &res, &cerr); st != C.ZU_OK {
-		return nil, takeErr(st, cerr, "zu-capi: execute failed")
+		return nil, takeErr(st, cerr, "zu: execute failed")
 	}
 	defer C.zu_result_free(res)
 	return decodeResult(res)
@@ -209,7 +225,7 @@ func (s *inprocSession) Exec(ctx context.Context, op engine.Op) (engine.Result, 
 
 // Close frees the prepared statements, closes the session, and removes
 // the work dir. Statements go first: the header requires it. Idempotent.
-func (s *inprocSession) Close(ctx context.Context) error {
+func (s *Session) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -224,7 +240,7 @@ func (s *inprocSession) Close(ctx context.Context) error {
 }
 
 // openLocked opens the session on first use. Caller holds s.mu.
-func (s *inprocSession) openLocked() error {
+func (s *Session) openLocked() error {
 	if s.sess != nil {
 		return nil
 	}
@@ -233,7 +249,7 @@ func (s *inprocSession) openLocked() error {
 	var conn *C.zu_conn
 	var cerr *C.zu_error
 	if st := C.zu_open_z(cpath, &conn, &cerr); st != C.ZU_OK {
-		return takeErr(st, cerr, fmt.Sprintf("zu-capi: open %q failed", s.dbPath))
+		return takeErr(st, cerr, fmt.Sprintf("zu: open %q failed", s.dbPath))
 	}
 	s.sess = conn
 	return nil
@@ -241,7 +257,7 @@ func (s *inprocSession) openLocked() error {
 
 // closeSessionLocked tears down statements then the session, leaving the
 // struct ready to reopen. Caller holds s.mu.
-func (s *inprocSession) closeSessionLocked() {
+func (s *Session) closeSessionLocked() {
 	for _, stmt := range s.stmts {
 		C.zu_stmt_close(stmt)
 	}
@@ -254,7 +270,7 @@ func (s *inprocSession) closeSessionLocked() {
 
 // preparedLocked returns the cached statement for text, compiling it on
 // first sighting. Caller holds s.mu.
-func (s *inprocSession) preparedLocked(text string) (*C.zu_stmt, error) {
+func (s *Session) preparedLocked(text string) (*C.zu_stmt, error) {
 	if stmt, ok := s.stmts[text]; ok {
 		return stmt, nil
 	}
@@ -263,7 +279,7 @@ func (s *inprocSession) preparedLocked(text string) (*C.zu_stmt, error) {
 	var stmt *C.zu_stmt
 	var cerr *C.zu_error
 	if st := C.zu_prepare_z(s.sess, ctext, &stmt, &cerr); st != C.ZU_OK {
-		return nil, takeErr(st, cerr, "zu-capi: prepare failed")
+		return nil, takeErr(st, cerr, "zu: prepare failed")
 	}
 	if s.stmts == nil {
 		s.stmts = make(map[string]*C.zu_stmt)
@@ -301,7 +317,7 @@ func bindParams(stmt *C.zu_stmt, params map[string]engine.Value) error {
 			// the subprocess adapter reports. Fail rather than smuggle
 			// one in as 0/1.
 			C.free(unsafe.Pointer(cname))
-			return fmt.Errorf("zu-capi: parameter %q is a bool; zu has no boolean parameters", name)
+			return fmt.Errorf("zu: parameter %q is a bool; zu has no boolean parameters", name)
 		default:
 			cv := C.CString(fmt.Sprint(v))
 			st = C.zu_bind_str_z(stmt, cname, cv)
@@ -312,7 +328,7 @@ func bindParams(stmt *C.zu_stmt, params map[string]engine.Value) error {
 		// that is not UTF-8, and a closed connection are everything they
 		// can report, so the status is the whole message.
 		if st != C.ZU_OK {
-			return fmt.Errorf("zu-capi: bind %q failed with status %d", name, int(st))
+			return fmt.Errorf("zu: bind %q failed with status %d", name, int(st))
 		}
 	}
 	return nil
@@ -337,7 +353,7 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 		var name *C.char
 		var nameLen C.size_t
 		if st := C.zu_result_col_name(res, C.uint32_t(c), &name, &nameLen); st != C.ZU_OK {
-			return nil, fmt.Errorf("zu-capi: column %d has no readable name, status %d", c, int(st))
+			return nil, fmt.Errorf("zu: column %d has no readable name, status %d", c, int(st))
 		}
 		names[c] = C.GoStringN(name, C.int(nameLen))
 		if rows == 0 {
@@ -353,7 +369,7 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 		case C.ZU_TYPE_INT, C.ZU_TYPE_BOOL:
 			var p *C.int64_t
 			if st := C.zu_result_col_i64(res, C.uint32_t(c), &p); st != C.ZU_OK || p == nil {
-				return nil, fmt.Errorf("zu-capi: column %d is not readable as int64, status %d", c, int(st))
+				return nil, fmt.Errorf("zu: column %d is not readable as int64, status %d", c, int(st))
 			}
 			vals := unsafe.Slice((*int64)(unsafe.Pointer(p)), rows)
 			valid := validSlice(res, rows, c)
@@ -373,7 +389,7 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 			// rather than hand back a row number that looks like a value.
 			var p *C.uint64_t
 			if st := C.zu_result_col_node_offset(res, C.uint32_t(c), &p); st != C.ZU_OK || p == nil {
-				return nil, fmt.Errorf("zu-capi: column %d is not readable as a node offset, status %d", c, int(st))
+				return nil, fmt.Errorf("zu: column %d is not readable as a node offset, status %d", c, int(st))
 			}
 			vals := unsafe.Slice((*uint64)(unsafe.Pointer(p)), rows)
 			valid := validSlice(res, rows, c)
@@ -386,7 +402,7 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 		case C.ZU_TYPE_FLOAT:
 			var p *C.double
 			if st := C.zu_result_col_f64(res, C.uint32_t(c), &p); st != C.ZU_OK || p == nil {
-				return nil, fmt.Errorf("zu-capi: column %d is not readable as float64, status %d", c, int(st))
+				return nil, fmt.Errorf("zu: column %d is not readable as float64, status %d", c, int(st))
 			}
 			vals := unsafe.Slice((*float64)(unsafe.Pointer(p)), rows)
 			valid := validSlice(res, rows, c)
@@ -409,7 +425,7 @@ func decodeResult(res *C.zu_result) (engine.Result, error) {
 			// Rel, list and path cells have no columnar read and no
 			// canonical spelling here yet. Fail loudly: a silent
 			// placeholder would pass verification against nothing.
-			return nil, fmt.Errorf("zu-capi: column %d holds cell type %d, which the adapter cannot decode yet", c, kind)
+			return nil, fmt.Errorf("zu: column %d holds cell type %d, which the adapter cannot decode yet", c, kind)
 		}
 	}
 	return &result{cols: names, rows: out}, nil
@@ -423,7 +439,7 @@ func columnKind(res *C.zu_result, rows, col int) (C.int32_t, error) {
 	for r := 0; r < rows; r++ {
 		var t C.int32_t
 		if st := C.zu_result_cell_type(res, C.uint64_t(r), C.uint32_t(col), &t); st != C.ZU_OK {
-			return C.ZU_TYPE_NULL, fmt.Errorf("zu-capi: cell type of row %d column %d is unreadable, status %d", r, col, int(st))
+			return C.ZU_TYPE_NULL, fmt.Errorf("zu: cell type of row %d column %d is unreadable, status %d", r, col, int(st))
 		}
 		if t != C.ZU_TYPE_NULL {
 			return t, nil
@@ -455,5 +471,5 @@ func takeErr(st C.zu_status, cerr *C.zu_error, fallback string) error {
 	if p == nil {
 		return fmt.Errorf("%s (status %d)", fallback, int(st))
 	}
-	return fmt.Errorf("zu-capi: %s", C.GoStringN(p, C.int(n)))
+	return fmt.Errorf("zu: %s", C.GoStringN(p, C.int(n)))
 }

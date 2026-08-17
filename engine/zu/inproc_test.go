@@ -14,7 +14,7 @@ import (
 // startInproc loads a four-edge graph through a real zu binary and hands
 // back an open in-process session. It skips when no zu binary is around,
 // since Load has to run the copy verb for real.
-func startInproc(t *testing.T) *inprocSession {
+func startInproc(t *testing.T) *Session {
 	t.Helper()
 	if _, err := discoverBinary(engine.Config{}); err != nil {
 		t.Skipf("no zu binary: %v", err)
@@ -26,11 +26,11 @@ func startInproc(t *testing.T) *inprocSession {
 		t.Fatal(err)
 	}
 
-	sess, err := NewInproc().Start(context.Background(), engine.Config{})
+	sess, err := New().Start(context.Background(), engine.Config{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	s := sess.(*inprocSession)
+	s := sess.(*Session)
 	t.Cleanup(func() { s.Close(context.Background()) })
 
 	stats, err := s.Load(context.Background(), &fileDataset{dir: dir, relFile: relFile})
@@ -44,7 +44,7 @@ func startInproc(t *testing.T) *inprocSession {
 }
 
 // exec runs one query and drains it into rows.
-func execRows(t *testing.T, s *inprocSession, text string, params map[string]engine.Value) ([]string, [][]engine.Value) {
+func execRows(t *testing.T, s *Session, text string, params map[string]engine.Value) ([]string, [][]engine.Value) {
 	t.Helper()
 	res, err := s.Exec(context.Background(), engine.Op{
 		QueryID: "test", Class: engine.PointRead, Dialect: engine.ZuQL,
@@ -147,9 +147,9 @@ func TestInprocCloseIdempotent(t *testing.T) {
 }
 
 func TestInprocInfo(t *testing.T) {
-	info := NewInproc().Info()
-	if info.Name != "zu-capi" {
-		t.Errorf("Name = %q, want zu-capi", info.Name)
+	info := New().Info()
+	if info.Name != "zu" {
+		t.Errorf("Name = %q, want zu", info.Name)
 	}
 	if info.Plane != engine.InProc {
 		t.Errorf("Plane = %v, want inproc", info.Plane)
@@ -163,7 +163,7 @@ func TestInprocInfo(t *testing.T) {
 }
 
 func TestInprocVersion(t *testing.T) {
-	v, err := (&inprocSession{}).Version(context.Background())
+	v, err := (&Session{}).Version(context.Background())
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}

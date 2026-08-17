@@ -69,7 +69,7 @@ jobs:
           MEMGRAPH_URI: bolt://localhost:7687
 
   zu:
-    name: cross-engine (zu, subprocess plane)
+    name: cross-engine (zu, in-process plane)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -82,14 +82,16 @@ jobs:
       - name: build zu from source
         run: |
           git clone --depth 1 https://github.com/tamnd/zu.git /tmp/zu
-          cd /tmp/zu && cargo build --release -p zu-cli
+          cd /tmp/zu && cargo build --release -p zu-cli -p zu-capi
         continue-on-error: true
         id: zubuild
 
-      - name: smoke run (mode probed at start, shell once zu head has it)
+      - name: smoke run (libzu linked in, every query a direct call)
         if: steps.zubuild.outcome == 'success'
         run: |
-          go run ./cmd/graph-bench run \
+          go run -tags zuinproc ./cmd/graph-bench run \
             --workload micro-read --engines zu --count 30 --out /tmp/results
         env:
           ZU_BIN: /tmp/zu/target/release/zu
+          CGO_CFLAGS: -I/tmp/zu/crates/zu-capi/include
+          CGO_LDFLAGS: -L/tmp/zu/target/release -lzu -Wl,-rpath,/tmp/zu/target/release

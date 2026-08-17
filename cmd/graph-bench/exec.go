@@ -115,9 +115,9 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	// Bind curated parameter pools (queries with a PoolKey and no Params).
 	unbound := bindParams(wl, ds, rc.seed)
 
-	// Pre-filter: capability skips verify handles itself; the zu primitive
-	// mode additionally restricts to the mapped primitive query IDs.
-	vw, preskips := prefilterWorkload(wl, sess, eng, unbound)
+	// Pre-filter: capability and dialect skips are verify's own job, so all
+	// this drops is a query whose parameter pool never bound.
+	vw, preskips := prefilterWorkload(wl, unbound)
 
 	// Verify — the toll gate, printed before any timing output (spec 09 §1).
 	sampled := wl.ValidationScale != "" && rc.scale != "smoke" && wl.ValidationScale != rc.scale
@@ -518,36 +518,15 @@ func bindParams(wl *workload.Workload, ds engine.Dataset, seed int64) map[string
 }
 
 // prefilterWorkload returns a shallow workload copy restricted to the queries
-// the session can execute, plus synthetic SKIP reports for the rest. Two
-// filters apply here (capability and dialect skips are verify's job): queries
-// with no bound parameter pool, and — when a zu session reports primitive
-// mode — queries outside zu's primitive surface (skip zu-no-query-verb).
-func prefilterWorkload(wl *workload.Workload, sess engine.Session, eng engine.Engine, unbound map[string]bool) (*workload.Workload, []verify.QueryReport) {
+// the session can execute, plus synthetic SKIP reports for the rest. One
+// filter applies here, since capability and dialect skips are verify's job:
+// queries with no bound parameter pool.
+func prefilterWorkload(wl *workload.Workload, unbound map[string]bool) (*workload.Workload, []verify.QueryReport) {
 	allowed := func(q *workload.Query) (bool, string) {
 		if unbound[q.ID] {
 			return false, "no-param-pool"
 		}
 		return true, ""
-	}
-	type moder interface{ Mode() string }
-	type primitives interface{ PrimitiveQueries() []string }
-	if ms, ok := sess.(moder); ok && ms.Mode() == "primitive" {
-		if pq, ok := eng.(primitives); ok {
-			prim := map[string]bool{}
-			for _, id := range pq.PrimitiveQueries() {
-				prim[id] = true
-			}
-			inner := allowed
-			allowed = func(q *workload.Query) (bool, string) {
-				if ok, reason := inner(q); !ok {
-					return false, reason
-				}
-				if !prim[q.ID] {
-					return false, "zu-no-query-verb"
-				}
-				return true, ""
-			}
-		}
 	}
 
 	copyWl := *wl
@@ -613,9 +592,9 @@ func buildCondition(
 	for k, v := range cfg.Values {
 		cfgMap[k] = v
 	}
-	// zu extras: exec mode, discovered binary, calibrated spawn floor. The
-	// subprocess plane reports its per-op floor as a stamp field, never
-	// subtracts it (spec 08 §8).
+	// zu extras: exec surface, discovered binary, calibrated spawn floor.
+	// The floor is a stamp field, never a subtraction (spec 08 §8); on the
+	// in-process plane it is zero, which is the point of stamping it.
 	if zs, ok := sess.(interface{ Mode() string }); ok {
 		cfgMap["zu_mode"] = zs.Mode()
 	}

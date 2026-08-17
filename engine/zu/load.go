@@ -18,11 +18,11 @@ import (
 	"github.com/tamnd/graph-bench/engine"
 )
 
-// Load bulk-loads the dataset with zu's documented best practice (F2):
-// materialize the canonical rel files into one edge list and run
-// `zu copy --reorder degree`. String ids map to themselves; zu copy keys
-// them. LoadStats come from copy's own stats output, with liberal
-// fallbacks (file size via os.Stat, wall-clock duration).
+// copyDataset is the whole bulk-load path (F2): materialize the canonical
+// rel files into one edge list and run `zu copy --reorder degree`. String
+// ids map to themselves; zu copy keys them. LoadStats come from copy's own
+// stats output, with liberal fallbacks (file size via os.Stat, wall-clock
+// duration). label prefixes the errors with the adapter's name.
 //
 // A dataset with one rel table that carries properties keeps them: the
 // materialized file is a canonical CSV with its typed header, which zu
@@ -33,21 +33,6 @@ import (
 // pair named twice has no one row to hold the values. That last one is
 // only visible to copy, so a load that trips it retries flat and says so
 // in Method rather than failing the run.
-//
-// Statements-only datasets need a statement executor: in shell or query
-// mode each setup statement runs through Exec (Method "statements");
-// in primitive mode Load fails with a clear error.
-func (s *Session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
-	if ds.Dir() == "" {
-		return s.loadStatements(ctx, ds)
-	}
-	return copyDataset(ctx, "zu", s.bin, s.workDir, s.dbPath, ds)
-}
-
-// copyDataset is the whole bulk-load path, shared by both planes: the
-// in-process adapter loads through the CLI too, so it has to make the same
-// choice about edge properties or the two planes would not be measuring the
-// same database. label prefixes the errors with the adapter's name.
 func copyDataset(ctx context.Context, label, bin, workDir, dbPath string, ds engine.Dataset) (engine.LoadStats, error) {
 	if typ, ok := propRel(ds); ok {
 		edgesPath := filepath.Join(workDir, "edges.csv")
@@ -122,43 +107,6 @@ func propRel(ds engine.Dataset) (string, bool) {
 		return typ, true
 	}
 	return "", false
-}
-
-// loadStatements seeds a statements-only dataset by executing each setup
-// statement, which requires a statement surface (shell or query mode).
-func (s *Session) loadStatements(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
-	if s.mode != modeShell && s.mode != modeQuery {
-		return engine.LoadStats{}, fmt.Errorf(
-			"zu: statements load requires zu query support (mode %q; zu has no query/shell verb yet)", s.mode)
-	}
-	start := time.Now()
-	for i, stmt := range ds.Statements() {
-		res, err := s.Exec(ctx, engine.Op{
-			QueryID: fmt.Sprintf("load-statement-%d", i),
-			Class:   engine.Write,
-			Dialect: engine.ZuQL,
-			Text:    stmt,
-		})
-		if err != nil {
-			return engine.LoadStats{}, fmt.Errorf("zu: load statement %d: %w", i, err)
-		}
-		for res.Next() {
-		}
-		errStream := res.Err()
-		res.Close()
-		if errStream != nil {
-			return engine.LoadStats{}, fmt.Errorf("zu: load statement %d: %w", i, errStream)
-		}
-	}
-	bytes := int64(-1)
-	if fi, err := os.Stat(s.dbPath); err == nil {
-		bytes = fi.Size()
-	}
-	return engine.LoadStats{
-		Duration:    time.Since(start),
-		BytesOnDisk: bytes,
-		Method:      "statements",
-	}, nil
 }
 
 // materializeEdges concatenates every rel table's CSV files into one
