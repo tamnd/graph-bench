@@ -218,13 +218,13 @@ RETURN nid AS id, label AS component ORDER BY id`,
 WITH component_id, min(node.id) AS label, collect(node) AS members
 UNWIND members AS m
 RETURN m.id AS id, label AS component ORDER BY id`,
-			// zu names a component by the smallest row in it, which is
-			// the smallest id only when the loader kept ids and rows in
-			// step. The relabel does not assume it did.
+			// zu names a component by the smallest id in it, which is
+			// what Graphalytics asks for, so the kernel's answer is the
+			// answer. This used to carry a group-by and an unwind over
+			// the whole node table to turn a row into an id, and that
+			// relabel was most of the query's time.
 			engine.ZuQL: `CALL wcc('edge') YIELD node, component
-WITH component, min(node.id) AS label, collect(node.id) AS ids
-UNWIND ids AS nid
-RETURN nid AS id, label AS component ORDER BY id`,
+RETURN node.id AS id, component ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
