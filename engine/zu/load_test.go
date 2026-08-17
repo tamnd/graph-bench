@@ -199,9 +199,11 @@ func TestLoadKeepsEdgeProperties(t *testing.T) {
 	}
 }
 
-// TestLoadFallsBackWhenCopyRefusesTheProperties keeps a load that trips
-// copy's own limit on a pair named twice: it retries flat and says so in
-// Method rather than failing the run.
+// TestLoadFallsBackWhenCopyRefusesTheProperties keeps a load whose copy
+// refuses the typed CSV: it retries flat and says so in Method rather
+// than failing the run. The stub refuses a pair named twice, which is
+// what zu used to refuse and no longer does, so this is now about the
+// fallback rather than about that one error.
 func TestLoadFallsBackWhenCopyRefusesTheProperties(t *testing.T) {
 	requireUnix(t)
 	dir, relFile := writeLinks(t)

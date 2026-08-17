@@ -32,11 +32,10 @@ import (
 // materialized file is a canonical CSV with its typed header, which zu
 // copy reads as edge property columns, and a query can then read an
 // edge's values. Anything else flattens to the 2-column whitespace list,
-// because zu copy builds one edge table and addresses an edge property
-// by the endpoint pair, so a second rel table has nowhere to go and a
-// pair named twice has no one row to hold the values. That last one is
-// only visible to copy, so a load that trips it retries flat and says so
-// in Method rather than failing the run.
+// because zu copy builds one edge table, so a second rel table has
+// nowhere to go. A copy that fails for any other reason retries flat and
+// says so in Method rather than failing the run, which keeps a dataset
+// measurable on the queries that need no properties.
 func copyDataset(ctx context.Context, label, bin, workDir, dbPath string, ds engine.Dataset) (engine.LoadStats, error) {
 	nodes, err := nodesFlag(ds, workDir)
 	if err != nil {

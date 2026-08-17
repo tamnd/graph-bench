@@ -324,6 +324,16 @@ RETURN n.id AS id, total AS distance
 UNION ALL
 MATCH (src:Node {id: $source})
 RETURN src.id AS id, 0 AS distance`,
+			// zu answers this with a kernel too. sssp_weighted names
+			// the weight column rather than assuming one, follows stored
+			// edge direction, and reads a weight by the edge's slot in
+			// the forward list, so a pair the generator emitted twice
+			// keeps two weights and the cheaper copy is the one a path
+			// takes. Unreached nodes come back null where the reference
+			// has no row, the same filter bfs needs.
+			engine.ZuQL: `CALL sssp_weighted('edge', $source, 'w') YIELD node, distance
+WITH node, distance WHERE distance IS NOT NULL
+RETURN node.id AS id, distance ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, params workload.Params) (*workload.Answer, error) {
