@@ -284,7 +284,22 @@ func tcQuery() *workload.Query {
 		ID:        "gap-tc",
 		Class:     engine.Analytical,
 		Algorithm: "tc",
-		Params:    workload.Fixed{},
+		Texts: map[engine.Dialect]string{
+			// zu counts triangles with a kernel, which is what the GAP
+			// TC benchmark measures. It yields the corners a node sits
+			// on rather than one global number, so the sum comes back
+			// divided by the three corners every triangle is counted
+			// at. Direction is dropped and a pair joined twice is one
+			// adjacency, the same graph the reference walks.
+			//
+			// micro-triangle-undirected asks the same question of the
+			// join engine on purpose and keeps its pattern, so the two
+			// stay a comparison of different things.
+			engine.ZuQL: `CALL triangle_count('edge') YIELD node, triangles
+WITH sum(triangles) AS corners
+RETURN corners / 3 AS triangles`,
+		},
+		Params: workload.Fixed{},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
 				g, err := workload.LoadGraph(ds)
