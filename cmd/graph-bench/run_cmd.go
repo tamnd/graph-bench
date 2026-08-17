@@ -208,6 +208,8 @@ func newRunCmd() *cobra.Command {
 
 			fmt.Fprintln(cmd.OutOrStdout())
 			report.RenderTable(cmd.OutOrStdout(), report.NewMatrix(docs))
+			fmt.Fprintln(cmd.OutOrStdout())
+			report.RenderResources(cmd.OutOrStdout(), docs)
 			if failed > 0 {
 				return fmt.Errorf("run: %d engine(s) failed", failed)
 			}

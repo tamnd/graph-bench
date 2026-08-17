@@ -86,7 +86,7 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	}
 
 	// Start and load.
-	memStart := measure.SnapshotMem()
+	usageStart := measure.Snapshot()
 	sess, err := eng.Start(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("%s: Start: %w", engName, err)
@@ -148,11 +148,24 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	finishedAt := time.Now().UTC()
 
 	res.Load = loadStats
-	res.Resource = measure.CaptureResource(
-		memStart, measure.SnapshotMem(),
-		measure.DirSizeBytes(ds.Dir()), loadStats.BytesOnDisk,
-	)
 	res.Condition = buildCondition(ctx, info, sess, cfg, wl, ds, plan, rc, engVersion, res, measured, startedAt, finishedAt)
+
+	// Close the session before the closing reading, and take the store size
+	// after the close. A subprocess engine's CPU and peak resident set only
+	// reach the children rusage once the child has been waited for, and a store
+	// only holds every byte the run made durable once the engine has shut down,
+	// so a reading taken with the engine still up reports a subprocess engine
+	// as free and its store as smaller than it is. buildCondition runs first
+	// because it probes the session for the stamp fields.
+	if !closed {
+		_ = sess.Close(context.WithoutCancel(ctx))
+		closed = true
+	}
+	res.Resource = measure.CaptureResource(usageStart, measure.Snapshot(), measure.Disk{
+		DatasetBytes: measure.DirSizeBytes(ds.Dir()),
+		LoadBytes:    loadStats.BytesOnDisk,
+		StoreBytes:   measure.DirSizeBytes(dbTempDir),
+	})
 
 	doc := report.FromMeasure(wl.Name, wl.Family, wl.Fidelity, res, toVerifications(plan.Reports))
 	return doc, nil

@@ -2,6 +2,9 @@
 
 package measure
 
-// maxRSSBytes reports peak RSS as unavailable on platforms without a getrusage
-// path here. The other Resource fields (heap, GC, disk) are still captured.
-func maxRSSBytes() int64 { return -1 }
+// readProcUsage reports the kernel's accounting as unavailable on a platform
+// with no getrusage path here, which makes every CPU, fault, switch and
+// resident figure read -1. The heap, GC and disk fields are still captured, so
+// a run on such a platform still says how much memory the engine settled at
+// and how much disk the store takes.
+func readProcUsage() procUsage { return procUsage{} }

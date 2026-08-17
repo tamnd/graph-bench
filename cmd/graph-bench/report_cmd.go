@@ -86,6 +86,8 @@ func renderDocs(out io.Writer, docs []*report.Document, format string) error {
 	switch format {
 	case "table", "":
 		report.RenderTable(out, m)
+		fmt.Fprintln(out)
+		report.RenderResources(out, docs)
 		return nil
 	case "markdown", "md":
 		report.RenderMarkdown(out, m)
