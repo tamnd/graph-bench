@@ -389,9 +389,16 @@ func (g *Graph) LabelPropagation(rounds int) []NodeLabel {
 // LocalClustering returns the local clustering coefficient of every node,
 // ordered by numeric id. For a node v whose neighbor set (the union of out-
 // and in-neighbors, excluding v) has size d, the coefficient is the number of
-// directed edges that run between two neighbors divided by d*(d-1), the LDBC
-// directed LCC. A node with fewer than two neighbors has coefficient zero. It
-// is the Graphalytics LCC reference.
+// connected ordered neighbor pairs (u, w) divided by d*(d-1), the count of
+// ordered pairs, which is the LDBC directed LCC. A node with fewer than two
+// neighbors has coefficient zero. It is the Graphalytics LCC reference.
+//
+// A pair counts once however many edges run between it. The denominator
+// counts pairs, so a numerator counting stored edges would put the RMAT
+// graphs, which keep their parallel edges the way Graph500 does, above 1 on
+// a well connected node, and a clustering coefficient above 1 is not a
+// clustering coefficient. It also means every engine answers the same
+// question whether or not its store keeps parallel edges.
 func (g *Graph) LocalClustering() []NodeFloat {
 	n := len(g.ids)
 	// Neighbor sets, undirected union, for membership tests and degree.
@@ -419,11 +426,14 @@ func (g *Graph) LocalClustering() []NodeFloat {
 		}
 		var links int64
 		for u := range nbr[v] {
-			// Count directed edges u->w where both u and w are neighbors of v.
+			// Count neighbors w that u points at, each w once: the
+			// adjacency is sorted, so parallel edges are adjacent.
+			prev := -1
 			for _, w := range g.out[u] {
-				if w == u {
+				if w == u || w == prev {
 					continue
 				}
+				prev = w
 				if _, ok := nbr[v][w]; ok {
 					links++
 				}
