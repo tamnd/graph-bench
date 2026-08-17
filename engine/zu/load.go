@@ -24,6 +24,10 @@ import (
 // stats output, with liberal fallbacks (file size via os.Stat, wall-clock
 // duration). label prefixes the errors with the adapter's name.
 //
+// The node tables travel with the edges as `--nodes`, because an edge
+// list stops at its highest endpoint and a node that appears in no edge
+// would never enter the store.
+//
 // A dataset with one rel table that carries properties keeps them: the
 // materialized file is a canonical CSV with its typed header, which zu
 // copy reads as edge property columns, and a query can then read an
@@ -34,6 +38,10 @@ import (
 // only visible to copy, so a load that trips it retries flat and says so
 // in Method rather than failing the run.
 func copyDataset(ctx context.Context, label, bin, workDir, dbPath string, ds engine.Dataset) (engine.LoadStats, error) {
+	nodes, err := nodesFlag(ds, workDir)
+	if err != nil {
+		return engine.LoadStats{}, err
+	}
 	if typ, ok := propRel(ds); ok {
 		edgesPath := filepath.Join(workDir, "edges.csv")
 		counted, err := materializeProps(ds, typ, edgesPath)
@@ -41,8 +49,7 @@ func copyDataset(ctx context.Context, label, bin, workDir, dbPath string, ds eng
 			return engine.LoadStats{}, err
 		}
 		start := time.Now()
-		out, err := exec.CommandContext(ctx, bin,
-			"copy", "--reorder", "degree", edgesPath, dbPath).CombinedOutput()
+		out, err := runCopy(ctx, bin, nodes, edgesPath, dbPath)
 		if err == nil {
 			stats := parseCopyStats(string(out), dbPath, time.Since(start), counted)
 			stats.Method = "copy (edge properties)"
@@ -68,10 +75,13 @@ func copyFlat(ctx context.Context, label, bin, workDir, dbPath string, ds engine
 	if err != nil {
 		return engine.LoadStats{}, err
 	}
+	nodes, err := nodesFlag(ds, workDir)
+	if err != nil {
+		return engine.LoadStats{}, err
+	}
 
 	start := time.Now()
-	out, err := exec.CommandContext(ctx, bin,
-		"copy", "--reorder", "degree", edgesPath, dbPath).CombinedOutput()
+	out, err := runCopy(ctx, bin, nodes, edgesPath, dbPath)
 	if err != nil {
 		return engine.LoadStats{}, fmt.Errorf("%s: copy failed: %v\n%s", label, err, out)
 	}
@@ -148,6 +158,156 @@ func materializeEdges(ds engine.Dataset, dst string) (int64, error) {
 		return 0, fmt.Errorf("zu: write edge list: %w", err)
 	}
 	return total, nil
+}
+
+// runCopy runs zu copy with the reorder every load uses, and retries
+// without the node file when the first attempt fails.
+//
+// A zu that predates `--nodes` refuses the flag, and the file only adds
+// the nodes no edge names, so the retry is the load this adapter did
+// before rather than a run that dies on an old binary. A failure that
+// is not about the flag fails both attempts, and the first error is the
+// one reported, since that is the one that says what went wrong.
+func runCopy(ctx context.Context, bin string, nodes []string, edgesPath, dbPath string) ([]byte, error) {
+	args := append([]string{"copy", "--reorder", "degree"}, nodes...)
+	args = append(args, edgesPath, dbPath)
+	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
+	if err == nil || len(nodes) == 0 {
+		return out, err
+	}
+	// copy refuses to write over a file it already made, so the retry
+	// starts from nothing the way the first attempt did.
+	_ = os.Remove(dbPath)
+	retry, retryErr := exec.CommandContext(ctx, bin,
+		"copy", "--reorder", "degree", edgesPath, dbPath).CombinedOutput()
+	if retryErr != nil {
+		return out, err
+	}
+	return retry, nil
+}
+
+// nodesFlag returns the "--nodes <file>" arguments for zu copy, or no
+// arguments when the dataset has nothing to add with them.
+//
+// An edge list only reaches as far as its highest endpoint, so a node
+// that appears in no edge and sits above that maximum never enters the
+// store: rmat-14 declares 16384 nodes and loads 16340, and a count over
+// the store then disagrees with the dataset. The node tables are what
+// say otherwise, so their ids go in a file copy reads.
+func nodesFlag(ds engine.Dataset, workDir string) ([]string, error) {
+	path := filepath.Join(workDir, "nodes.txt")
+	usable, err := materializeNodes(ds, path)
+	if err != nil {
+		return nil, err
+	}
+	if !usable {
+		return nil, nil
+	}
+	return []string{"--nodes", path}, nil
+}
+
+// materializeNodes writes every node table's ids, one per line, to dst.
+// Reports whether the file is worth handing to zu copy: a dataset with
+// no node tables has nothing to declare, and an id that is not a number
+// is nothing the store can hold a row for that the edge endpoints have
+// not already given it. Neither is an error, since both load fine
+// without the file.
+func materializeNodes(ds engine.Dataset, dst string) (bool, error) {
+	labels := make([]string, 0, len(ds.Schema().Nodes))
+	for label := range ds.Schema().Nodes {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	if len(labels) == 0 {
+		return false, nil
+	}
+
+	f, err := os.Create(dst)
+	if err != nil {
+		return false, fmt.Errorf("zu: create node list: %w", err)
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+
+	var total int64
+	for _, label := range labels {
+		files, err := ds.NodeFiles(label)
+		if err != nil {
+			return false, fmt.Errorf("zu: node files for %q: %w", label, err)
+		}
+		for _, file := range files {
+			n, numeric, err := appendNodeIDs(w, file)
+			if err != nil {
+				return false, fmt.Errorf("zu: reading %s: %w", file, err)
+			}
+			if !numeric {
+				return false, nil
+			}
+			total += n
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return false, fmt.Errorf("zu: write node list: %w", err)
+	}
+	return total > 0, nil
+}
+
+// appendNodeIDs writes one node CSV's first column, skipping a leading
+// header row when present. Reports false when a value is not an
+// unsigned integer, which ends the whole node list.
+func appendNodeIDs(w *bufio.Writer, path string) (int64, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, false, err
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = -1
+	r.ReuseRecord = true
+
+	var n int64
+	first := true
+	for {
+		rec, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return n, false, err
+		}
+		if len(rec) == 0 {
+			continue
+		}
+		id := strings.TrimSpace(rec[0])
+		if first {
+			first = false
+			if isNodeHeader(id) {
+				continue
+			}
+		}
+		if _, err := strconv.ParseUint(id, 10, 64); err != nil {
+			return n, false, nil
+		}
+		if _, err := w.WriteString(id + "\n"); err != nil {
+			return n, false, err
+		}
+		n++
+	}
+	return n, true, nil
+}
+
+// isNodeHeader recognizes the canonical layout's node id header
+// ("id:ID") and the plain-name variants a hand-written dataset uses.
+func isNodeHeader(field string) bool {
+	if strings.Contains(field, ":") {
+		return true
+	}
+	switch strings.ToLower(field) {
+	case "id", "node", "nodeid", "node_id":
+		return true
+	}
+	return false
 }
 
 // materializeProps concatenates one rel table's CSV files into a single

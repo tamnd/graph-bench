@@ -24,7 +24,7 @@ case "$cmd" in
 --version) echo "zu 9.9.9-test" ;;
 help) echo "commands: copy, convert, verify, stat, lookup, neighbors, edge" ;;
 copy)
-  edges="$4"; out="$5"
+  for a in "$@"; do edges="$out"; out="$a"; done
   n=$(wc -l < "$edges" | tr -d ' ')
   printf 'zu1data' > "$out"
   echo "copied $n edges, 7 nodes, 2 groups"
@@ -206,8 +206,8 @@ func TestLoadFallsBackWhenCopyRefusesTheProperties(t *testing.T) {
 	requireUnix(t)
 	dir, relFile := writeLinks(t)
 	refuses := strings.Replace(fakeCopy, `copy)
-  edges="$4"; out="$5"`, `copy)
-  edges="$4"; out="$5"
+  for a in "$@"; do edges="$out"; out="$a"; done`, `copy)
+  for a in "$@"; do edges="$out"; out="$a"; done
   case "$edges" in
     *.csv) echo "zu copy: invalid argument: edge (1, 2) appears twice" 1>&2; exit 1 ;;
   esac`, 1)
@@ -271,5 +271,131 @@ func TestInfo(t *testing.T) {
 	}
 	if info.Caps.MaxConcurrency != 1 {
 		t.Errorf("MaxConcurrency = %d, want 1 (a libzu connection is not thread safe)", info.Caps.MaxConcurrency)
+	}
+}
+
+// nodeDataset is a dataset with one node table, which is what the node
+// flag is for. The rel table is there so the schema is a graph.
+type nodeDataset struct {
+	nodeFiles []string
+	relFiles  []string
+}
+
+func (d *nodeDataset) Name() string               { return "node-ds" }
+func (d *nodeDataset) Checksum() string           { return "sha256:test" }
+func (d *nodeDataset) Dir() string                { return "." }
+func (d *nodeDataset) Manifest() *engine.Manifest { return nil }
+func (d *nodeDataset) Schema() engine.Schema {
+	return engine.Schema{
+		Nodes: map[string]engine.NodeSchema{"Node": {ID: engine.Column{Name: "id", Type: "ID"}}},
+		Rels: map[string]engine.RelSchema{
+			"EDGE": {Files: []string{"rels/EDGE.csv"}, Start: "Node", End: "Node"},
+		},
+	}
+}
+func (d *nodeDataset) NodeFiles(string) ([]string, error)               { return d.nodeFiles, nil }
+func (d *nodeDataset) RelFiles(string) ([]string, error)                { return d.relFiles, nil }
+func (d *nodeDataset) Params(string) ([]map[string]engine.Value, error) { return nil, nil }
+func (d *nodeDataset) Statements() []string                             { return nil }
+
+// The ids a node table declares have to reach zu copy, because the ones
+// no edge names are exactly the ones the edge list cannot report.
+func TestNodesFlag(t *testing.T) {
+	dir := t.TempDir()
+	nodes := filepath.Join(dir, "Node.csv")
+	if err := os.WriteFile(nodes, []byte("id:ID,:LABEL\n0,Node\n1,Node\n7,Node\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	work := t.TempDir()
+	flag, err := nodesFlag(&nodeDataset{nodeFiles: []string{nodes}}, work)
+	if err != nil {
+		t.Fatalf("nodesFlag: %v", err)
+	}
+	if len(flag) != 2 || flag[0] != "--nodes" {
+		t.Fatalf("flag = %v, want --nodes <file>", flag)
+	}
+	got, err := os.ReadFile(flag[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "0\n1\n7\n" {
+		t.Errorf("node list = %q, want the three ids without the header", got)
+	}
+}
+
+// A dataset whose ids are not numbers loads the way it always did: the
+// endpoints are all zu copy can key on, so there is no file to pass and
+// no failure either.
+func TestNodesFlagSkipsWhatItCannotDeclare(t *testing.T) {
+	dir := t.TempDir()
+	strIDs := filepath.Join(dir, "Node.csv")
+	if err := os.WriteFile(strIDs, []byte("id:ID,:LABEL\nalice,Node\nbob,Node\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	flag, err := nodesFlag(&nodeDataset{nodeFiles: []string{strIDs}}, t.TempDir())
+	if err != nil {
+		t.Fatalf("nodesFlag: %v", err)
+	}
+	if flag != nil {
+		t.Errorf("flag = %v, want none for string ids", flag)
+	}
+
+	flag, err = nodesFlag(&nodeDataset{}, t.TempDir())
+	if err != nil {
+		t.Fatalf("nodesFlag: %v", err)
+	}
+	if flag != nil {
+		t.Errorf("flag = %v, want none when the dataset lists no node files", flag)
+	}
+}
+
+// fakeOldCopy is a zu from before --nodes: it refuses the flag the way a
+// hand-rolled argument parser refuses anything it does not know.
+const fakeOldCopy = `cmd="$1"
+case "$cmd" in
+--version) echo "zu 9.9.9-test" ;;
+help) echo "commands: copy, convert, verify, stat, lookup, neighbors, edge" ;;
+copy)
+  for a in "$@"; do
+    if [ "$a" = "--nodes" ]; then
+      echo "usage: zu copy [--reorder degree|bfs|none] <edges> <out.zu1>" 1>&2
+      exit 2
+    fi
+  done
+  for a in "$@"; do edges="$out"; out="$a"; done
+  printf 'zu1data' > "$out"
+  n=$(wc -l < "$edges" | tr -d ' ')
+  echo "copied $n edges, 7 nodes, 2 groups"
+  ;;
+*) echo "zu: unknown command '$cmd'" 1>&2; exit 1 ;;
+esac
+`
+
+// The node file is an improvement, not a requirement, so a zu that does
+// not know the flag still loads. The alternative is a benchmark that
+// stops working against every build older than the flag.
+func TestLoadRetriesWithoutTheNodeFile(t *testing.T) {
+	requireUnix(t)
+	dir := t.TempDir()
+	nodes := filepath.Join(dir, "Node.csv")
+	if err := os.WriteFile(nodes, []byte("id:ID\n0\n1\n7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rels := filepath.Join(dir, "EDGE.csv")
+	if err := os.WriteFile(rels, []byte(":START_ID,:END_ID,:TYPE\n0,1,EDGE\n1,7,EDGE\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, _ := loadWith(t, writeFake(t, fakeOldCopy), &nodeDataset{
+		nodeFiles: []string{nodes},
+		relFiles:  []string{rels},
+	})
+	if stats.Method != "copy" {
+		t.Errorf("Method = %q, want copy", stats.Method)
+	}
+	if stats.Edges != 2 {
+		t.Errorf("Edges = %d, want 2", stats.Edges)
 	}
 }
