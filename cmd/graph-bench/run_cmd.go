@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -102,6 +103,7 @@ func profileFor(name string) (profile, error) {
 func newRunCmd() *cobra.Command {
 	var (
 		wlName      string
+		only        []string
 		engines     []string
 		profileName string
 		scale       string
@@ -149,6 +151,16 @@ func newRunCmd() *cobra.Command {
 			if len(flat) == 0 {
 				flat = []string{"zu"}
 			}
+			focused := flattenEngines(only)
+			if len(focused) > 0 {
+				if publish {
+					return fmt.Errorf("run: --query is a development probe, it cannot --publish")
+				}
+				wl, err = focus(wl, focused)
+				if err != nil {
+					return fmt.Errorf("run: %w", err)
+				}
+			}
 
 			rc := runConfig{
 				profile:     prof,
@@ -175,7 +187,10 @@ func newRunCmd() *cobra.Command {
 					fmt.Fprintf(cmd.ErrOrStderr(), "run: engine %s: %v\n", eng, runErr)
 					continue
 				}
-				if path, werr := report.Write(outDir, doc); werr != nil {
+				if len(focused) > 0 {
+					fmt.Fprintf(cmd.OutOrStdout(),
+						"focused on %s, no result written\n", strings.Join(focused, ","))
+				} else if path, werr := report.Write(outDir, doc); werr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "run: write result: %v\n", werr)
 				} else {
 					fmt.Fprintf(cmd.OutOrStdout(), "wrote %s\n", path)
@@ -202,6 +217,8 @@ func newRunCmd() *cobra.Command {
 
 	f := cmd.Flags()
 	f.StringVar(&wlName, "workload", "", "workload name (required); see 'list workloads'")
+	f.StringArrayVar(&only, "query", nil,
+		"run only these query ids (comma-separated or repeated); a development probe, writes no result")
 	f.StringArrayVar(&engines, "engines", nil, "engines to run (comma-separated or repeated); default zu")
 	f.StringVar(&profileName, "profile", "fast", "run protocol preset: fast|full")
 	f.StringVar(&scale, "scale", "smoke", "dataset scale tier: smoke|sf1")
@@ -217,6 +234,48 @@ func newRunCmd() *cobra.Command {
 
 	_ = cmd.MarkFlagRequired("workload")
 	return cmd
+}
+
+// focus returns a copy of wl holding only the named queries, in the
+// workload's own order. It is for the loop a person runs while they are
+// changing one operator, where waiting out the other eight queries is the
+// whole cost of the iteration.
+//
+// A run this narrow is not a measurement of the workload, so the caller
+// writes no result document for it and --publish is refused outright. The
+// mixed workloads are refused here too: a mix is defined by its weights,
+// and a subset of the queries is a different blend rather than a smaller
+// sample of the same one.
+func focus(wl *workload.Workload, ids []string) (*workload.Workload, error) {
+	if wl.Mix != nil {
+		return nil, fmt.Errorf("--query on %q, which is a mixed workload, and a subset of a mix is a different mix", wl.Name)
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	out := *wl
+	out.Queries = nil
+	for _, q := range wl.Queries {
+		if want[q.ID] {
+			out.Queries = append(out.Queries, q)
+			delete(want, q.ID)
+		}
+	}
+	if len(want) > 0 {
+		missing := make([]string, 0, len(want))
+		for id := range want {
+			missing = append(missing, id)
+		}
+		sort.Strings(missing)
+		have := make([]string, 0, len(wl.Queries))
+		for _, q := range wl.Queries {
+			have = append(have, q.ID)
+		}
+		return nil, fmt.Errorf("workload %q has no query %s; it has %s",
+			wl.Name, strings.Join(missing, ", "), strings.Join(have, ", "))
+	}
+	return &out, nil
 }
 
 // flattenEngines splits comma-separated engine names from the flag slice.
