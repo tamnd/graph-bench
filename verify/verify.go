@@ -257,10 +257,10 @@ func verifyWrite(ctx context.Context, sess engine.Session, q *workload.Query, ds
 		rep.Reason = fmt.Sprintf("exec-error: %v", err)
 		// Still attempt teardown below: a failed write must not leave
 		// residue for the next query.
-	} else if q.PostCondition != "" {
+	} else if check := q.Check(rep.Dialect); check != "" {
 		got, err := execToAnswer(ctx, sess, engine.Op{
 			QueryID: q.ID, Class: engine.PointRead, Dialect: rep.Dialect,
-			Text: q.PostCondition, Params: params,
+			Text: check, Params: params,
 		})
 		switch {
 		case err != nil:

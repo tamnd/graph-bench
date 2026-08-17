@@ -100,9 +100,31 @@ type Query struct {
 	// whose result is compared against Expected.
 	PostCondition string
 
+	// PostConditions spells the check for dialects whose text differs from
+	// the Cypher core, resolved against the dialect the query itself
+	// resolved to and falling back to PostCondition.
+	//
+	// It exists for the same reason Texts is a map. An engine whose labels
+	// are spelled differently can run the write and still be unable to read
+	// the check, and a check that will not parse fails the query, which
+	// discards the measurement for every query in the workload. One
+	// unresolvable check would cost the whole write comparison.
+	PostConditions map[engine.Dialect]string
+
 	// AutocommitOK marks write queries that may run outside an explicit
 	// transaction on engines without transaction support.
 	AutocommitOK bool
+}
+
+// Check returns the post-condition text for the dialect the query
+// resolved to, which is the dialect-specific one when there is one and
+// the Cypher core otherwise. An empty string means the write has no
+// post-condition on this engine.
+func (q *Query) Check(d engine.Dialect) string {
+	if t, ok := q.PostConditions[d]; ok && t != "" {
+		return t
+	}
+	return q.PostCondition
 }
 
 // Mix is a weighted operation mix with deterministic scheduling.
@@ -162,7 +184,7 @@ func Register(w *Workload) {
 		if q.Class != engine.Write && q.Reference == nil {
 			panic(fmt.Sprintf("workload %s: read query %s has no reference (spec 03 §6)", w.Name, q.ID))
 		}
-		if q.Class == engine.Write && q.PostCondition == "" && q.Reference == nil {
+		if q.Class == engine.Write && q.PostCondition == "" && len(q.PostConditions) == 0 && q.Reference == nil {
 			panic(fmt.Sprintf("workload %s: write query %s has neither post-condition nor reference", w.Name, q.ID))
 		}
 	}
