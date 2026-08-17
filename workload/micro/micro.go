@@ -420,6 +420,12 @@ var spQuery = &workload.Query{
 		// has to be left off: Kuzu caps a bounded variable-length relationship
 		// at 30 hops, and an unbounded 1.. removes the cap.
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($src AS INT64)})-[r:EDGE* SHORTEST 1..]->(b:Node {id: CAST($dst AS INT64)}) RETURN length(r) AS d`,
+		// zu writes the selector in front of the pattern, GQL style, and
+		// counts the hops off the rel list rather than a path variable.
+		// ANY SHORTEST is the right one here: the question is the distance,
+		// so one minimum-hop path per endpoint answers it and enumerating
+		// the rest would be work nobody reads.
+		engine.ZuQL: `MATCH ANY SHORTEST (a:node {id: $src})-[r:edge*]->(b:node {id: $dst}) RETURN size(r) AS d`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -458,6 +464,7 @@ var spBidirQuery = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH p = shortestPath((a:Node {id: $src})-[:EDGE*]-(b:Node {id: $dst})) RETURN length(p) AS d`,
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($src AS INT64)})-[r:EDGE* SHORTEST 1..]-(b:Node {id: CAST($dst AS INT64)}) RETURN length(r) AS d`,
+		engine.ZuQL:   `MATCH ANY SHORTEST (a:node {id: $src})-[r:edge*]-(b:node {id: $dst}) RETURN size(r) AS d`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {

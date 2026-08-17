@@ -84,7 +84,7 @@ func (e *Engine) Info() engine.Info {
 			BulkLoad:       true,
 			Deletes:        false,
 			VarLengthPaths: true,
-			ShortestPaths:  false,
+			ShortestPaths:  true,
 			PathPredicates: false,
 			MaxConcurrency: 1,
 			Persistent:     true,
