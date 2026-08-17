@@ -69,7 +69,7 @@ func (e *Engine) Info() engine.Info {
 			ShortestPaths:  true,
 			// The kernels reachable through CALL. louvain is there too
 			// but no workload asks for it under that name.
-			Algorithms:     []string{"bfs", "pagerank", "wcc", "sssp", "cdlp", "lcc", "tc"},
+			Algorithms:     []string{"bfs", "pagerank", "wcc", "sssp", "cdlp", "lcc", "tc", "bc"},
 			PathPredicates: false,
 			MaxConcurrency: 1,
 			Persistent:     true,
