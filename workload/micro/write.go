@@ -76,12 +76,12 @@ var setPropQuery = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (o:Obj {id: $id}) SET o.version = o.version`,
 		engine.KuzuCy: `MATCH (o:Obj {id: CAST($id AS INT64)}) SET o.version = o.version`,
-		engine.ZuQL:   `MATCH (o:node {id: $id}) SET o.id = o.id`,
+		engine.ZuQL:   `MATCH (o:Obj {id: $id}) SET o.version = o.version`,
 	},
 	PostCondition: `MATCH (o:Obj {id: $id}) WITH count(o) AS c RETURN c = 1 AS ok`,
 	PostConditions: map[engine.Dialect]string{
 		engine.KuzuCy: `MATCH (o:Obj {id: CAST($id AS INT64)}) WITH count(o) AS c RETURN c = 1 AS ok`,
-		engine.ZuQL:   `MATCH (o:node {id: $id}) WITH count(o) AS c RETURN c = 1 AS ok`,
+		engine.ZuQL:   `MATCH (o:Obj {id: $id}) WITH count(o) AS c RETURN c = 1 AS ok`,
 	},
 	AutocommitOK: true,
 }

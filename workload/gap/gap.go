@@ -111,7 +111,7 @@ RETURN src.id AS id, 0 AS level`,
 			// here, and a node the source does not reach comes back null
 			// where the reference has no row at all, so the filter is the
 			// same filter.
-			engine.ZuQL: `CALL bfs('edge', $source) YIELD node, level
+			engine.ZuQL: `CALL bfs('EDGE', $source) YIELD node, level
 WITH node, level WHERE level IS NOT NULL
 RETURN node.id AS id, level ORDER BY id`,
 		},
@@ -168,7 +168,7 @@ RETURN src.id AS id, 0 AS distance`,
 			// keeps two weights and the cheaper copy is the one a path
 			// takes. Unreached nodes come back null where the reference
 			// has no row, the same filter bfs needs.
-			engine.ZuQL: `CALL sssp_weighted('edge', $source, 'w') YIELD node, distance
+			engine.ZuQL: `CALL sssp_weighted('EDGE', $source, 'w') YIELD node, distance
 WITH node, distance WHERE distance IS NOT NULL
 RETURN node.id AS id, distance ORDER BY id`,
 		},
@@ -228,7 +228,7 @@ RETURN node.id AS id, rank AS score ORDER BY id`,
 			// rank moves in a round falling under 1e-12, capped at 100
 			// rounds. It used to stop at a fixed 20 and that is the one
 			// thing that kept it out of this table.
-			engine.ZuQL: `CALL pagerank('edge') YIELD node, rank
+			engine.ZuQL: `CALL pagerank('EDGE') YIELD node, rank
 RETURN node.id AS id, rank AS score ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
@@ -269,7 +269,7 @@ RETURN m.id AS id, label AS component ORDER BY id`,
 			// zu names a component by the smallest id in it, which is the
 			// canonical labeling this query wants, so there is nothing to
 			// relabel.
-			engine.ZuQL: `CALL wcc('edge') YIELD node, component
+			engine.ZuQL: `CALL wcc('EDGE') YIELD node, component
 RETURN node.id AS id, component ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
@@ -318,7 +318,7 @@ func tcQuery() *workload.Query {
 			// micro-triangle-undirected asks the same question of the
 			// join engine on purpose and keeps its pattern, so the two
 			// stay a comparison of different things.
-			engine.ZuQL: `CALL triangle_count('edge') YIELD node, triangles
+			engine.ZuQL: `CALL triangle_count('EDGE') YIELD node, triangles
 WITH sum(triangles) AS corners
 RETURN corners / 3 AS triangles`,
 		},
@@ -354,7 +354,7 @@ func bcQuery() *workload.Query {
 			// list, and they are formatted from bcSources so the text
 			// and the sample the oracle accumulates over cannot drift
 			// apart.
-			engine.ZuQL: fmt.Sprintf(`CALL betweenness('edge', %s) YIELD node, centrality
+			engine.ZuQL: fmt.Sprintf(`CALL betweenness('EDGE', %s) YIELD node, centrality
 RETURN node.id AS id, centrality ORDER BY id`, bcSourceList()),
 		},
 		Params: workload.Fixed{P: workload.Params{"sources": bcSources}},

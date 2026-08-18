@@ -91,7 +91,7 @@ RETURN src.id AS id, 0 AS level`,
 			// The kernel spelling, for an engine that has one. Levels
 			// follow stored edge direction and an unreached node comes
 			// back null, which is the row the reference does not have.
-			engine.ZuQL: `CALL bfs('edge', $source) YIELD node, level
+			engine.ZuQL: `CALL bfs('EDGE', $source) YIELD node, level
 WITH node, level WHERE level IS NOT NULL
 RETURN node.id AS id, level ORDER BY id`,
 		},
@@ -151,7 +151,7 @@ RETURN src.id AS id, 0 AS distance`,
 			// keeps two weights and the cheaper copy is the one a path
 			// takes. Unreached nodes come back null where the reference
 			// has no row, the same filter bfs needs.
-			engine.ZuQL: `CALL sssp_weighted('edge', $source, 'w') YIELD node, distance
+			engine.ZuQL: `CALL sssp_weighted('EDGE', $source, 'w') YIELD node, distance
 WITH node, distance WHERE distance IS NOT NULL
 RETURN node.id AS id, distance ORDER BY id`,
 		},
