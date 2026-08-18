@@ -13,14 +13,31 @@
 // native counts would carry its own dialect text and disclose the
 // modeling difference per the spec.
 //
-// The three association reads carry a zu text as well, and it names the
-// tables node and edge rather than Obj and LINK: zu is bulk-loaded by
-// zu copy, which builds one node table and one edge table out of the
-// edge list and keys the nodes by the id column, so those are the names
-// the graph has. The pattern, the predicate on the association type and
-// the projection are the same query. The three that read object
-// properties have no zu text, because zu copy loads the rel file and
-// nothing puts the node table's columns in the store yet.
+// zu carries its own text for eight of the ten operations. The reads
+// and the object insert are the same query written in zuQL, and the
+// three association writes differ only in that the association type is
+// a WHERE predicate rather than an inline pattern property. The
+// brackets are dialect-specific for the same reason: a creation is
+// INSERT and not CREATE, and a post-condition that compares a count has
+// to carry the count through a WITH, because zu takes an aggregate only
+// as a bare projection item.
+//
+// The two that have no zu text are lb-update-node and lb-delete-node,
+// and the reason is that a zu node id is the row offset the loader gave
+// it, not a column an INSERT can choose. The scratch object those two
+// operations work on therefore lands at whatever offset the store is
+// next free at, and no statement written ahead of the run can name it.
+// Matching it on its payload instead would put a scan of the whole
+// object table inside the timed statement, which is not the point
+// operation LinkBench measures, so they SKIP rather than report the
+// wrong thing. lb-add-node is the one of the three that survives: the
+// insert itself needs no id, and only its untimed post-condition and
+// teardown look the object up by payload.
+//
+// The three association writes address the pairs (0,1), (0,2) and (0,3),
+// which the generator leaves unlinked at every scale. That matters on zu
+// beyond keeping the marker association unique: a rel table that stores
+// edge properties refuses a second edge over a pair it already holds.
 //
 // Access skew: the curated pools (BuildPools) approximate LinkBench's
 // hot-spot distribution by drawing the hottest sources of the power-law
@@ -81,6 +98,8 @@ func getNode() *workload.Query {
 		PoolKey: "lb-node",
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (o:Obj {id: $id})
+RETURN o.otype AS otype, o.version AS version, o.time AS time, o.payload AS payload`,
+			engine.ZuQL: `MATCH (o:Obj {id: $id})
 RETURN o.otype AS otype, o.version AS version, o.time AS time, o.payload AS payload`,
 		},
 		Reference: &workload.RefStrategy{
@@ -233,19 +252,34 @@ func addNode() *workload.Query {
 		Class: engine.Write,
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `CREATE (:Obj {id: $id, otype: $otype, version: $version, time: $time, payload: $payload})`,
+			// No id: a zu node id is the row offset the store hands out,
+			// so the object is created without one and found again by the
+			// payload marker. The $id binding is left in place and unread,
+			// which zu allows, so both dialects draw the same parameters.
+			engine.ZuQL: `INSERT (:Obj {otype: $otype, version: $version, time: $time, payload: $payload})`,
 		},
 		Params: workload.Fixed{P: workload.Params{
 			"id": int64(9000001), "otype": int64(1), "version": int64(0),
 			"time": int64(0), "payload": "graph-bench",
 		}},
 		PostCondition: `MATCH (o:Obj {id: 9000001}) RETURN count(o) = 1`,
-		Teardown:      `MATCH (o:Obj {id: 9000001}) DETACH DELETE o`,
-		AutocommitOK:  true,
+		PostConditions: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (o:Obj) WHERE o.payload = 'graph-bench'
+WITH count(o) AS c
+RETURN c = 1 AS ok`,
+		},
+		Teardown: `MATCH (o:Obj {id: 9000001}) DETACH DELETE o`,
+		Teardowns: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (o:Obj) WHERE o.payload = 'graph-bench' DETACH DELETE o`,
+		},
+		AutocommitOK: true,
 	}
 }
 
 // updateNode is LinkBench update_node: it bumps the version and swaps
-// the payload of a scratch object the setup creates. [Write]
+// the payload of a scratch object the setup creates. No zu text: the
+// setup cannot choose the object's id, so the timed statement has
+// nothing to name it by. [Write]
 func updateNode() *workload.Query {
 	return &workload.Query{
 		ID:    "lb-update-node",
@@ -266,7 +300,8 @@ SET o.payload = $payload, o.version = o.version + 1`,
 
 // deleteNode is LinkBench delete_node: it removes the scratch object
 // the setup creates; the teardown is an idempotent sweep in case the
-// operation itself failed. [Write]
+// operation itself failed. No zu text, for the reason updateNode gives.
+// [Write]
 func deleteNode() *workload.Query {
 	return &workload.Query{
 		ID:    "lb-delete-node",
@@ -293,6 +328,8 @@ func addLink() *workload.Query {
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (a:Obj {id: $src}), (b:Obj {id: $dst})
 CREATE (a)-[:LINK {ltype: $ltype, time: $time, payload: $payload}]->(b)`,
+			engine.ZuQL: `MATCH (a:Obj {id: $src}), (b:Obj {id: $dst})
+INSERT (a)-[:LINK {ltype: $ltype, time: $time, payload: $payload}]->(b)`,
 		},
 		Params: workload.Fixed{P: workload.Params{
 			"src": int64(0), "dst": int64(1), "ltype": int64(99),
@@ -300,8 +337,19 @@ CREATE (a)-[:LINK {ltype: $ltype, time: $time, payload: $payload}]->(b)`,
 		}},
 		PostCondition: `MATCH (:Obj {id: 0})-[l:LINK {ltype: 99}]->(:Obj {id: 1})
 RETURN count(l) = 1`,
+		PostConditions: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (:Obj {id: 0})-[l:LINK]->(:Obj {id: 1})
+WHERE l.ltype = 99
+WITH count(l) AS c
+RETURN c = 1 AS ok`,
+		},
 		Teardown: `MATCH (:Obj {id: 0})-[l:LINK {ltype: 99}]->(:Obj {id: 1})
 DELETE l`,
+		Teardowns: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (:Obj {id: 0})-[l:LINK]->(:Obj {id: 1})
+WHERE l.ltype = 99
+DELETE l`,
+		},
 		AutocommitOK: true,
 	}
 }
@@ -315,16 +363,33 @@ func updateLink() *workload.Query {
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (:Obj {id: $src})-[l:LINK {ltype: $ltype}]->(:Obj {id: $dst})
 SET l.payload = $payload`,
+			engine.ZuQL: `MATCH (:Obj {id: $src})-[l:LINK]->(:Obj {id: $dst})
+WHERE l.ltype = $ltype
+SET l.payload = $payload`,
 		},
 		Params: workload.Fixed{P: workload.Params{
 			"src": int64(0), "dst": int64(2), "ltype": int64(98), "payload": "updated",
 		}},
 		Setup: `MATCH (a:Obj {id: 0}), (b:Obj {id: 2})
 CREATE (a)-[:LINK {ltype: 98, time: 0, payload: "seed"}]->(b)`,
+		Setups: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (a:Obj {id: 0}), (b:Obj {id: 2})
+INSERT (a)-[:LINK {ltype: 98, time: 0, payload: 'seed'}]->(b)`,
+		},
 		PostCondition: `MATCH (:Obj {id: 0})-[l:LINK {ltype: 98}]->(:Obj {id: 2})
 RETURN l.payload = "updated"`,
+		PostConditions: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (:Obj {id: 0})-[l:LINK]->(:Obj {id: 2})
+WHERE l.ltype = 98
+RETURN l.payload = 'updated' AS ok`,
+		},
 		Teardown: `MATCH (:Obj {id: 0})-[l:LINK {ltype: 98}]->(:Obj {id: 2})
 DELETE l`,
+		Teardowns: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (:Obj {id: 0})-[l:LINK]->(:Obj {id: 2})
+WHERE l.ltype = 98
+DELETE l`,
+		},
 		AutocommitOK: true,
 	}
 }
@@ -338,16 +403,34 @@ func deleteLink() *workload.Query {
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (:Obj {id: $src})-[l:LINK {ltype: $ltype}]->(:Obj {id: $dst})
 DELETE l`,
+			engine.ZuQL: `MATCH (:Obj {id: $src})-[l:LINK]->(:Obj {id: $dst})
+WHERE l.ltype = $ltype
+DELETE l`,
 		},
 		Params: workload.Fixed{P: workload.Params{
 			"src": int64(0), "dst": int64(3), "ltype": int64(97),
 		}},
 		Setup: `MATCH (a:Obj {id: 0}), (b:Obj {id: 3})
 CREATE (a)-[:LINK {ltype: 97, time: 0, payload: "seed"}]->(b)`,
+		Setups: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (a:Obj {id: 0}), (b:Obj {id: 3})
+INSERT (a)-[:LINK {ltype: 97, time: 0, payload: 'seed'}]->(b)`,
+		},
 		PostCondition: `MATCH (:Obj {id: 0})-[l:LINK {ltype: 97}]->(:Obj {id: 3})
 RETURN count(l) = 0`,
+		PostConditions: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (:Obj {id: 0})-[l:LINK]->(:Obj {id: 3})
+WHERE l.ltype = 97
+WITH count(l) AS c
+RETURN c = 0 AS ok`,
+		},
 		Teardown: `MATCH (:Obj {id: 0})-[l:LINK {ltype: 97}]->(:Obj {id: 3})
 DELETE l`,
+		Teardowns: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (:Obj {id: 0})-[l:LINK]->(:Obj {id: 3})
+WHERE l.ltype = 97
+DELETE l`,
+		},
 		AutocommitOK: true,
 	}
 }

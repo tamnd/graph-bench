@@ -112,9 +112,89 @@ func (s *Session) Version(ctx context.Context) (string, error) {
 	return C.GoString(C.zu_version()), nil
 }
 
-// Begin always fails: zu has no transactions.
+// Begin opens an explicit transaction on the session connection, read
+// only when the caller asked for read mode. The statements go through
+// execDiscardLocked rather than the prepared-statement path, because a
+// transaction statement is not a query and zu_prepare parses what it is
+// given as one.
 func (s *Session) Begin(ctx context.Context, mode engine.AccessMode) (engine.Tx, error) {
-	return nil, engine.ErrNoTransactions
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stmt := "START TRANSACTION"
+	if mode == engine.ReadMode {
+		stmt = "START TRANSACTION READ ONLY"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.execDiscardLocked(stmt); err != nil {
+		return nil, fmt.Errorf("zu: begin: %w", err)
+	}
+	return &tx{s: s}, nil
+}
+
+// tx is an explicit transaction on the session connection. zu holds the
+// transaction on the connection itself, so a transaction is a marker
+// around the same Exec path rather than a handle of its own.
+type tx struct {
+	s    *Session
+	done bool
+}
+
+var _ engine.Tx = (*tx)(nil)
+
+// Exec runs one operation inside the transaction.
+func (t *tx) Exec(ctx context.Context, op engine.Op) (engine.Result, error) {
+	if t.done {
+		return nil, errors.New("zu: transaction finished")
+	}
+	return t.s.Exec(ctx, op)
+}
+
+// Commit makes the transaction's writes durable.
+func (t *tx) Commit(ctx context.Context) error {
+	return t.finish("COMMIT")
+}
+
+// Rollback throws the transaction's writes away.
+func (t *tx) Rollback(ctx context.Context) error {
+	return t.finish("ROLLBACK")
+}
+
+// finish ends the transaction one way or the other, once.
+func (t *tx) finish(stmt string) error {
+	if t.done {
+		return errors.New("zu: transaction finished")
+	}
+	t.done = true
+	t.s.mu.Lock()
+	defer t.s.mu.Unlock()
+	return t.s.execDiscardLocked(stmt)
+}
+
+// execDiscardLocked runs one statement for its effect and throws the
+// result away. Caller holds s.mu.
+//
+// It goes through zu_query_z, the one-shot entry point, which routes
+// through the session and so sees the transaction statements for what
+// they are. zu_prepare_z cannot take them: it plans what it is handed as
+// a query, and "START TRANSACTION" is not one.
+func (s *Session) execDiscardLocked(stmt string) error {
+	if s.closed {
+		return errors.New("zu: session is closed")
+	}
+	if err := s.openLocked(); err != nil {
+		return err
+	}
+	ctext := C.CString(stmt)
+	defer C.free(unsafe.Pointer(ctext))
+	var res *C.zu_result
+	var cerr *C.zu_error
+	if st := C.zu_query_z(s.sess, ctext, &res, &cerr); st != C.ZU_OK {
+		return takeErr(st, cerr, fmt.Sprintf("zu: %q failed", stmt))
+	}
+	C.zu_result_free(res)
+	return nil
 }
 
 // Calibrate reports the per-operation process-spawn floor, which is zero
