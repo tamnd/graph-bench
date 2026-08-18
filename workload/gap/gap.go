@@ -106,6 +106,26 @@ RETURN n.id AS id, size(relationships(p)) AS level
 UNION ALL
 MATCH (src:Node {id: $source})
 RETURN src.id AS id, 0 AS level`,
+			// Neo4j community has no BFS without GDS, so the levels come
+			// out of its own shortest path search, one per node the source
+			// reaches: the minimum hop count to a node is its level. Both
+			// of Neo4j's spellings were tried and this is the one that
+			// answers. The GQL-flavored `ANY SHORTEST` quantified pattern
+			// with the far end unbound ran past twenty minutes on the
+			// thousand-node smoke graph before it was killed, where
+			// shortestPath() over the same graph is seconds, so the
+			// function is what is measured and the pattern is not a road
+			// Neo4j can be held to. Cypher25 and not Cypher, since this is
+			// the baseline text and no other engine here should resolve
+			// it. The UNION ALL arm carries the source's own level-0 row,
+			// which a path pattern cannot produce.
+			engine.Cypher25: `MATCH (src:Node {id: $source}), (n:Node)
+WHERE n <> src
+MATCH p = shortestPath((src)-[:EDGE*]->(n))
+RETURN n.id AS id, length(p) AS level
+UNION ALL
+MATCH (src:Node {id: $source})
+RETURN src.id AS id, 0 AS level`,
 			// zu answers this with a kernel rather than a pattern. bfs
 			// follows stored edge direction, which is what a level means
 			// here, and a node the source does not reach comes back null
