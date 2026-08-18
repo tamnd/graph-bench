@@ -44,3 +44,29 @@ func TestHarmonicMeanTEPS(t *testing.T) {
 		t.Errorf("HarmonicMeanTEPS(nil) = %g, want 0", got)
 	}
 }
+
+// TestNewTraversal checks the section carries a rate per kept repetition and
+// the harmonic mean of them, and that a kernel with nothing to traverse comes
+// back zeroed instead of infinite.
+func TestNewTraversal(t *testing.T) {
+	got := NewTraversal("7", 2000, []time.Duration{time.Millisecond, 2 * time.Millisecond})
+	if got.Source != "7" || got.Edges != 2000 {
+		t.Errorf("source/edges = %q/%d, want 7/2000", got.Source, got.Edges)
+	}
+	want := []float64{2e6, 1e6}
+	if len(got.PerRep) != len(want) {
+		t.Fatalf("PerRep = %v, want %v", got.PerRep, want)
+	}
+	for i, w := range want {
+		if got.PerRep[i] != w {
+			t.Errorf("PerRep[%d] = %g, want %g", i, got.PerRep[i], w)
+		}
+	}
+	// The harmonic mean of 2e6 and 1e6 is 2/(1/2e6 + 1/1e6).
+	if wantHM := 2 / (1/2e6 + 1/1e6); got.HarmonicMean != wantHM {
+		t.Errorf("HarmonicMean = %g, want %g", got.HarmonicMean, wantHM)
+	}
+	if empty := NewTraversal("7", 0, []time.Duration{time.Millisecond}); empty.HarmonicMean != 0 {
+		t.Errorf("no edges reached gave rate %g, want 0", empty.HarmonicMean)
+	}
+}

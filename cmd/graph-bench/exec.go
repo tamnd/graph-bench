@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/tamnd/graph-bench/engine"
@@ -198,7 +199,9 @@ func measurePlan(
 		if err != nil {
 			return measure.Result{}, err
 		}
-		return analyticsResult(ar, plan), nil
+		res := analyticsResult(ar, plan)
+		res.Traversal = traversalRates(ds, plan, ops, ar)
+		return res, nil
 	}
 
 	// Mixed workloads: weighted deterministic interleave (BuildMixedSchedule).
@@ -430,6 +433,73 @@ func analyticsResult(ar measure.AnalyticsResult, plan *verify.Plan) measure.Resu
 		ByQuery: ar.Stats,
 		Latency: measure.ServiceTimeLatency,
 	}
+}
+
+// traversalRates computes the TEPS section for the traversal kernels a
+// workload ran: the rate is the edge work a full traversal from the drawn
+// source does, taken from the oracle, over what each timed repetition cost.
+//
+// Only bfs and sssp have a rate, since only they traverse from a source;
+// PageRank and the rest read the whole graph however it is shaped and a
+// per-source edge count says nothing about them. A source the oracle does
+// not know, or a graph it cannot read, leaves the kernel out of the section
+// rather than reporting a rate divided by a guess.
+func traversalRates(
+	ds engine.Dataset,
+	plan *verify.Plan,
+	ops []engine.Op,
+	ar measure.AnalyticsResult,
+) map[string]measure.Traversal {
+	kernels := map[string]bool{}
+	for _, a := range plan.Approved {
+		switch a.Query.Algorithm {
+		case "bfs", "sssp":
+			kernels[a.Query.ID] = true
+		}
+	}
+	if len(kernels) == 0 {
+		return nil
+	}
+	var g *workload.Graph
+	out := map[string]measure.Traversal{}
+	for _, op := range ops {
+		if !kernels[op.QueryID] || len(ar.PerQuery[op.QueryID]) == 0 {
+			continue
+		}
+		src, ok := sourceToken(op.Params)
+		if !ok {
+			continue
+		}
+		if g == nil {
+			loaded, err := workload.LoadGraph(ds)
+			if err != nil {
+				return nil
+			}
+			g = loaded
+		}
+		edges, ok := g.EdgesReached(src)
+		if !ok {
+			continue
+		}
+		out[op.QueryID] = measure.NewTraversal(src, edges, ar.PerQuery[op.QueryID])
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// sourceToken reads the "source" parameter as the oracle's node id token.
+// Every kernel text names its start node that way, and a curated pool binds
+// it as a number, so both spellings are read here.
+func sourceToken(params map[string]engine.Value) (string, bool) {
+	switch v := params["source"].(type) {
+	case string:
+		return v, true
+	case int64:
+		return strconv.FormatInt(v, 10), true
+	}
+	return "", false
 }
 
 // statFromDurations summarizes a duration slice with nearest-rank

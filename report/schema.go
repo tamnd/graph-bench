@@ -79,10 +79,23 @@ type SweepPoint struct {
 }
 
 // TEPSDoc is the Graph500 traversal-rate section (spec 08 §1 metric 6),
-// present only for the g500 workload: per-source rates and their harmonic
-// mean, the rate-correct aggregate.
+// one entry per traversal kernel: the rate each timed repetition reached
+// and their harmonic mean, which is the rate-correct aggregate (the
+// arithmetic mean of rates overweights the fast runs).
+//
+// Rates are per repetition and not per root. The analytics protocol draws
+// one source per query per run and repeats the kernel from it, so this
+// section says what one traversal costs and how much the repetitions
+// varied; Graph500's own 64-root aggregate is the same harmonic mean over
+// a run per root, which the curated parameter pools supply.
+//
+// Edges is what the rate divides: the edges out of every node the source
+// reaches, counted by the oracle, which is the edge work a full
+// breadth-first traversal from that source does.
 type TEPSDoc struct {
-	PerSource    []float64 `json:"per_source"`
+	Source       string    `json:"source,omitempty"`
+	Edges        int64     `json:"edges"`
+	PerRep       []float64 `json:"per_rep"`
 	HarmonicMean float64   `json:"harmonic_mean"`
 }
 
@@ -105,13 +118,14 @@ type Document struct {
 	Sweep        []SweepPoint         `json:"sweep,omitempty"`
 	Load         LoadDoc              `json:"load"`
 	Resource     measure.Resource     `json:"resource"`
-	TEPS         *TEPSDoc             `json:"teps,omitempty"`
+	TEPS         map[string]TEPSDoc   `json:"teps,omitempty"`
 }
 
 // FromMeasure builds a schema-3 Document from a measured result plus the
 // verification verdicts the run printed before timing (spec 09 §1). Fidelity
 // is the workload's coverage-map cell (spec 07 §6), restated in the rendered
-// footer. TEPS is left nil; the g500 runner attaches it after the kernel runs.
+// footer. TEPS carries whatever traversal rates the run measured, which is
+// nothing outside the kernel workloads.
 func FromMeasure(workload, family, fidelity string, res measure.Result, ver []Verification) *Document {
 	doc := &Document{
 		Schema:       Schema,
@@ -123,6 +137,7 @@ func FromMeasure(workload, family, fidelity string, res measure.Result, ver []Ve
 		Classes:      classStats(res.Stats),
 		Queries:      queryStats(res.ByQuery),
 		Cold:         classStats(res.Cold),
+		TEPS:         tepsDocs(res.Traversal),
 		Load: LoadDoc{
 			Duration:    res.Load.Duration,
 			Nodes:       res.Load.Nodes,
@@ -163,6 +178,23 @@ func queryStats(in map[string]measure.Stat) map[string]ClassStat {
 	out := make(map[string]ClassStat, len(in))
 	for qid, s := range in {
 		out[qid] = statDoc(s)
+	}
+	return out
+}
+
+// tepsDocs converts the measured traversal rates to their JSON-stable shape.
+func tepsDocs(in map[string]measure.Traversal) map[string]TEPSDoc {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]TEPSDoc, len(in))
+	for qid, t := range in {
+		out[qid] = TEPSDoc{
+			Source:       t.Source,
+			Edges:        t.Edges,
+			PerRep:       t.PerRep,
+			HarmonicMean: t.HarmonicMean,
+		}
 	}
 	return out
 }
