@@ -54,18 +54,18 @@ RETURN count(*) AS cnt`),
 				// Deeper tree: friend-of-friend chain plus likes and containment.
 				`MATCH (m:Post)-[:HAS_CREATOR]->(:Person)-[:KNOWS]->(:Person)-[:KNOWS]->(:Person), (m)<-[:LIKES]-(:Person), (m)<-[:CONTAINER_OF]-(:Forum)
 RETURN count(*) AS cnt`),
-			countQuery("lsqb-q5",
+			cypherOnly("lsqb-q5",
 				// The undirected KNOWS triangle: the cyclic-join stress case.
 				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a)
 RETURN count(*) AS cnt`),
-			countQuery("lsqb-q6",
+			cypherOnly("lsqb-q6",
 				// Triangle joined with each member's post in a shared forum.
 				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a),
       (f:Forum)-[:CONTAINER_OF]->(ma:Post)-[:HAS_CREATOR]->(a),
       (f)-[:CONTAINER_OF]->(mb:Post)-[:HAS_CREATOR]->(b),
       (f)-[:CONTAINER_OF]->(mc:Post)-[:HAS_CREATOR]->(c)
 RETURN count(*) AS cnt`),
-			countQuery("lsqb-q7",
+			cypherOnly("lsqb-q7",
 				// The undirected KNOWS four-cycle: the longer cyclic join.
 				//
 				// The four relationships are named and required pairwise
@@ -94,7 +94,7 @@ RETURN count(*) AS cnt`),
       (f)-[:CONTAINER_OF]->(m2:Post)-[:HAS_CREATOR]->(p)
 WHERE m1 <> m2
 RETURN count(*) AS cnt`),
-			countQuery("lsqb-q9",
+			cypherOnly("lsqb-q9",
 				// Triangle with a shared forum membership and a common liked post.
 				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a),
       (f:Forum)-[:HAS_MEMBER]->(a), (f)-[:HAS_MEMBER]->(b), (f)-[:HAS_MEMBER]->(c),
@@ -106,18 +106,38 @@ RETURN count(*) AS cnt`),
 	}
 }
 
-// countQuery builds one parameterless counting query. Cypher-only: the texts
-// use no parameters and no engine-specific types, so every engine reaches
-// them through its Cypher fallback (ladybug's Kuzu dialect accepts this
-// subset unchanged; zu has no primitive for these shapes, so its ZuQL slot
-// stays empty by design).
+// countQuery builds one parameterless counting query. One text serves
+// every engine: the queries use no parameters and no engine-specific
+// types, ladybug's Kuzu dialect accepts the subset unchanged, and zuQL
+// takes it too, since a comma-separated pattern list, an undirected
+// step, inequality between two bound elements and count(*) are all in
+// the language. The text is filled into both slots rather than left to
+// a fallback so that the report names the dialect each engine ran.
 func countQuery(id, cypher string) *workload.Query {
+	return withTexts(id, map[engine.Dialect]string{
+		engine.Cypher: cypher,
+		engine.ZuQL:   cypher,
+	})
+}
+
+// cypherOnly builds the same query with no zu text. The four shapes that
+// use it are the cyclic ones, and zu answers all four with the wrong
+// count today (tamnd/zu#304). Three of them come in low, because zu
+// closes a cycle onto an already-bound element by asking whether the pair
+// is connected rather than how many stored edges connect it, so a pair
+// the dataset holds in both directions contributes once. Q6 comes in
+// high, for a reason the issue does not yet name. A wrong answer fails
+// verification and throws away the measurement for the whole family, so
+// the text is withheld and the query skips until the count is right.
+func cypherOnly(id, cypher string) *workload.Query {
+	return withTexts(id, map[engine.Dialect]string{engine.Cypher: cypher})
+}
+
+func withTexts(id string, texts map[engine.Dialect]string) *workload.Query {
 	return &workload.Query{
-		ID:    id,
-		Class: engine.Aggregation,
-		Texts: map[engine.Dialect]string{
-			engine.Cypher: cypher,
-		},
+		ID:     id,
+		Class:  engine.Aggregation,
+		Texts:  texts,
 		Params: workload.Fixed{},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, _ workload.Params) (*workload.Answer, error) {
