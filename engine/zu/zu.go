@@ -62,9 +62,14 @@ func (e *Engine) Info() engine.Info {
 		// for every query in the workload.
 		Dialects: []engine.Dialect{engine.ZuQL},
 		Caps: engine.Capabilities{
-			Transactions:   false,
+			// zu takes START TRANSACTION, COMMIT and ROLLBACK, and
+			// DELETE and DETACH DELETE, as of the write statements that
+			// landed for milestone G3. Both were false here until then,
+			// and the false is what made every write query in three
+			// workloads SKIP before it was ever handed to the engine.
+			Transactions:   true,
 			BulkLoad:       true,
-			Deletes:        false,
+			Deletes:        true,
 			VarLengthPaths: true,
 			ShortestPaths:  true,
 			// The kernels reachable through CALL. louvain is there too

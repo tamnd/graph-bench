@@ -242,8 +242,8 @@ func verifyWrite(ctx context.Context, sess engine.Session, q *workload.Query, ds
 		return res.Close()
 	}
 
-	if q.Setup != "" {
-		if err := run(q.Setup); err != nil {
+	if setup := q.Before(rep.Dialect); setup != "" {
+		if err := run(setup); err != nil {
 			rep.Outcome = Fail
 			rep.Reason = fmt.Sprintf("setup-error: %v", err)
 			return rep
@@ -299,8 +299,8 @@ func verifyWrite(ctx context.Context, sess engine.Session, q *workload.Query, ds
 		rep.Samples = 1
 	}
 
-	if q.Teardown != "" {
-		if err := run(q.Teardown); err != nil {
+	if teardown := q.After(rep.Dialect); teardown != "" {
+		if err := run(teardown); err != nil {
 			rep.Outcome = Fail
 			rep.Reason = poisonedReason
 		}

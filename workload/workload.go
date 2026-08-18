@@ -96,6 +96,18 @@ type Query struct {
 	// repetitions are stationary.
 	Setup, Teardown string
 
+	// Setups and Teardowns spell the bracket for dialects whose text
+	// differs from the Cypher core, resolved against the dialect the
+	// query itself resolved to and falling back to Setup and Teardown.
+	//
+	// They exist for the same reason PostConditions does. A bracket is
+	// not a query anybody reads a result from, but it is still a
+	// statement an engine has to parse, and an engine that spells a
+	// creation INSERT rather than CREATE cannot run the Cypher one. A
+	// setup that will not parse fails the query, and one failed write
+	// discards the measurement for the whole workload.
+	Setups, Teardowns map[engine.Dialect]string
+
 	// PostCondition validates write effects: a query text (Cypher core)
 	// whose result is compared against Expected.
 	PostCondition string
@@ -125,6 +137,23 @@ func (q *Query) Check(d engine.Dialect) string {
 		return t
 	}
 	return q.PostCondition
+}
+
+// Before returns the setup statement for the dialect the query resolved
+// to, and After returns the teardown. Both fall back to the Cypher core,
+// and an empty string means the write has no such statement here.
+func (q *Query) Before(d engine.Dialect) string { return bracket(q.Setups, q.Setup, d) }
+
+// After returns the teardown statement for the dialect the query
+// resolved to. See Before.
+func (q *Query) After(d engine.Dialect) string { return bracket(q.Teardowns, q.Teardown, d) }
+
+// bracket picks a dialect's statement out of a map, or the core one.
+func bracket(byDialect map[engine.Dialect]string, core string, d engine.Dialect) string {
+	if t, ok := byDialect[d]; ok && t != "" {
+		return t
+	}
+	return core
 }
 
 // Mix is a weighted operation mix with deterministic scheduling.

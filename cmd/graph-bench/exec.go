@@ -311,10 +311,11 @@ func buildOpsFor(a verify.Approved, n int) []engine.Op {
 func bracketsFor(plan *verify.Plan) map[string]measure.Bracket {
 	br := map[string]measure.Bracket{}
 	for _, a := range plan.Approved {
-		if a.Query.Setup == "" && a.Query.Teardown == "" {
+		setup, teardown := a.Query.Before(a.Dialect), a.Query.After(a.Dialect)
+		if setup == "" && teardown == "" {
 			continue
 		}
-		br[a.Query.ID] = measure.Bracket{Setup: a.Query.Setup, Teardown: a.Query.Teardown}
+		br[a.Query.ID] = measure.Bracket{Setup: setup, Teardown: teardown}
 	}
 	if len(br) == 0 {
 		return nil
