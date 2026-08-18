@@ -560,18 +560,18 @@ type resourceRow struct {
 // A row whose value is -1 on every document is dropped, so a platform that
 // cannot answer a metric prints a shorter table rather than a column of n/a.
 var resourceRows = []resourceRow{
-	{"peak rss", bytesCell, func(r measure.Resource) int64 { return r.MaxRSSBytes }},
-	{"peak rss (children)", bytesCell, func(r measure.Resource) int64 { return r.ChildMaxRSSBytes }},
-	{"heap live", bytesCell, func(r measure.Resource) int64 { return r.HeapAllocBytes }},
-	{"heap reserved", bytesCell, func(r measure.Resource) int64 { return r.HeapSysBytes }},
-	{"runtime total", bytesCell, func(r measure.Resource) int64 { return r.GoSysBytes }},
-	{"allocated", bytesCell, func(r measure.Resource) int64 { return r.TotalAllocBytes }},
+	{"peak rss", Bytes, func(r measure.Resource) int64 { return r.MaxRSSBytes }},
+	{"peak rss (children)", Bytes, func(r measure.Resource) int64 { return r.ChildMaxRSSBytes }},
+	{"heap live", Bytes, func(r measure.Resource) int64 { return r.HeapAllocBytes }},
+	{"heap reserved", Bytes, func(r measure.Resource) int64 { return r.HeapSysBytes }},
+	{"runtime total", Bytes, func(r measure.Resource) int64 { return r.GoSysBytes }},
+	{"allocated", Bytes, func(r measure.Resource) int64 { return r.TotalAllocBytes }},
 	{"gc cycles", countCell, func(r measure.Resource) int64 { return r.NumGC }},
-	{"gc pause", nanosCell, func(r measure.Resource) int64 { return r.GCPauseTotalNs }},
-	{"cpu user", nanosCell, func(r measure.Resource) int64 { return r.CPUUserNs }},
-	{"cpu sys", nanosCell, func(r measure.Resource) int64 { return r.CPUSysNs }},
-	{"cpu user (child)", nanosCell, func(r measure.Resource) int64 { return r.ChildCPUUserNs }},
-	{"cpu sys (child)", nanosCell, func(r measure.Resource) int64 { return r.ChildCPUSysNs }},
+	{"gc pause", Nanos, func(r measure.Resource) int64 { return r.GCPauseTotalNs }},
+	{"cpu user", Nanos, func(r measure.Resource) int64 { return r.CPUUserNs }},
+	{"cpu sys", Nanos, func(r measure.Resource) int64 { return r.CPUSysNs }},
+	{"cpu user (child)", Nanos, func(r measure.Resource) int64 { return r.ChildCPUUserNs }},
+	{"cpu sys (child)", Nanos, func(r measure.Resource) int64 { return r.ChildCPUSysNs }},
 	{"minor faults", countCell, func(r measure.Resource) int64 { return r.MinorFaults }},
 	{"major faults", countCell, func(r measure.Resource) int64 { return r.MajorFaults }},
 	{"minor faults (children)", countCell, func(r measure.Resource) int64 { return r.ChildMinorFaults }},
@@ -584,12 +584,12 @@ var resourceRows = []resourceRow{
 	{"block ops out", countCell, func(r measure.Resource) int64 { return r.BlockOutputOps }},
 	{"block ops in (children)", countCell, func(r measure.Resource) int64 { return r.ChildBlockInputOps }},
 	{"block ops out (children)", countCell, func(r measure.Resource) int64 { return r.ChildBlockOutputOps }},
-	{"disk read", bytesCell, func(r measure.Resource) int64 { return r.DiskReadBytes }},
-	{"disk write", bytesCell, func(r measure.Resource) int64 { return r.DiskWriteBytes }},
-	{"dataset on disk", bytesCell, func(r measure.Resource) int64 { return r.DatasetBytes }},
-	{"store after load", bytesCell, func(r measure.Resource) int64 { return r.LoadBytes }},
-	{"store after run", bytesCell, func(r measure.Resource) int64 { return r.StoreBytes }},
-	{"store growth", bytesCell, func(r measure.Resource) int64 { return r.StoreGrowthBytes }},
+	{"disk read", Bytes, func(r measure.Resource) int64 { return r.DiskReadBytes }},
+	{"disk write", Bytes, func(r measure.Resource) int64 { return r.DiskWriteBytes }},
+	{"dataset on disk", Bytes, func(r measure.Resource) int64 { return r.DatasetBytes }},
+	{"store after load", Bytes, func(r measure.Resource) int64 { return r.LoadBytes }},
+	{"store after run", Bytes, func(r measure.Resource) int64 { return r.StoreBytes }},
+	{"store growth", Bytes, func(r measure.Resource) int64 { return r.StoreGrowthBytes }},
 }
 
 // RenderResources writes the resource table (spec 08 §1 metrics 3/4 and the
@@ -683,11 +683,11 @@ var resourceNotes = []string{
 	"      forked here, so read the server process or its container to size it.",
 }
 
-// bytesCell renders a byte count in the largest unit that keeps it readable,
+// Bytes renders a byte count in the largest unit that keeps it readable,
 // binary units because that is what an allocator and a page cache deal in. A
 // negative count is the "nobody could ask" marker and prints as n/a, except
 // that a store which shrank is a real measurement and keeps its sign.
-func bytesCell(v int64) string {
+func Bytes(v int64) string {
 	if v == -1 {
 		return "n/a"
 	}
@@ -717,10 +717,10 @@ func countCell(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
 
-// nanosCell renders a nanosecond figure as a duration, n/a for the unavailable
+// Nanos renders a nanosecond figure as a duration, n/a for the unavailable
 // marker. A zero is printed as a zero: a run that spent no measurable system
 // time is a result, not a missing reading.
-func nanosCell(v int64) string {
+func Nanos(v int64) string {
 	if v == -1 {
 		return "n/a"
 	}

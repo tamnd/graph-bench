@@ -279,6 +279,8 @@ Two things are the caller's to get right. The first is that the two lineages dif
 
 Each side is reduced to its best value per query rather than its average. The default metric is `min`, the fastest single call, because load only ever adds time to a call: the smallest observation is the one closest to the work itself, and it is the one statistic a busy machine cannot inflate. `--metric p50` and `--metric p99` are there when the question is about the typical call or the tail, and both are noisier for the same reason.
 
+Under the latency table comes a cost table: CPU, peak resident set, store bytes and store growth, best of N per side on the same terms. Those rows are reported and not gated, so the exit code stays a statement about latency, and they are there for two reasons. One is that a change which buys a tenth of a millisecond with a third more CPU should have to show it. The other is that on a machine which is doing something else, the counters are steadier than the clock, and they are often the row that settles the question.
+
 A worked example, six rounds with the order swapped every round, and the same libzu built from two commits:
 
 ```
