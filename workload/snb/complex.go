@@ -54,6 +54,11 @@ WHERE f.firstName = $firstName AND f.id <> $personId
 RETURN DISTINCT f.id AS personId, f.lastName AS lastName
 ORDER BY lastName ASC, personId ASC
 LIMIT 20`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})-[:KNOWS*1..3]-(f:Person)
+WHERE f.firstName = $firstName AND f.id <> $personId
+RETURN DISTINCT f.id AS personId, f.lastName AS lastName
+ORDER BY lastName ASC, personId ASC
+LIMIT 20`,
 	},
 	PoolKey: PoolPersonName,
 	Params:  workload.NewPoolSource(nil),
@@ -98,6 +103,14 @@ var qIC2 = &workload.Query{
 	Class: engine.Subgraph,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
+WITH DISTINCT f
+MATCH (f)<-[:HAS_CREATOR]-(m:Post)
+WHERE m.creationDate < $maxDate
+RETURN f.id AS personId, f.firstName AS firstName, f.lastName AS lastName,
+       m.id AS postId, m.content AS content, m.creationDate AS creationDate
+ORDER BY creationDate DESC, postId ASC
+LIMIT 20`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
 WITH DISTINCT f
 MATCH (f)<-[:HAS_CREATOR]-(m:Post)
 WHERE m.creationDate < $maxDate
@@ -153,6 +166,13 @@ var qIC4 = &workload.Query{
 	Class: engine.Subgraph,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
+WITH DISTINCT f
+MATCH (f)-[l:LIKES]->(m:Post)
+WHERE l.creationDate >= $minDate
+RETURN DISTINCT m.id AS postId, m.content AS content
+ORDER BY postId ASC
+LIMIT 20`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
 WITH DISTINCT f
 MATCH (f)-[l:LIKES]->(m:Post)
 WHERE l.creationDate >= $minDate
@@ -215,6 +235,12 @@ MATCH (forum:Forum)-[:HAS_MEMBER]->(f)
 RETURN forum.id AS forumId, forum.title AS title, count(f) AS memberFriends
 ORDER BY memberFriends DESC, forumId ASC
 LIMIT 20`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
+WITH DISTINCT f
+MATCH (forum:Forum)-[:HAS_MEMBER]->(f)
+RETURN forum.id AS forumId, forum.title AS title, count(f) AS memberFriends
+ORDER BY memberFriends DESC, forumId ASC
+LIMIT 20`,
 	},
 	PoolKey: PoolPersonID,
 	Params:  workload.NewPoolSource(nil),
@@ -265,6 +291,14 @@ var qIC9 = &workload.Query{
 	Class: engine.Subgraph,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS*1..2]-(f:Person)
+WHERE f.id <> $personId
+WITH DISTINCT f
+MATCH (f)<-[:HAS_CREATOR]-(m:Post)
+WHERE m.creationDate < $maxDate
+RETURN f.id AS personId, m.id AS postId, m.creationDate AS creationDate
+ORDER BY creationDate DESC, postId ASC
+LIMIT 20`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})-[:KNOWS*1..2]-(f:Person)
 WHERE f.id <> $personId
 WITH DISTINCT f
 MATCH (f)<-[:HAS_CREATOR]-(m:Post)
@@ -331,6 +365,8 @@ var qIC13 = &workload.Query{
 RETURN length(path) AS len`,
 		engine.KuzuCy: `MATCH (a:Person {id: $person1Id})-[e:KNOWS* SHORTEST 1..30]-(b:Person {id: $person2Id})
 RETURN length(e) AS len`,
+		engine.ZuQL: `MATCH ANY SHORTEST (a:Person {id: $person1Id})-[e:KNOWS*]-(b:Person {id: $person2Id})
+RETURN size(e) AS len`,
 	},
 	PoolKey: PoolPersonPair,
 	Params:  workload.NewPoolSource(nil),
