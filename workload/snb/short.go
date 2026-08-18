@@ -44,6 +44,9 @@ var qIS1 = &workload.Query{
 		engine.Cypher: `MATCH (p:Person {id: $personId})
 RETURN p.firstName AS firstName, p.lastName AS lastName,
        p.birthday AS birthday, p.creationDate AS creationDate`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})
+RETURN p.firstName AS firstName, p.lastName AS lastName,
+       p.birthday AS birthday, p.creationDate AS creationDate`,
 	},
 	PoolKey: PoolPersonID,
 	Params:  workload.NewPoolSource(nil),
@@ -73,6 +76,10 @@ var qIS2 = &workload.Query{
 	Class: engine.Traversal,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (p:Person {id: $personId})<-[:HAS_CREATOR]-(m:Post)
+RETURN m.id AS postId, m.content AS content, m.creationDate AS creationDate
+ORDER BY creationDate DESC, postId DESC
+LIMIT 10`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})<-[:HAS_CREATOR]-(m:Post)
 RETURN m.id AS postId, m.content AS content, m.creationDate AS creationDate
 ORDER BY creationDate DESC, postId DESC
 LIMIT 10`,
@@ -120,6 +127,10 @@ var qIS3 = &workload.Query{
 RETURN f.id AS friendId, f.firstName AS firstName, f.lastName AS lastName,
        k.creationDate AS since
 ORDER BY since DESC, friendId ASC`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})-[k:KNOWS]-(f:Person)
+RETURN f.id AS friendId, f.firstName AS firstName, f.lastName AS lastName,
+       k.creationDate AS since
+ORDER BY since DESC, friendId ASC`,
 	},
 	PoolKey: PoolPersonID,
 	Params:  workload.NewPoolSource(nil),
@@ -159,6 +170,8 @@ var qIS4 = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (m:Post {id: $postId})
 RETURN m.content AS content, m.creationDate AS creationDate`,
+		engine.ZuQL: `MATCH (m:Post {id: $postId})
+RETURN m.content AS content, m.creationDate AS creationDate`,
 	},
 	PoolKey: PoolPostID,
 	Params:  workload.NewPoolSource(nil),
@@ -187,6 +200,8 @@ var qIS5 = &workload.Query{
 	Class: engine.PointRead,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (m:Post {id: $postId})-[:HAS_CREATOR]->(p:Person)
+RETURN p.id AS personId, p.firstName AS firstName, p.lastName AS lastName`,
+		engine.ZuQL: `MATCH (m:Post {id: $postId})-[:HAS_CREATOR]->(p:Person)
 RETURN p.id AS personId, p.firstName AS firstName, p.lastName AS lastName`,
 	},
 	PoolKey: PoolPostID,
@@ -220,6 +235,8 @@ var qIS6 = &workload.Query{
 	Class: engine.Traversal,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (f:Forum)-[:CONTAINER_OF]->(m:Post {id: $postId})
+RETURN f.id AS forumId, f.title AS title`,
+		engine.ZuQL: `MATCH (f:Forum)-[:CONTAINER_OF]->(m:Post {id: $postId})
 RETURN f.id AS forumId, f.title AS title`,
 	},
 	PoolKey: PoolPostID,
@@ -255,6 +272,10 @@ var qIS7 = &workload.Query{
 	Class: engine.Subgraph,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (p:Person)-[l:LIKES]->(m:Post {id: $postId})
+RETURN p.id AS personId, p.firstName AS firstName, p.lastName AS lastName,
+       l.creationDate AS likeDate
+ORDER BY likeDate DESC, personId ASC`,
+		engine.ZuQL: `MATCH (p:Person)-[l:LIKES]->(m:Post {id: $postId})
 RETURN p.id AS personId, p.firstName AS firstName, p.lastName AS lastName,
        l.creationDate AS likeDate
 ORDER BY likeDate DESC, personId ASC`,
