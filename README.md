@@ -263,12 +263,38 @@ What works today:
 - `compare --files a.json,b.json` -- puts two or more result sets side by side with optional Bolt plane-overhead section.
 - `gate --file result.json --point-read-budget 1ms` -- checks p99 against per-class budgets and exits 2 on violations.
 - `noise --results results --engine zu --workload micro-read --scale smoke` -- reads repeated runs of one unchanged binary and reports how much they disagreed, per query and per metric, widest first. It prints a suggested `--noise-floor` for `gate`.
+- `ab --before before/ --after after/ --engine zu` -- compares two builds of one engine that were run against each other on the same machine, best of N per side, and exits 2 when a query is at or over `--factor`.
 
 ### Noise, and what a regression number is worth
 
 A regression gate compares two numbers and calls the difference a change in the code. That is only true when the machine would have produced the same number twice, and a developer laptop often will not. Run `noise` before trusting a failed gate: it measures the spread across repeated runs of a single binary, which is the floor under every regression the gate can report. If the floor is at or above the regression factor, the gate cannot tell a slower engine from a busier machine, and it says so instead of guessing.
 
 Passing that measured floor to `gate --noise-floor` moves differences inside it out of the violations list and into a separate section, reported and not ruled on. They are not excused: a finding inside the floor is the harness saying this run cannot answer the question, which is a different thing from saying the answer is no. Budget checks and verification integrity are unaffected, because neither is a comparison between two runs. The default is zero, no floor, which is the right setting for the controlled machine the full matrix runs on.
+
+### Two builds, one machine
+
+`gate --baseline` compares today's run against a run recorded on some other day. That holds while the machine is the same machine, and stops holding the moment something else is compiling on it: every query drifts by the same tenth at once and the gate reads the load as a regression in code that never touched the read path. `ab` is the answer to that. It takes two lineages, one per build, and compares them query by query, so whatever the machine was doing lands on both sides of the comparison instead of on one.
+
+Two things are the caller's to get right. The first is that the two lineages differ in the build and in nothing else: same harness binary, same workload, same scale, same dataset. The second is the ordering. Run the two sides alternately and swap which one goes first every round, because load that climbs through a round otherwise lands entirely on whichever side ran second, and that ordering alone can manufacture a ten percent regression.
+
+Each side is reduced to its best value per query rather than its average. The default metric is `min`, the fastest single call, because load only ever adds time to a call: the smallest observation is the one closest to the work itself, and it is the one statistic a busy machine cannot inflate. `--metric p50` and `--metric p99` are there when the question is about the typical call or the tail, and both are noisier for the same reason.
+
+A worked example, six rounds with the order swapped every round, and the same libzu built from two commits:
+
+```
+for r in 1 2 3 4 5 6; do
+  for w in micro-read micro-uniform snb-short; do
+    if [ $((r % 2)) -eq 0 ]; then
+      ./gb-new run --workload $w --engines zu --out after
+      ./gb-old run --workload $w --engines zu --out before
+    else
+      ./gb-old run --workload $w --engines zu --out before
+      ./gb-new run --workload $w --engines zu --out after
+    fi
+  done
+done
+./gb ab --before before --after after --engine zu
+```
 
 What is not yet wired:
 
