@@ -166,21 +166,42 @@ zu holds the graph in a sixth of the memory, takes an eighth of the minor faults
 
 Disk read and write bytes are per-process kernel counters read from `/proc/self/io`, so they are present on Linux and absent on macOS, where the equivalent lives behind libproc and this harness stays cgo-free by default. A figure a platform cannot answer is -1 in the document and `n/a` in the table, and a row no engine could answer is dropped rather than printed as a column of `n/a`.
 
-### What does not run yet
+### What does not run yet, and what now does
 
 A workload only produces numbers for an engine that has text in that engine's dialect chain. There is no silent fallback: if the chain has nothing, the query reports SKIP with a reason, and the reason is in the result file.
 
+This table used to say that no labelled workload ran on zu at all, because the loader took a two column edge list and flattened every label into one table. The labelled load path landed, the dialect texts followed, and what is left is seven queries out of the whole suite.
+
 | Workload | zu | reason |
 | --- | --- | --- |
-| micro-read, micro-uniform, micro-er, micro-powerlaw, micro-mix | runs | zuQL text present |
-| micro-sp, micro-sp-bidir | runs | zuQL text present, shortest paths landed in the engine |
-| micro-write | runs | zuQL text present, one property update per repetition, on the id column because `zu copy` loads no other node column |
-| lsqb (q1 to q9) | SKIP | `no-dialect-text` |
-| snb-short, snb-complex, snb-bi, snb-mix, snb-update | SKIP | `no-dialect-text` |
-| linkbench, fb-read, fb-write | SKIP | `no-dialect-text` |
-| galytics, galytics-w, gap, g500 | SKIP | `missing-algorithm:*` |
+| micro-read, micro-uniform, micro-er, micro-powerlaw, micro-mix, micro-write | runs | every query |
+| micro-sp, micro-sp-bidir | runs | every query |
+| galytics, galytics-w, gap, g500 | runs | every query |
+| snb-short | runs | all seven |
+| snb-complex | runs | all six |
+| snb-mix | runs | every query it draws from the three SNB families |
+| snb-update | runs | all six |
+| fb-read, fb-write | runs | all twelve |
+| snb-bi | 4 of 5 | bi1 buckets by content length with `CASE`, which zuQL does not parse ([tamnd/zu#303](https://github.com/tamnd/zu/issues/303)) |
+| linkbench | 8 of 10 | `lb-update-node` and `lb-delete-node` need a scratch object at a chosen id, and `INSERT` cannot choose one ([tamnd/zu#293](https://github.com/tamnd/zu/issues/293)) |
+| lsqb | 5 of 9 | the four cyclic shapes get the wrong count ([tamnd/zu#304](https://github.com/tamnd/zu/issues/304)) |
 
-The labelled workloads are the larger of the two gaps. zu's loader takes a two column edge list, so a dataset with several node labels and several relationship types flattens into one node table and one edge table, and the LSQB and SNB texts have nothing to bind to. Covering them needs a labelled load path first and the dialect texts second.
+Every skip above is a text that was withheld on purpose, not a text that failed. One FAIL discards the measurement for the whole workload, so a query zu answers wrongly is left without a text and the reason is written down next to it rather than in a result file nobody reads.
+
+### Where zu wins and where it loses
+
+The picture across the labelled families is consistent enough to state plainly. On reads, zu is ahead almost everywhere, by 2x to 42x, and the wins are largest on the shapes that touch one neighbourhood and stop. On writes it is behind by 4x to 80x, and on multi hop expansion it is behind by up to 3x.
+
+Read families at sf1, fast profile, both engines in process, p50 against p50:
+
+| Family | zu range against ladybug |
+| --- | --- |
+| snb-short, all seven | 2.0x to 23.2x ahead |
+| snb-complex, four of six | 7.2x to 41.8x ahead; ic1 3.0x behind, ic9 1.3x behind |
+| snb-bi, three of four | 9.2x to 33.8x ahead; bi18 2.4x behind |
+| lsqb, all five it answers | 3.1x to 28.3x ahead |
+
+The two places it loses have one cause each and both are filed. Every shape that walks a bounded variable length step comes in behind: snb-ic1 at one to three hops, snb-ic9 and snb-bi18 at one to two. The unbounded shortest path shape, snb-ic13, is 41.8x ahead, which says the selector stops at the first meeting and the bounded range enumerates paths the query then discards ([tamnd/zu#302](https://github.com/tamnd/zu/issues/302)). On writes, snb-update runs 15.89ms against 3.93ms and fb-write 145.83ms against 3.97ms, because every commit folds the whole overlay and a small write pays for the size of the table it lands in ([tamnd/zu#292](https://github.com/tamnd/zu/issues/292)).
 
 ### The gap that closed
 
