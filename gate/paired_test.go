@@ -146,3 +146,66 @@ func TestPairedABKeepsWorkloadsApart(t *testing.T) {
 		t.Errorf("Median = %.2f, want the upper of two rows, 15/10 = 1.50", p.Median)
 	}
 }
+
+func TestPairedCostsComparesWhatARunSpent(t *testing.T) {
+	before := map[string][]measure.Resource{"linkbench": {
+		{CPUUserNs: 3_000_000_000, CPUSysNs: 400_000_000, ChildCPUUserNs: -1, ChildCPUSysNs: -1,
+			MaxRSSBytes: 100 << 20, ChildMaxRSSBytes: -1, StoreBytes: 6 << 20, StoreGrowthBytes: 1 << 20},
+		// A loaded repeat. Best of N is what keeps it out of the answer.
+		{CPUUserNs: 9_000_000_000, CPUSysNs: 900_000_000, ChildCPUUserNs: -1, ChildCPUSysNs: -1,
+			MaxRSSBytes: 140 << 20, ChildMaxRSSBytes: -1, StoreBytes: 6 << 20, StoreGrowthBytes: 1 << 20},
+	}}
+	after := map[string][]measure.Resource{"linkbench": {
+		{CPUUserNs: 3_600_000_000, CPUSysNs: 400_000_000, ChildCPUUserNs: -1, ChildCPUSysNs: -1,
+			MaxRSSBytes: 100 << 20, ChildMaxRSSBytes: -1, StoreBytes: 6 << 20, StoreGrowthBytes: 1 << 20},
+	}}
+
+	costs := PairedCosts(before, after)
+	if len(costs) != len(PairedCostMetrics) {
+		t.Fatalf("costs = %v, want one row per metric", costs)
+	}
+	cpu := costs[0]
+	if cpu.Metric != "cpu" {
+		t.Fatalf("first row is %q, want cpu", cpu.Metric)
+	}
+	if cpu.Before != 3_400_000_000 {
+		t.Errorf("cpu before = %d, want the quietest repeat, user plus system", cpu.Before)
+	}
+	if got := cpu.Factor; got < 1.17 || got > 1.19 {
+		t.Errorf("cpu factor = %.2f, want 4.0/3.4 = 1.18", got)
+	}
+	if cpu.BeforeRuns != 2 || cpu.AfterRuns != 1 {
+		t.Errorf("cpu runs = %d and %d, want 2 and 1", cpu.BeforeRuns, cpu.AfterRuns)
+	}
+	if rss := costs[1]; rss.Metric != "peak rss" || rss.Before != 100<<20 || rss.Factor != 1 {
+		t.Errorf("rss row = %+v, want the quietest peak on both sides", rss)
+	}
+}
+
+// A metric the platform could not report is left out, not counted as nought,
+// because a zero here reads as a run that cost nothing.
+func TestPairedCostsSkipsWhatThePlatformCouldNotAnswer(t *testing.T) {
+	unavailable := measure.Resource{
+		CPUUserNs: -1, CPUSysNs: -1, ChildCPUUserNs: -1, ChildCPUSysNs: -1,
+		MaxRSSBytes: -1, ChildMaxRSSBytes: -1, StoreBytes: 6 << 20, StoreGrowthBytes: -1,
+	}
+	costs := PairedCosts(
+		map[string][]measure.Resource{"micro-read": {unavailable}},
+		map[string][]measure.Resource{"micro-read": {unavailable}},
+	)
+	if len(costs) != 1 || costs[0].Metric != "store bytes" {
+		t.Fatalf("costs = %v, want the one metric the platform answered", costs)
+	}
+}
+
+func TestPairedCostsSkipsWorkloadsOnlyOneSideRan(t *testing.T) {
+	r := measure.Resource{CPUUserNs: 1, CPUSysNs: 0, ChildCPUUserNs: -1, ChildCPUSysNs: -1,
+		MaxRSSBytes: -1, ChildMaxRSSBytes: -1, StoreBytes: -1, StoreGrowthBytes: -1}
+	costs := PairedCosts(
+		map[string][]measure.Resource{"a": {r}, "b": {r}},
+		map[string][]measure.Resource{"a": {r}},
+	)
+	if len(costs) != 1 || costs[0].Workload != "a" {
+		t.Fatalf("costs = %v, want the workload both sides ran", costs)
+	}
+}

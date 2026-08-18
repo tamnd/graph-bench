@@ -169,6 +169,121 @@ func PairedAB(before, after map[string][]measure.Result, metric string, threshol
 	return p
 }
 
+// Cost is one run level resource number on both sides of a change. Latency
+// says how long an answer took; a cost row says what the machine spent
+// getting there, so a change that buys a tenth of a millisecond with a third
+// more CPU cannot pass as free.
+type Cost struct {
+	// Workload is the workload the two runs measured.
+	Workload string
+
+	// Metric names the resource, as PairedCostMetrics lists it.
+	Metric string
+
+	// Before and After are the lowest value each side reached over its
+	// repeats, in the metric's own unit: nanoseconds for cpu, bytes for
+	// the rest.
+	Before, After int64
+
+	// BeforeRuns and AfterRuns are how many repeats carried the metric.
+	BeforeRuns, AfterRuns int
+
+	// Factor is After/Before, above one when the change costs more.
+	Factor float64
+}
+
+// PairedCostMetrics are the run level numbers PairedCosts compares, in the
+// order it reports them. cpu is the whole of it, harness and any reaped
+// child, user and system, because a subprocess engine's work is the child's
+// and leaving it out reads as an engine that costs nothing.
+var PairedCostMetrics = []string{"cpu", "peak rss", "store bytes", "store growth"}
+
+// costOf reads one metric off a resource reading, and reports whether the
+// reading has it. A negative value is the harness saying the platform could
+// not answer, which is not a zero.
+func costOf(r measure.Resource, metric string) (int64, bool) {
+	nonNegative := func(vs ...int64) (int64, bool) {
+		var sum int64
+		var any bool
+		for _, v := range vs {
+			if v < 0 {
+				continue
+			}
+			sum += v
+			any = true
+		}
+		return sum, any
+	}
+	switch metric {
+	case "cpu":
+		return nonNegative(r.CPUUserNs, r.CPUSysNs, r.ChildCPUUserNs, r.ChildCPUSysNs)
+	case "peak rss":
+		return nonNegative(r.MaxRSSBytes, r.ChildMaxRSSBytes)
+	case "store bytes":
+		return nonNegative(r.StoreBytes)
+	case "store growth":
+		return nonNegative(r.StoreGrowthBytes)
+	default:
+		return 0, false
+	}
+}
+
+// PairedCosts compares what each side spent, workload by workload, on the
+// same best-of-N terms as PairedAB and for the same reason: load adds to
+// every one of these numbers and takes from none of them, so the smallest
+// reading is the one closest to the work.
+//
+// Rows come out in workload order and then in PairedCostMetrics order, which
+// is a table to read rather than a ranking. A metric neither side could
+// report is left out entirely.
+func PairedCosts(before, after map[string][]measure.Resource) []Cost {
+	var out []Cost
+	workloads := make([]string, 0, len(before))
+	for w := range before {
+		if _, ok := after[w]; ok {
+			workloads = append(workloads, w)
+		}
+	}
+	sort.Strings(workloads)
+	for _, w := range workloads {
+		for _, metric := range PairedCostMetrics {
+			b, bn := bestCost(before[w], metric)
+			a, an := bestCost(after[w], metric)
+			if bn == 0 || an == 0 || b <= 0 {
+				continue
+			}
+			out = append(out, Cost{
+				Workload:   w,
+				Metric:     metric,
+				Before:     b,
+				After:      a,
+				BeforeRuns: bn,
+				AfterRuns:  an,
+				Factor:     float64(a) / float64(b),
+			})
+		}
+	}
+	return out
+}
+
+// bestCost reduces one side's repeats to the lowest reading of one metric,
+// and how many of them carried it.
+func bestCost(rs []measure.Resource, metric string) (int64, int) {
+	var best int64
+	var n int
+	for _, r := range rs {
+		v, ok := costOf(r, metric)
+		if !ok {
+			continue
+		}
+		n++
+		if n == 1 || v < best {
+			best = v
+		}
+	}
+	return best, n
+}
+
 // bestPerQuery reduces one side's repeats to the best value each query
 // reached, and how many repeats contributed to it.
 func bestPerQuery(runs []measure.Result, metric string) (map[string]time.Duration, map[string]int) {
