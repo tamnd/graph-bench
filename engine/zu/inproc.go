@@ -393,11 +393,13 @@ func bindParams(stmt *C.zu_stmt, params map[string]engine.Value) error {
 			st = C.zu_bind_str_z(stmt, cname, cv)
 			C.free(unsafe.Pointer(cv))
 		case bool:
-			// zuQL has no boolean literal or boolean bind, the same gap
-			// the subprocess adapter reports. Fail rather than smuggle
-			// one in as 0/1.
-			C.free(unsafe.Pointer(cname))
-			return fmt.Errorf("zu: parameter %q is a bool; zu has no boolean parameters", name)
+			// The C side has no bool of its own, so the bind takes an
+			// int and reads anything other than nought as true.
+			flag := C.int(0)
+			if v {
+				flag = 1
+			}
+			st = C.zu_bind_bool_z(stmt, cname, flag)
 		default:
 			cv := C.CString(fmt.Sprint(v))
 			st = C.zu_bind_str_z(stmt, cname, cv)

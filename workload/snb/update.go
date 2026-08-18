@@ -71,6 +71,31 @@ const (
 	id3PostID   = int64(-11)
 )
 
+// Where the zu texts write instead. A zu node id is the row offset the
+// store hands out for a table whose ids are dense, and social-1k leaves
+// Person dense, so a Person cannot be created under a chosen id and the
+// negative ids above name nothing on zu. What the zu texts do instead is
+// take their Persons from the dataset and create everything else under a
+// chosen id, which Post and Forum take because the loader keys them.
+//
+// The ids below are above every generated one at every scale, so the
+// Posts and Forums the zu brackets create collide with nothing. The two
+// Persons are the only entities the zu texts take from the dataset, and
+// they are Persons 0 and 1 because a social graph has them at every
+// scale and the generator leaves them unacquainted, which is the one
+// thing the friendship shape needs. A pair that turned out to be taken
+// would fail the write rather than pass quietly: zu refuses a second
+// edge over a pair a table with edge properties already holds.
+const (
+	zuPersonA    = 0
+	zuPersonB    = 1
+	zuNewForumID = 900001
+	zuUnlikePost = 900002
+	zuLikePost   = 900003
+	zuNewPostID  = 900006
+	zuDeadPostID = 900011
+)
+
 // seedPerson renders a throwaway Person creation pattern for Setup texts.
 func seedPerson(id int64) string {
 	return fmt.Sprintf(`(:Person {id: %d, firstName: "Seed", lastName: "Person", birthday: 0, creationDate: 0})`, id)
@@ -88,6 +113,13 @@ var qIU1 = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `CREATE (p:Person {id: $personId, firstName: $firstName, lastName: $lastName,
                  birthday: $birthday, creationDate: $creationDate})`,
+		// No id: a zu Person id is the row offset the store hands out, so
+		// the person is created without one and found again by the
+		// creation date, which no generated Person carries. The $personId
+		// binding is left in place and unread, which zu allows, so both
+		// dialects draw the same parameters.
+		engine.ZuQL: `INSERT (:Person {firstName: $firstName, lastName: $lastName,
+                birthday: $birthday, creationDate: $creationDate})`,
 	},
 	Params: workload.Fixed{P: workload.Params{
 		"personId": iu1PersonID, "firstName": "Ada", "lastName": "Lovelace",
@@ -96,7 +128,15 @@ var qIU1 = &workload.Query{
 	PostCondition: `MATCH (p:Person {id: $personId})
 WITH count(p) AS c
 RETURN c = 1 AS ok`,
-	Teardown:     fmt.Sprintf(`MATCH (p:Person {id: %d}) DETACH DELETE p`, iu1PersonID),
+	PostConditions: map[engine.Dialect]string{
+		engine.ZuQL: `MATCH (p:Person) WHERE p.creationDate = $creationDate
+WITH count(p) AS c
+RETURN c = 1 AS ok`,
+	},
+	Teardown: fmt.Sprintf(`MATCH (p:Person {id: %d}) DETACH DELETE p`, iu1PersonID),
+	Teardowns: map[engine.Dialect]string{
+		engine.ZuQL: `MATCH (p:Person) WHERE p.creationDate = 1234567 DETACH DELETE p`,
+	},
 	AutocommitOK: true,
 }
 
@@ -108,16 +148,32 @@ var qIU3 = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (p:Person {id: $personId}), (m:Post {id: $postId})
 CREATE (p)-[:LIKES {creationDate: $creationDate}]->(m)`,
+		// A Person the dataset holds and a Post the setup made, so the
+		// created edge is the only one between the pair.
+		engine.ZuQL: fmt.Sprintf(`MATCH (p:Person {id: %d}), (m:Post {id: %d})
+INSERT (p)-[:LIKES {creationDate: $creationDate}]->(m)`, zuPersonA, zuLikePost),
 	},
 	Params: workload.Fixed{P: workload.Params{
 		"personId": iu3PersonID, "postId": iu3PostID, "creationDate": int64(7654321),
 	}},
 	Setup: fmt.Sprintf(`CREATE %s, %s`, seedPerson(iu3PersonID), seedPost(iu3PostID)),
+	Setups: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`INSERT (:Post {id: %d, content: 'seed', creationDate: 0, creatorId: -1})`,
+			zuLikePost),
+	},
 	PostCondition: `MATCH (p:Person {id: $personId})-[l:LIKES]->(m:Post {id: $postId})
 WITH count(l) AS c
 RETURN c = 1 AS ok`,
+	PostConditions: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (p:Person {id: %d})-[l:LIKES]->(m:Post {id: %d})
+WITH count(l) AS c
+RETURN c = 1 AS ok`, zuPersonA, zuLikePost),
+	},
 	Teardown: fmt.Sprintf(`MATCH (p:Person {id: %d}), (m:Post {id: %d}) DETACH DELETE p, m`,
 		iu3PersonID, iu3PostID),
+	Teardowns: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (m:Post {id: %d}) DETACH DELETE m`, zuLikePost),
+	},
 	AutocommitOK: true,
 }
 
@@ -131,6 +187,15 @@ var qIU6 = &workload.Query{
 CREATE (m:Post {id: $postId, content: $content, creationDate: $creationDate, creatorId: -1})
 CREATE (m)-[:HAS_CREATOR]->(p)
 CREATE (f)-[:CONTAINER_OF]->(m)`,
+		// The author is one the dataset holds, the forum is the one the
+		// setup made, and the post takes an id of its own because zu keys
+		// the Post table. All three writes are one statement, which is
+		// what the shape asks for and what a single INSERT with three
+		// patterns does.
+		engine.ZuQL: fmt.Sprintf(`MATCH (p:Person {id: %d}), (f:Forum {id: %d})
+INSERT (m:Post {id: %d, content: $content, creationDate: $creationDate, creatorId: -1}),
+       (m)-[:HAS_CREATOR]->(p),
+       (f)-[:CONTAINER_OF]->(m)`, zuPersonA, zuNewForumID, zuNewPostID),
 	},
 	Params: workload.Fixed{P: workload.Params{
 		"authorId": iu6AuthorID, "forumId": iu6ForumID, "postId": iu6PostID,
@@ -138,11 +203,23 @@ CREATE (f)-[:CONTAINER_OF]->(m)`,
 	}},
 	Setup: fmt.Sprintf(`CREATE %s, (:Forum {id: %d, title: "seed forum"})`,
 		seedPerson(iu6AuthorID), iu6ForumID),
+	Setups: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`INSERT (:Forum {id: %d, title: 'seed forum'})`, zuNewForumID),
+	},
 	PostCondition: `MATCH (f:Forum {id: $forumId})-[:CONTAINER_OF]->(m:Post {id: $postId})-[:HAS_CREATOR]->(p:Person {id: $authorId})
 WITH count(m) AS c
 RETURN c = 1 AS ok`,
+	PostConditions: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (f:Forum {id: %d})-[:CONTAINER_OF]->(m:Post {id: %d})-[:HAS_CREATOR]->(p:Person {id: %d})
+WITH count(m) AS c
+RETURN c = 1 AS ok`, zuNewForumID, zuNewPostID, zuPersonA),
+	},
 	Teardown: fmt.Sprintf(`MATCH (p:Person {id: %d}), (f:Forum {id: %d}), (m:Post {id: %d}) DETACH DELETE p, f, m`,
 		iu6AuthorID, iu6ForumID, iu6PostID),
+	Teardowns: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (m:Post {id: %d}), (f:Forum {id: %d}) DETACH DELETE m, f`,
+			zuNewPostID, zuNewForumID),
+	},
 	AutocommitOK: true,
 }
 
@@ -154,16 +231,30 @@ var qIU8 = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (a:Person {id: $person1Id}), (b:Person {id: $person2Id})
 CREATE (a)-[:KNOWS {creationDate: $creationDate}]->(b)`,
+		// Two Persons the generator left unacquainted, for the same
+		// reason the like shape writes over a free pair.
+		engine.ZuQL: fmt.Sprintf(`MATCH (a:Person {id: %d}), (b:Person {id: %d})
+INSERT (a)-[:KNOWS {creationDate: $creationDate}]->(b)`, zuPersonA, zuPersonB),
 	},
 	Params: workload.Fixed{P: workload.Params{
 		"person1Id": iu8PersonA, "person2Id": iu8PersonB, "creationDate": int64(3456789),
 	}},
-	Setup: fmt.Sprintf(`CREATE %s, %s`, seedPerson(iu8PersonA), seedPerson(iu8PersonB)),
+	Setup:  fmt.Sprintf(`CREATE %s, %s`, seedPerson(iu8PersonA), seedPerson(iu8PersonB)),
+	Setups: map[engine.Dialect]string{engine.ZuQL: ""},
 	PostCondition: `MATCH (a:Person {id: $person1Id})-[k:KNOWS]->(b:Person {id: $person2Id})
 WITH count(k) AS c
 RETURN c = 1 AS ok`,
+	PostConditions: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (a:Person {id: %d})-[k:KNOWS]->(b:Person {id: %d})
+WITH count(k) AS c
+RETURN c = 1 AS ok`, zuPersonA, zuPersonB),
+	},
 	Teardown: fmt.Sprintf(`MATCH (a:Person {id: %d}), (b:Person {id: %d}) DETACH DELETE a, b`,
 		iu8PersonA, iu8PersonB),
+	Teardowns: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (a:Person {id: %d})-[k:KNOWS]->(b:Person {id: %d}) DELETE k`,
+			zuPersonA, zuPersonB),
+	},
 	AutocommitOK: true,
 }
 
@@ -175,17 +266,38 @@ var qID2 = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (p:Person {id: $personId})-[l:LIKES]->(m:Post {id: $postId})
 DELETE l`,
+		engine.ZuQL: fmt.Sprintf(`MATCH (p:Person {id: %d})-[l:LIKES]->(m:Post {id: %d})
+DELETE l`, zuPersonA, zuUnlikePost),
 	},
 	Params: workload.Fixed{P: workload.Params{
 		"personId": id2PersonID, "postId": id2PostID,
 	}},
 	Setup: fmt.Sprintf(`CREATE (p:Person {id: %d, firstName: "Seed", lastName: "Person", birthday: 0, creationDate: 0}), %s
 CREATE (p)-[:LIKES {creationDate: 1}]->(m)`, id2PersonID, seedPostBound(id2PostID)),
+	// The post is a second one of the setup's own, so the two shapes that
+	// write LIKES stay out of each other's way. The post and the edge go
+	// in together, since a setup is one statement and a MATCH in a later
+	// one would be the only other way to reach the post.
+	Setups: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (p:Person {id: %d})
+INSERT (m:Post {id: %d, content: 'seed', creationDate: 0, creatorId: -1}),
+       (p)-[:LIKES {creationDate: 1}]->(m)`, zuPersonA, zuUnlikePost),
+	},
 	PostCondition: `MATCH (p:Person {id: $personId})-[l:LIKES]->(m:Post {id: $postId})
 WITH count(l) AS c
 RETURN c = 0 AS ok`,
+	PostConditions: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (p:Person {id: %d})-[l:LIKES]->(m:Post {id: %d})
+WITH count(l) AS c
+RETURN c = 0 AS ok`, zuPersonA, zuUnlikePost),
+	},
 	Teardown: fmt.Sprintf(`MATCH (p:Person {id: %d}), (m:Post {id: %d}) DETACH DELETE p, m`,
 		id2PersonID, id2PostID),
+	// The post goes whether or not the edge did, and it takes any edge
+	// still on it with it, so the store is stationary either way.
+	Teardowns: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (m:Post {id: %d}) DETACH DELETE m`, zuUnlikePost),
+	},
 	AutocommitOK: true,
 }
 
@@ -204,12 +316,26 @@ var qID3 = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (m:Post {id: $postId})
 DETACH DELETE m`,
+		engine.ZuQL: fmt.Sprintf(`MATCH (m:Post {id: %d})
+DETACH DELETE m`, zuDeadPostID),
 	},
 	Params: workload.Fixed{P: workload.Params{"postId": id3PostID}},
 	Setup:  fmt.Sprintf(`CREATE %s`, seedPost(id3PostID)),
+	Setups: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`INSERT (:Post {id: %d, content: 'seed', creationDate: 0, creatorId: -1})`,
+			zuDeadPostID),
+	},
 	PostCondition: `MATCH (m:Post {id: $postId})
 WITH count(m) AS c
 RETURN c = 0 AS ok`,
-	Teardown:     fmt.Sprintf(`MATCH (m:Post {id: %d}) DETACH DELETE m`, id3PostID),
+	PostConditions: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (m:Post {id: %d})
+WITH count(m) AS c
+RETURN c = 0 AS ok`, zuDeadPostID),
+	},
+	Teardown: fmt.Sprintf(`MATCH (m:Post {id: %d}) DETACH DELETE m`, id3PostID),
+	Teardowns: map[engine.Dialect]string{
+		engine.ZuQL: fmt.Sprintf(`MATCH (m:Post {id: %d}) DETACH DELETE m`, zuDeadPostID),
+	},
 	AutocommitOK: true,
 }
