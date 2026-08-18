@@ -148,9 +148,15 @@ func (q *Query) Before(d engine.Dialect) string { return bracket(q.Setups, q.Set
 // resolved to. See Before.
 func (q *Query) After(d engine.Dialect) string { return bracket(q.Teardowns, q.Teardown, d) }
 
-// bracket picks a dialect's statement out of a map, or the core one.
+// bracket picks a dialect's statement out of a map, or the core one. An
+// entry that is present and empty is the dialect saying it needs no
+// statement here, which is not the same as having none to offer: a
+// dialect whose timed write runs against data the dataset already holds
+// needs no setup at all, and falling back to a core setup that creates
+// the entities it is not using would fail the write on a statement it
+// never asked for.
 func bracket(byDialect map[engine.Dialect]string, core string, d engine.Dialect) string {
-	if t, ok := byDialect[d]; ok && t != "" {
+	if t, ok := byDialect[d]; ok {
 		return t
 	}
 	return core

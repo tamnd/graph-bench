@@ -1,5 +1,6 @@
 # Build output
 /graph-bench
+/gb
 /dist/
 
 # Generated and downloaded datasets, cached between runs

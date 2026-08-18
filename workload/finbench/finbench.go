@@ -45,6 +45,8 @@
 package finbench
 
 import (
+	"fmt"
+
 	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/workload"
 )
@@ -572,6 +574,23 @@ const (
 	w2ID     = int64(9_000_001)
 )
 
+// Where the zu texts write instead. A zu node id is the row offset the
+// store hands out for a table whose ids are dense, and the fin datasets
+// number their Accounts from nought, so Account is the dense one and an
+// account cannot be created under a chosen id. What identifies a
+// created account on zu is a createTime no simulation clock reaches,
+// one marker per write so the two shapes stay out of each other's way.
+//
+// The transfer runs to an account the setup made rather than between
+// two the dataset holds. A rel table that stores properties on its
+// edges takes one edge per pair, and which pairs the generator already
+// transferred between is a property of the dataset, so a fresh account
+// is the one endpoint that is free at every scale by construction.
+const (
+	zuW1Account = int64(9_000_000_001)
+	zuW2Account = int64(9_000_000_002)
+)
+
 func writeWorkload() *workload.Workload {
 	return &workload.Workload{
 		Name:     "fb-write",
@@ -600,12 +619,31 @@ func w1() *workload.Query {
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (s:Account {id: $src}), (d:Account {id: $dst})
 CREATE (s)-[:TRANSFER {amount: $amount, ts: $ts}]->(d)`,
+			// The source is the drawn one, the destination is the account
+			// the setup made, which is the endpoint no earlier transfer
+			// can have reached.
+			engine.ZuQL: fmt.Sprintf(`MATCH (s:Account {id: $src}), (d:Account) WHERE d.createTime = %d
+INSERT (s)-[:TRANSFER {amount: $amount, ts: $ts}]->(d)`, zuW1Account),
 		},
 		PoolKey: "fb-w1",
 		Params:  workload.NewPoolSource(nil),
+		Setups: map[engine.Dialect]string{
+			engine.ZuQL: fmt.Sprintf(`INSERT (:Account {createTime: %d, isBlocked: false})`, zuW1Account),
+		},
 		PostCondition: `MATCH (:Account {id: $src})-[t:TRANSFER {ts: $ts}]->(:Account {id: $dst})
 RETURN count(t) = 1`,
+		PostConditions: map[engine.Dialect]string{
+			engine.ZuQL: fmt.Sprintf(`MATCH (s:Account {id: $src})-[t:TRANSFER]->(d:Account)
+WHERE t.ts = $ts AND d.createTime = %d
+WITH count(t) AS c
+RETURN c = 1 AS ok`, zuW1Account),
+		},
 		Teardown: `MATCH ()-[t:TRANSFER {ts: 9000000000}]->() DELETE t`,
+		// The account goes and takes the transfer with it, so the store
+		// is back where it started whether or not the write landed.
+		Teardowns: map[engine.Dialect]string{
+			engine.ZuQL: fmt.Sprintf(`MATCH (d:Account) WHERE d.createTime = %d DETACH DELETE d`, zuW1Account),
+		},
 	}
 }
 
@@ -617,11 +655,23 @@ func w2() *workload.Query {
 		Class: engine.Write,
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `CREATE (:Account {id: $id, createTime: $createTime, isBlocked: $isBlocked})`,
+			// No id, and the marker createTime in its place. The $id and
+			// $createTime bindings are left unread, which zu allows, so
+			// both dialects draw the same parameters.
+			engine.ZuQL: fmt.Sprintf(`INSERT (:Account {createTime: %d, isBlocked: $isBlocked})`, zuW2Account),
 		},
 		Params: workload.Fixed{P: workload.Params{
 			"id": w2ID, "createTime": int64(0), "isBlocked": false,
 		}},
 		PostCondition: `MATCH (a:Account {id: $id}) RETURN count(a) = 1`,
-		Teardown:      `MATCH (a:Account {id: 9000001}) DETACH DELETE a`,
+		PostConditions: map[engine.Dialect]string{
+			engine.ZuQL: fmt.Sprintf(`MATCH (a:Account) WHERE a.createTime = %d
+WITH count(a) AS c
+RETURN c = 1 AS ok`, zuW2Account),
+		},
+		Teardown: `MATCH (a:Account {id: 9000001}) DETACH DELETE a`,
+		Teardowns: map[engine.Dialect]string{
+			engine.ZuQL: fmt.Sprintf(`MATCH (a:Account) WHERE a.createTime = %d DETACH DELETE a`, zuW2Account),
+		},
 	}
 }
