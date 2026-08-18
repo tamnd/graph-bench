@@ -127,7 +127,7 @@ RETURN src.id AS id, 0 AS level`,
 			// bfs follows stored edge direction, which is what a level
 			// means here; unreached nodes come back null and the
 			// reference omits them, so the WHERE is the same filter.
-			engine.ZuQL: `CALL bfs('edge', $source) YIELD node, level
+			engine.ZuQL: `CALL bfs('EDGE', $source) YIELD node, level
 WITH node, level WHERE level IS NOT NULL
 RETURN node.id AS id, level ORDER BY id`,
 		},
@@ -188,7 +188,7 @@ RETURN node.id AS id, rank AS score ORDER BY id`,
 			// rank moves in a round falling under 1e-12, capped at 100
 			// rounds. It used to stop at a fixed 20 and that is the one
 			// thing that kept it out of this table.
-			engine.ZuQL: `CALL pagerank('edge') YIELD node, rank
+			engine.ZuQL: `CALL pagerank('EDGE') YIELD node, rank
 RETURN node.id AS id, rank AS score ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
@@ -231,7 +231,7 @@ RETURN m.id AS id, label AS component ORDER BY id`,
 			// answer. This used to carry a group-by and an unwind over
 			// the whole node table to turn a row into an id, and that
 			// relabel was most of the query's time.
-			engine.ZuQL: `CALL wcc('edge') YIELD node, component
+			engine.ZuQL: `CALL wcc('EDGE') YIELD node, component
 RETURN node.id AS id, component ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
@@ -265,7 +265,7 @@ RETURN node.id AS id, community_id AS community ORDER BY id`,
 			// zu propagates the stored ids, not its own row numbers, so
 			// the smallest-label tie-break decides the same way the
 			// oracle does and no relabeling is possible afterwards.
-			engine.ZuQL: `CALL cdlp('edge') YIELD node, community
+			engine.ZuQL: `CALL cdlp('EDGE') YIELD node, community
 RETURN node.id AS id, community ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
@@ -291,7 +291,7 @@ func lccQuery() *workload.Query {
 		Algorithm: "lcc",
 		Params:    workload.Fixed{},
 		Texts: map[engine.Dialect]string{
-			engine.ZuQL: `CALL lcc('edge') YIELD node, coefficient
+			engine.ZuQL: `CALL lcc('EDGE') YIELD node, coefficient
 RETURN node.id AS id, coefficient ORDER BY id`,
 		},
 		Reference: &workload.RefStrategy{
@@ -331,7 +331,7 @@ RETURN src.id AS id, 0 AS distance`,
 			// keeps two weights and the cheaper copy is the one a path
 			// takes. Unreached nodes come back null where the reference
 			// has no row, the same filter bfs needs.
-			engine.ZuQL: `CALL sssp_weighted('edge', $source, 'w') YIELD node, distance
+			engine.ZuQL: `CALL sssp_weighted('EDGE', $source, 'w') YIELD node, distance
 WITH node, distance WHERE distance IS NOT NULL
 RETURN node.id AS id, distance ORDER BY id`,
 		},

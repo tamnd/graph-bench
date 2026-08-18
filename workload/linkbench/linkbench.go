@@ -114,7 +114,7 @@ func getLink() *workload.Query {
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (:Obj {id: $src})-[l:LINK {ltype: $ltype}]->(:Obj {id: $dst})
 RETURN count(l) AS found`,
-			engine.ZuQL: `MATCH (:node {id: $src})-[l:edge]->(:node {id: $dst})
+			engine.ZuQL: `MATCH (:Obj {id: $src})-[l:LINK]->(:Obj {id: $dst})
 WHERE l.ltype = $ltype
 RETURN count(l) AS found`,
 		},
@@ -162,7 +162,7 @@ WHERE l.ltype = $ltype
 RETURN b.id AS dst, l.time AS time, l.payload AS payload
 ORDER BY time DESC, payload ASC
 LIMIT 10000`,
-			engine.ZuQL: `MATCH (:node {id: $src})-[l:edge]->(b:node)
+			engine.ZuQL: `MATCH (:Obj {id: $src})-[l:LINK]->(b:Obj)
 WHERE l.ltype = $ltype
 RETURN b.id AS dst, l.time AS time, l.payload AS payload
 ORDER BY time DESC, payload ASC
@@ -199,7 +199,7 @@ func countLink() *workload.Query {
 			engine.Cypher: `MATCH (:Obj {id: $src})-[l:LINK]->(:Obj)
 WHERE l.ltype = $ltype
 RETURN count(l) AS n`,
-			engine.ZuQL: `MATCH (:node {id: $src})-[l:edge]->(:node)
+			engine.ZuQL: `MATCH (:Obj {id: $src})-[l:LINK]->(:Obj)
 WHERE l.ltype = $ltype
 RETURN count(l) AS n`,
 		},
