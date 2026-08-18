@@ -474,3 +474,54 @@ func TestRenderResourcesEmpty(t *testing.T) {
 		t.Errorf("RenderResources with an empty capture wrote %q", buf.String())
 	}
 }
+
+// TestRenderTraversal checks the TEPS section names each kernel with the edge
+// work its rate divides, prints a rate per engine, and says "n/a" for an
+// engine that did not run the kernel. Nothing is printed when no document
+// carries a rate, which is every workload without a traversal kernel.
+func TestRenderTraversal(t *testing.T) {
+	fast := &Document{
+		Workload:  "g500",
+		Condition: measure.Condition{Engine: "zu", Plane: "inproc"},
+		TEPS: map[string]TEPSDoc{
+			"g500-bfs": {Source: "0", Edges: 12000, PerRep: []float64{2.4e9}, HarmonicMean: 2.4e9},
+		},
+	}
+	slow := &Document{
+		Workload:  "g500",
+		Condition: measure.Condition{Engine: "neo4j", Plane: "bolt"},
+		TEPS: map[string]TEPSDoc{
+			"g500-bfs": {Source: "0", Edges: 12000, PerRep: []float64{1.7e5}, HarmonicMean: 1.7e5},
+		},
+	}
+	bare := &Document{Workload: "lsqb", Condition: measure.Condition{Engine: "zu", Plane: "inproc"}}
+
+	if HasTraversal([]*Document{bare}) {
+		t.Error("HasTraversal on a document with no rate = true, want false")
+	}
+	var none strings.Builder
+	RenderTraversal(&none, []*Document{bare})
+	if none.Len() != 0 {
+		t.Errorf("rendered %q for a document with no rate, want nothing", none.String())
+	}
+
+	var out strings.Builder
+	RenderTraversal(&out, []*Document{fast, slow})
+	got := out.String()
+	for _, want := range []string{"g500-bfs (12.0K edges)", "2.40 G/s", "170.00 K/s", "zu", "neo4j"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("traversal table missing %q:\n%s", want, got)
+		}
+	}
+
+	// An engine that ran the workload but not this kernel reads as n/a, not
+	// as a zero rate, which would look like an engine that ran it slowly.
+	var mixed strings.Builder
+	RenderTraversal(&mixed, []*Document{fast, &Document{
+		Workload:  "g500",
+		Condition: measure.Condition{Engine: "memgraph", Plane: "bolt"},
+	}})
+	if !strings.Contains(mixed.String(), "n/a") {
+		t.Errorf("kernel an engine did not run is missing n/a:\n%s", mixed.String())
+	}
+}

@@ -726,3 +726,117 @@ func Nanos(v int64) string {
 	}
 	return time.Duration(v).String()
 }
+
+// HasTraversal says whether any of these documents carries a traversal rate,
+// which is what a caller asks before spacing the section out.
+func HasTraversal(docs []*Document) bool {
+	for _, d := range docs {
+		if len(d.TEPS) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// RenderTraversal prints the TEPS section: one row per traversal kernel, the
+// harmonic mean rate each engine reached, with the edge work the rate divides
+// named beside the kernel. It prints nothing when no document carries a rate,
+// which is every workload that has no kernel with a source.
+//
+// The rate is the number Graph500 headlines, and it is the honest way to
+// compare a traversal across engines: a latency says how long one graph took,
+// where a rate says how much graph went past per second, so two engines that
+// were asked for different amounts of work are still comparable.
+func RenderTraversal(w io.Writer, docs []*Document) {
+	ordered := NewMatrix(docs).Docs
+	kernels := map[string]int64{}
+	for _, d := range ordered {
+		for id, t := range d.TEPS {
+			kernels[id] = t.Edges
+		}
+	}
+	if len(kernels) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(kernels))
+	for id := range kernels {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	header := []string{"Traversal rate"}
+	for _, d := range ordered {
+		header = append(header, colLabel(d))
+	}
+	rows := [][]string{header}
+	for _, id := range ids {
+		cells := []string{fmt.Sprintf("%s (%s edges)", id, Count(kernels[id]))}
+		for _, d := range ordered {
+			t, ok := d.TEPS[id]
+			if !ok || t.HarmonicMean <= 0 {
+				cells = append(cells, "n/a")
+				continue
+			}
+			cells = append(cells, Rate(t.HarmonicMean))
+		}
+		rows = append(rows, cells)
+	}
+
+	widths := make([]int, len(header))
+	for _, r := range rows {
+		for i, c := range r {
+			widths[i] = max(widths[i], utf8.RuneCountInString(c))
+		}
+	}
+	for ri, r := range rows {
+		for i, c := range r {
+			if i > 0 {
+				fmt.Fprint(w, "  ")
+			}
+			fmt.Fprint(w, pad(c, widths[i]))
+		}
+		fmt.Fprintln(w)
+		if ri == 0 {
+			for i, cw := range widths {
+				if i > 0 {
+					fmt.Fprint(w, "  ")
+				}
+				fmt.Fprint(w, strings.Repeat("-", cw))
+			}
+			fmt.Fprintln(w)
+		}
+	}
+	fmt.Fprintln(w, "note: edges traversed per second, harmonic mean over the timed repetitions,")
+	fmt.Fprintln(w, "      from the one source each kernel drew. an engine with no row for a")
+	fmt.Fprintln(w, "      kernel did not run it.")
+}
+
+// Rate renders a per-second figure in engineering units, which is how a
+// traversal rate is quoted and read.
+func Rate(v float64) string {
+	switch {
+	case v >= 1e9:
+		return fmt.Sprintf("%.2f G/s", v/1e9)
+	case v >= 1e6:
+		return fmt.Sprintf("%.2f M/s", v/1e6)
+	case v >= 1e3:
+		return fmt.Sprintf("%.2f K/s", v/1e3)
+	default:
+		return fmt.Sprintf("%.0f /s", v)
+	}
+}
+
+// Count renders a plain count in the same engineering units, so the edge work
+// beside a rate reads at the same glance.
+func Count(v int64) string {
+	switch {
+	case v >= 1e9:
+		return fmt.Sprintf("%.2fG", float64(v)/1e9)
+	case v >= 1e6:
+		return fmt.Sprintf("%.2fM", float64(v)/1e6)
+	case v >= 1e3:
+		return fmt.Sprintf("%.1fK", float64(v)/1e3)
+	default:
+		return strconv.FormatInt(v, 10)
+	}
+}

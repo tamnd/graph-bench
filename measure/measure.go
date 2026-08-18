@@ -90,6 +90,7 @@ type Result struct {
 	Load      engine.LoadStats      // load time and on-disk size (spec 08 §1 metric 3/4)
 	Resource  Resource              // memory and disk cost of the run (resource.go)
 	Sweep     []SweepPoint          // latency-under-load curve (sweep.go)
+	Traversal map[string]Traversal  // per-kernel traversal rate, keyed by query id (teps.go)
 	Latency   LatencyModel          // which clock the latencies were measured against
 	Condition Condition             // the full stamp (spec 08 §7)
 }
