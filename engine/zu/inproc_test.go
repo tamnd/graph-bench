@@ -121,15 +121,17 @@ func TestInprocValueDecode(t *testing.T) {
 	}
 }
 
-func TestInprocBoolParamRejected(t *testing.T) {
+// A bool used to be the one Go value the bind had nowhere to put, and the
+// adapter turned it into an error rather than a string that looked like one.
+// libzu grew zu_bind_bool_z, so it binds now, and this holds the round trip:
+// what goes in as true comes back as true.
+func TestInprocBoolParamBinds(t *testing.T) {
 	s := startInproc(t)
-	_, err := s.Exec(context.Background(), engine.Op{
-		QueryID: "test", Dialect: engine.ZuQL,
-		Text:   `MATCH (n:node) RETURN count(n) AS n`,
-		Params: map[string]engine.Value{"flag": true},
-	})
-	if err == nil {
-		t.Fatal("bool parameter accepted, want an error")
+	for _, want := range []bool{true, false} {
+		_, rows := execRows(t, s, `RETURN $flag AS flag`, map[string]engine.Value{"flag": want})
+		if len(rows) != 1 || rows[0][0] != want {
+			t.Errorf("flag = %v, want %v", rows, want)
+		}
 	}
 }
 
