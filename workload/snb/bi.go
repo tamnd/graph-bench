@@ -43,7 +43,9 @@ var biQueries = []*workload.Query{qBI1, qBI4, qBI5, qBI9, qBI18}
 const biYearSeconds = int64(365 * 86400)
 
 // qBI1 — BI1 shape: posting summary grouped by year and content-length
-// bucket.
+// bucket. No zu text: the length bucket is a CASE expression and zuQL
+// does not parse CASE (tamnd/zu#303). Writing the bucket some other way
+// would make it a different query, so this one skips until CASE lands.
 var qBI1 = &workload.Query{
 	ID:    "snb-bi1",
 	Class: engine.Aggregation,
@@ -98,6 +100,10 @@ var qBI4 = &workload.Query{
 RETURN f.id AS forumId, f.title AS title, count(p) AS members
 ORDER BY members DESC, forumId ASC
 LIMIT 20`,
+		engine.ZuQL: `MATCH (f:Forum)-[:HAS_MEMBER]->(p:Person)
+RETURN f.id AS forumId, f.title AS title, count(p) AS members
+ORDER BY members DESC, forumId ASC
+LIMIT 20`,
 	},
 	Params: workload.Fixed{P: workload.Params{}},
 	Reference: &workload.RefStrategy{
@@ -129,6 +135,10 @@ var qBI5 = &workload.Query{
 	Class: engine.Aggregation,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (f:Forum {id: $forumId})-[:CONTAINER_OF]->(m:Post)-[:HAS_CREATOR]->(p:Person)
+RETURN p.id AS personId, count(m) AS postCount
+ORDER BY postCount DESC, personId ASC
+LIMIT 20`,
+		engine.ZuQL: `MATCH (f:Forum {id: $forumId})-[:CONTAINER_OF]->(m:Post)-[:HAS_CREATOR]->(p:Person)
 RETURN p.id AS personId, count(m) AS postCount
 ORDER BY postCount DESC, personId ASC
 LIMIT 20`,
@@ -174,6 +184,10 @@ var qBI9 = &workload.Query{
 	Class: engine.Aggregation,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (f:Forum {id: $forumId})-[:HAS_MEMBER]->(p:Person)<-[:HAS_CREATOR]-(m:Post)
+RETURN p.id AS personId, p.firstName AS firstName, count(m) AS postCount
+ORDER BY postCount DESC, personId ASC
+LIMIT 20`,
+		engine.ZuQL: `MATCH (f:Forum {id: $forumId})-[:HAS_MEMBER]->(p:Person)<-[:HAS_CREATOR]-(m:Post)
 RETURN p.id AS personId, p.firstName AS firstName, count(m) AS postCount
 ORDER BY postCount DESC, personId ASC
 LIMIT 20`,
@@ -229,6 +243,15 @@ var qBI18 = &workload.Query{
 	Class: engine.Aggregation,
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
+WITH collect(DISTINCT f.id) AS friendIds
+UNWIND friendIds AS fid
+MATCH (:Person {id: fid})-[:KNOWS]-(c:Person)
+WHERE c.id <> $personId AND NOT c.id IN friendIds
+WITH c.id AS personId, count(DISTINCT fid) AS mutualFriends
+RETURN personId, mutualFriends
+ORDER BY mutualFriends DESC, personId ASC
+LIMIT 20`,
+		engine.ZuQL: `MATCH (p:Person {id: $personId})-[:KNOWS]-(f:Person)
 WITH collect(DISTINCT f.id) AS friendIds
 UNWIND friendIds AS fid
 MATCH (:Person {id: fid})-[:KNOWS]-(c:Person)
