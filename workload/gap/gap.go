@@ -106,6 +106,18 @@ RETURN n.id AS id, size(relationships(p)) AS level
 UNION ALL
 MATCH (src:Node {id: $source})
 RETURN src.id AS id, 0 AS level`,
+			// Kuzu has no BFS procedure, so the levels come out of a
+			// shortest-path expansion, the same road g500-bfs takes there:
+			// the minimum hop count to every node the source reaches. The
+			// two kernels are the same question over different graphs, and
+			// only g500-bfs had this text, so the whole GAP traversal
+			// column read no-dialect-text for an engine that can in fact
+			// answer it.
+			engine.KuzuCy: `MATCH (src:Node {id: CAST($source AS INT64)})-[r:EDGE* SHORTEST 1..]->(n:Node)
+RETURN n.id AS id, length(r) AS level
+UNION ALL
+MATCH (src:Node {id: CAST($source AS INT64)})
+RETURN src.id AS id, 0 AS level`,
 			// Neo4j community has no BFS without GDS, so the levels come
 			// out of its own shortest path search, one per node the source
 			// reaches: the minimum hop count to a node is its level. Both
