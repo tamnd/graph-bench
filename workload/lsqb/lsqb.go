@@ -54,18 +54,18 @@ RETURN count(*) AS cnt`),
 				// Deeper tree: friend-of-friend chain plus likes and containment.
 				`MATCH (m:Post)-[:HAS_CREATOR]->(:Person)-[:KNOWS]->(:Person)-[:KNOWS]->(:Person), (m)<-[:LIKES]-(:Person), (m)<-[:CONTAINER_OF]-(:Forum)
 RETURN count(*) AS cnt`),
-			cypherOnly("lsqb-q5",
+			countQuery("lsqb-q5",
 				// The undirected KNOWS triangle: the cyclic-join stress case.
 				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a)
 RETURN count(*) AS cnt`),
-			cypherOnly("lsqb-q6",
+			countQuery("lsqb-q6",
 				// Triangle joined with each member's post in a shared forum.
 				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a),
       (f:Forum)-[:CONTAINER_OF]->(ma:Post)-[:HAS_CREATOR]->(a),
       (f)-[:CONTAINER_OF]->(mb:Post)-[:HAS_CREATOR]->(b),
       (f)-[:CONTAINER_OF]->(mc:Post)-[:HAS_CREATOR]->(c)
 RETURN count(*) AS cnt`),
-			cypherOnly("lsqb-q7",
+			countQuery("lsqb-q7",
 				// The undirected KNOWS four-cycle: the longer cyclic join.
 				//
 				// The four relationships are named and required pairwise
@@ -94,7 +94,7 @@ RETURN count(*) AS cnt`),
       (f)-[:CONTAINER_OF]->(m2:Post)-[:HAS_CREATOR]->(p)
 WHERE m1 <> m2
 RETURN count(*) AS cnt`),
-			cypherOnly("lsqb-q9",
+			countQuery("lsqb-q9",
 				// Triangle with a shared forum membership and a common liked post.
 				`MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a),
       (f:Forum)-[:HAS_MEMBER]->(a), (f)-[:HAS_MEMBER]->(b), (f)-[:HAS_MEMBER]->(c),
@@ -113,24 +113,18 @@ RETURN count(*) AS cnt`),
 // step, inequality between two bound elements and count(*) are all in
 // the language. The text is filled into both slots rather than left to
 // a fallback so that the report names the dialect each engine ran.
+//
+// The four cyclic shapes, q5 q6 q7 and q9, used to withhold the zuQL
+// text because zu answered them wrong (tamnd/zu#304). Both halves of
+// that are fixed now, the close counting an edge once per stored edge
+// rather than once per connected pair, and a close under another close
+// reading its own probe bitmap rather than the one above it, so all nine
+// run on every engine and the family is measured whole.
 func countQuery(id, cypher string) *workload.Query {
 	return withTexts(id, map[engine.Dialect]string{
 		engine.Cypher: cypher,
 		engine.ZuQL:   cypher,
 	})
-}
-
-// cypherOnly builds the same query with no zu text. The four shapes that
-// use it are the cyclic ones, and zu answers all four with the wrong
-// count today (tamnd/zu#304). Three of them come in low, because zu
-// closes a cycle onto an already-bound element by asking whether the pair
-// is connected rather than how many stored edges connect it, so a pair
-// the dataset holds in both directions contributes once. Q6 comes in
-// high, for a reason the issue does not yet name. A wrong answer fails
-// verification and throws away the measurement for the whole family, so
-// the text is withheld and the query skips until the count is right.
-func cypherOnly(id, cypher string) *workload.Query {
-	return withTexts(id, map[engine.Dialect]string{engine.Cypher: cypher})
 }
 
 func withTexts(id string, texts map[engine.Dialect]string) *workload.Query {

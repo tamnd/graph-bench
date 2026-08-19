@@ -184,7 +184,7 @@ This table used to say that no labelled workload ran on zu at all, because the l
 | fb-read, fb-write | runs | all twelve |
 | snb-bi | 4 of 5 | bi1 buckets by content length with `CASE`, which zuQL does not parse ([tamnd/zu#303](https://github.com/tamnd/zu/issues/303)) |
 | linkbench | 8 of 10 | `lb-update-node` and `lb-delete-node` need a scratch object at a chosen id, and `INSERT` cannot choose one ([tamnd/zu#293](https://github.com/tamnd/zu/issues/293)) |
-| lsqb | 5 of 9 | the four cyclic shapes get the wrong count ([tamnd/zu#304](https://github.com/tamnd/zu/issues/304)) |
+| lsqb | runs | all nine |
 
 Every skip above is a text that was withheld on purpose, not a text that failed. One FAIL discards the measurement for the whole workload, so a query zu answers wrongly is left without a text and the reason is written down next to it rather than in a result file nobody reads.
 
@@ -199,9 +199,9 @@ Read families at sf1, fast profile, both engines in process, p50 against p50:
 | snb-short, all seven | 2.0x to 23.2x ahead |
 | snb-complex, four of six | 7.2x to 41.8x ahead; ic1 3.0x behind, ic9 1.3x behind |
 | snb-bi, three of four | 9.2x to 33.8x ahead; bi18 2.4x behind |
-| lsqb, all five it answers | 3.1x to 28.3x ahead |
+| lsqb, eight of nine | 3.5x to 85.1x ahead; q7 4.1x behind |
 
-The two places it loses have one cause each and both are filed. Every shape that walks a bounded variable length step comes in behind: snb-ic1 at one to three hops, snb-ic9 and snb-bi18 at one to two. The unbounded shortest path shape, snb-ic13, is 41.8x ahead, which says the selector stops at the first meeting and the bounded range enumerates paths the query then discards ([tamnd/zu#302](https://github.com/tamnd/zu/issues/302)). On writes, snb-update runs 15.89ms against 3.93ms and fb-write 145.83ms against 3.97ms, because every commit folds the whole overlay and a small write pays for the size of the table it lands in ([tamnd/zu#292](https://github.com/tamnd/zu/issues/292)).
+The places it loses have one cause each and all of them are filed. The lsqb four-cycle, q7, runs 53.82s against ladybug's 13.07s, and it is the only lsqb shape that carries a predicate over bound relationships, six pairwise inequalities between the four legs. Every other cyclic shape in the family, q5 q6 and q9, is ahead by 8.7x to 85.1x, so the cycle itself is not what costs: the predicates are read one row at a time over an intermediate the close should have cut down first ([tamnd/zu#425](https://github.com/tamnd/zu/issues/425)). Every shape that walks a bounded variable length step comes in behind: snb-ic1 at one to three hops, snb-ic9 and snb-bi18 at one to two. The unbounded shortest path shape, snb-ic13, is 41.8x ahead, which says the selector stops at the first meeting and the bounded range enumerates paths the query then discards ([tamnd/zu#302](https://github.com/tamnd/zu/issues/302)). On writes, snb-update runs 15.89ms against 3.93ms and fb-write 145.83ms against 3.97ms, because every commit folds the whole overlay and a small write pays for the size of the table it lands in ([tamnd/zu#292](https://github.com/tamnd/zu/issues/292)).
 
 ### The gap that closed
 
