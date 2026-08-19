@@ -6,7 +6,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
+
+// busyFor is how long the CPU-delta case spins. It is long enough to cover a
+// 4ms scheduler tick many times over and short enough that nobody notices it
+// in a unit test run.
+const busyFor = 50 * time.Millisecond
 
 // TestDirSizeBytes sums the regular files under a directory and reports -1 for
 // an empty path.
@@ -37,16 +43,26 @@ func TestDirSizeBytes(t *testing.T) {
 func TestCaptureResource(t *testing.T) {
 	start := Snapshot()
 	// Allocate something the GC cannot fold away before the end reading, and
-	// spend measurable user time doing it so the CPU delta is not zero.
+	// spend measurable user time doing it so the CPU delta is not zero. The
+	// work runs for a wall-clock span rather than a fixed count because
+	// getrusage accrues user time in scheduler ticks, which are 1ms to 4ms
+	// wide on Linux: a megabyte of touching finishes inside one tick and can
+	// land on a delta of exactly zero.
 	sink := make([][]byte, 0, 256)
 	sum := 0
-	for i := 0; i < 256; i++ {
+	deadline := time.Now().Add(busyFor)
+	for i := 0; ; i++ {
 		b := make([]byte, 4096)
 		for j := range b {
 			b[j] = byte(j)
 			sum += int(b[j])
 		}
-		sink = append(sink, b)
+		if i < 256 {
+			sink = append(sink, b)
+		}
+		if i%64 == 0 && time.Now().After(deadline) {
+			break
+		}
 	}
 	end := Snapshot()
 	r := CaptureResource(start, end, Disk{DatasetBytes: 2048, LoadBytes: 4096, StoreBytes: 5120})
@@ -75,7 +91,7 @@ func TestCaptureResource(t *testing.T) {
 	}
 	if hasRusage() {
 		if r.CPUUserNs <= 0 {
-			t.Errorf("CPUUserNs = %d, want > 0 after a loop over 1MiB", r.CPUUserNs)
+			t.Errorf("CPUUserNs = %d, want > 0 after %v of busy work", r.CPUUserNs, busyFor)
 		}
 		if r.MinorFaults < 0 {
 			t.Errorf("MinorFaults = %d, want >= 0", r.MinorFaults)
