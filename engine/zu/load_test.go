@@ -271,8 +271,8 @@ func TestInfo(t *testing.T) {
 	if len(info.Dialects) != 1 || info.Dialects[0] != engine.ZuQL {
 		t.Errorf("Dialects = %v, want [zuql]", info.Dialects)
 	}
-	if info.Caps.MaxConcurrency != 1 {
-		t.Errorf("MaxConcurrency = %d, want 1 (a libzu connection is not thread safe)", info.Caps.MaxConcurrency)
+	if info.Caps.MaxConcurrency != 0 {
+		t.Errorf("MaxConcurrency = %d, want 0 (a Session pools connections, so the runner sets the limit)", info.Caps.MaxConcurrency)
 	}
 }
 

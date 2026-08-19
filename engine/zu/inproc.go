@@ -37,12 +37,22 @@
 //
 // A connection may move between threads but must not be used from two at
 // once, and libzu answers ZU_MISUSE_CONCURRENT rather than corrupting a
-// cache when it is. Exec is mutex serialized and
-// Capabilities.MaxConcurrency stays 1, so calls never overlap. A
-// connection holds no thread-local state, so serialized calls from
-// different goroutines are fine. This adapter opens one connection with
-// zu_open_z; when the harness runs concurrent operations it will open a
-// database once and connect per worker instead.
+// cache when it is. So a Session is a pool of connections rather than
+// one: Exec checks one out, runs on it, and puts it back, and a
+// connection is never in two callers' hands at the same time. The pool
+// grows to whatever concurrency the run asks for and never shrinks.
+//
+// Several connections on one file used to be an unwritten rule against
+// rather than a supported thing, because the write side hung off the
+// connection. It hangs off a per-file handle now, one per canonical path
+// per process, so the connections a pool opens with zu_open_z all find
+// the same handle: they queue for the write side and read through one
+// block cache. That is what lets MaxConcurrency come off 1.
+//
+// A prepared statement belongs to the connection that compiled it, so
+// the statement cache travels with the connection and a pool of n
+// connections compiles a hot query n times, once each. That is the same
+// bookkeeping a real embedding host with a connection pool would do.
 package zu
 
 // #cgo CFLAGS: -I${SRCDIR}/../../../zu/crates/zu-capi/include
@@ -84,17 +94,31 @@ func (e *Engine) Start(ctx context.Context, cfg engine.Config) (engine.Session, 
 	return &Session{bin: bin, dbPath: dbPath, workDir: workDir}, nil
 }
 
-// Session is one open libzu session plus its prepared-statement
-// cache, keyed by query text the way a real embedding host would keep it.
+// Session is a pool of libzu connections on one database file. A caller
+// takes one out for the length of a call, or of a transaction, and puts
+// it back; the pool opens another whenever every connection it has is
+// already out.
 type Session struct {
 	bin     string
 	dbPath  string
 	workDir string
 
 	mu     sync.Mutex
-	sess   *C.zu_conn
-	stmts  map[string]*C.zu_stmt
+	all    []*conn // every connection opened, so Close can free them
+	idle   []*conn // the ones not checked out
 	closed bool
+}
+
+// conn is one libzu connection plus the statements prepared on it,
+// keyed by query text the way a real embedding host would keep them. A
+// statement belongs to the connection that compiled it, which is why the
+// cache lives here and not on the Session.
+//
+// Nothing here takes a lock: a conn is only ever touched by the caller
+// holding it, and the pool is what guarantees there is only one.
+type conn struct {
+	c     *C.zu_conn
+	stmts map[string]*C.zu_stmt
 }
 
 var _ engine.Session = (*Session)(nil)
@@ -125,30 +149,41 @@ func (s *Session) Begin(ctx context.Context, mode engine.AccessMode) (engine.Tx,
 	if mode == engine.ReadMode {
 		stmt = "START TRANSACTION READ ONLY"
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.execDiscardLocked(stmt); err != nil {
+	c, err := s.acquire()
+	if err != nil {
+		return nil, err
+	}
+	if err := c.execDiscard(stmt); err != nil {
+		s.release(c)
 		return nil, fmt.Errorf("zu: begin: %w", err)
 	}
-	return &tx{s: s}, nil
+	return &tx{s: s, c: c}, nil
 }
 
-// tx is an explicit transaction on the session connection. zu holds the
-// transaction on the connection itself, so a transaction is a marker
-// around the same Exec path rather than a handle of its own.
+// tx is an explicit transaction on one connection out of the pool. zu
+// holds the transaction on the connection itself, so the transaction has
+// to keep that connection to itself until it commits or rolls back,
+// which is what taking it out of the pool does. Commit and Rollback put
+// it back.
 type tx struct {
 	s    *Session
+	c    *conn
 	done bool
 }
 
 var _ engine.Tx = (*tx)(nil)
 
-// Exec runs one operation inside the transaction.
+// Exec runs one operation inside the transaction, on the connection the
+// transaction is open on rather than whichever one the pool would hand
+// out next.
 func (t *tx) Exec(ctx context.Context, op engine.Op) (engine.Result, error) {
 	if t.done {
 		return nil, errors.New("zu: transaction finished")
 	}
-	return t.s.Exec(ctx, op)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return t.c.exec(op)
 }
 
 // Commit makes the transaction's writes durable.
@@ -161,36 +196,32 @@ func (t *tx) Rollback(ctx context.Context) error {
 	return t.finish("ROLLBACK")
 }
 
-// finish ends the transaction one way or the other, once.
+// finish ends the transaction one way or the other, once, and gives the
+// connection back however it went. Holding on to it after a failed
+// commit would take one connection out of the pool for the rest of the
+// run.
 func (t *tx) finish(stmt string) error {
 	if t.done {
 		return errors.New("zu: transaction finished")
 	}
 	t.done = true
-	t.s.mu.Lock()
-	defer t.s.mu.Unlock()
-	return t.s.execDiscardLocked(stmt)
+	defer t.s.release(t.c)
+	return t.c.execDiscard(stmt)
 }
 
-// execDiscardLocked runs one statement for its effect and throws the
-// result away. Caller holds s.mu.
+// execDiscard runs one statement for its effect and throws the result
+// away.
 //
 // It goes through zu_query_z, the one-shot entry point, which routes
 // through the session and so sees the transaction statements for what
 // they are. zu_prepare_z cannot take them: it plans what it is handed as
 // a query, and "START TRANSACTION" is not one.
-func (s *Session) execDiscardLocked(stmt string) error {
-	if s.closed {
-		return errors.New("zu: session is closed")
-	}
-	if err := s.openLocked(); err != nil {
-		return err
-	}
+func (c *conn) execDiscard(stmt string) error {
 	ctext := C.CString(stmt)
 	defer C.free(unsafe.Pointer(ctext))
 	var res *C.zu_result
 	var cerr *C.zu_error
-	if st := C.zu_query_z(s.sess, ctext, &res, &cerr); st != C.ZU_OK {
+	if st := C.zu_query_z(c.c, ctext, &res, &cerr); st != C.ZU_OK {
 		return takeErr(st, cerr, fmt.Sprintf("zu: %q failed", stmt))
 	}
 	C.zu_result_free(res)
@@ -226,17 +257,25 @@ func (s *Session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats
 	if err != nil {
 		return engine.LoadStats{}, err
 	}
-	s.closeSessionLocked()
+	// copy wrote a new file over the one these connections are on, so
+	// they all go, and the next acquire opens what copy produced.
+	s.closeAllLocked()
 	return stats, nil
 }
 
 // loadStatementsLocked seeds a statements-only dataset by executing each
-// setup statement through libzu. Caller holds s.mu, so it runs the
-// statements through execLocked rather than Exec, which would deadlock.
+// setup statement through libzu. Caller holds s.mu, so it takes a
+// connection through acquireLocked rather than acquire, which would
+// deadlock, and keeps the one connection for every statement.
 func (s *Session) loadStatementsLocked(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
 	start := time.Now()
+	c, err := s.acquireLocked()
+	if err != nil {
+		return engine.LoadStats{}, err
+	}
+	defer s.releaseLocked(c)
 	for i, stmt := range ds.Statements() {
-		res, err := s.execLocked(engine.Op{
+		res, err := c.exec(engine.Op{
 			QueryID: fmt.Sprintf("load-statement-%d", i),
 			Class:   engine.Write,
 			Dialect: engine.ZuQL,
@@ -264,29 +303,28 @@ func (s *Session) loadStatementsLocked(ctx context.Context, ds engine.Dataset) (
 	}, nil
 }
 
-// Exec runs one operation as a prepared statement: compile on the first
-// sighting of the text, bind the parameters, execute. Mutex serialized
-// (MaxConcurrency 1). libzu has no cancellation, so the context is
-// checked on the way in and not again until the call returns.
+// Exec runs one operation as a prepared statement on a connection out of
+// the pool: compile on that connection's first sighting of the text, bind
+// the parameters, execute. Safe to call concurrently, because no two
+// callers get the same connection. libzu has no cancellation, so the
+// context is checked on the way in and not again until the call returns.
 func (s *Session) Exec(ctx context.Context, op engine.Op) (engine.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.execLocked(op)
-}
-
-// execLocked is Exec with the lock already held, so Load can run setup
-// statements without releasing it between them. Caller holds s.mu.
-func (s *Session) execLocked(op engine.Op) (engine.Result, error) {
-	if s.closed {
-		return nil, errors.New("zu: session is closed")
-	}
-	if err := s.openLocked(); err != nil {
+	c, err := s.acquire()
+	if err != nil {
 		return nil, err
 	}
-	stmt, err := s.preparedLocked(op.Text)
+	defer s.release(c)
+	return c.exec(op)
+}
+
+// exec compiles, binds and runs one operation. The result is decoded into
+// Go memory before this returns, so the connection is free to go back to
+// the pool while the caller is still reading rows.
+func (c *conn) exec(op engine.Op) (engine.Result, error) {
+	stmt, err := c.prepared(op.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -303,8 +341,11 @@ func (s *Session) execLocked(op engine.Op) (engine.Result, error) {
 	return decodeResult(res)
 }
 
-// Close frees the prepared statements, closes the session, and removes
-// the work dir. Statements go first: the header requires it. Idempotent.
+// Close frees every connection the pool ever opened, checked out or not,
+// and removes the work dir. The lifecycle has Close after the last Exec
+// has returned, so a connection still out at this point is one a caller
+// leaked, and leaving it open would leak the file handle with it.
+// Idempotent.
 func (s *Session) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -312,59 +353,112 @@ func (s *Session) Close(ctx context.Context) error {
 		return nil
 	}
 	s.closed = true
-	s.closeSessionLocked()
+	s.closeAllLocked()
 	if s.workDir != "" {
 		os.RemoveAll(s.workDir)
 	}
 	return nil
 }
 
-// openLocked opens the session on first use. Caller holds s.mu.
-func (s *Session) openLocked() error {
-	if s.sess != nil {
-		return nil
-	}
-	cpath := C.CString(s.dbPath)
-	defer C.free(unsafe.Pointer(cpath))
-	var conn *C.zu_conn
-	var cerr *C.zu_error
-	if st := C.zu_open_z(cpath, &conn, &cerr); st != C.ZU_OK {
-		return takeErr(st, cerr, fmt.Sprintf("zu: open %q failed", s.dbPath))
-	}
-	s.sess = conn
-	return nil
+// acquire takes a connection out of the pool, opening one if every
+// connection the pool has is already out.
+func (s *Session) acquire() (*conn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acquireLocked()
 }
 
-// closeSessionLocked tears down statements then the session, leaving the
-// struct ready to reopen. Caller holds s.mu.
-func (s *Session) closeSessionLocked() {
-	for _, stmt := range s.stmts {
+// acquireLocked is acquire with the lock already held, for Load, which
+// holds it across every statement it runs. Caller holds s.mu.
+func (s *Session) acquireLocked() (*conn, error) {
+	if s.closed {
+		return nil, errors.New("zu: session is closed")
+	}
+	if n := len(s.idle); n > 0 {
+		c := s.idle[n-1]
+		s.idle = s.idle[:n-1]
+		return c, nil
+	}
+	c, err := openConn(s.dbPath)
+	if err != nil {
+		return nil, err
+	}
+	s.all = append(s.all, c)
+	return c, nil
+}
+
+// release puts a connection back for the next caller.
+func (s *Session) release(c *conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releaseLocked(c)
+}
+
+// releaseLocked is release with the lock already held. A connection given
+// back after Close is dropped rather than pooled: Close already freed it.
+// Caller holds s.mu.
+func (s *Session) releaseLocked(c *conn) {
+	if s.closed {
+		return
+	}
+	s.idle = append(s.idle, c)
+}
+
+// closeAllLocked frees every connection the pool opened and empties it,
+// leaving the Session ready to open fresh connections on whatever is at
+// dbPath now. Caller holds s.mu.
+func (s *Session) closeAllLocked() {
+	for _, c := range s.all {
+		c.close()
+	}
+	s.all = nil
+	s.idle = nil
+}
+
+// openConn opens one libzu connection on the file. Every connection on
+// one path in one process finds the same file handle underneath, so this
+// costs a lock and a map lookup rather than a second open of the file.
+func openConn(dbPath string) (*conn, error) {
+	cpath := C.CString(dbPath)
+	defer C.free(unsafe.Pointer(cpath))
+	var c *C.zu_conn
+	var cerr *C.zu_error
+	if st := C.zu_open_z(cpath, &c, &cerr); st != C.ZU_OK {
+		return nil, takeErr(st, cerr, fmt.Sprintf("zu: open %q failed", dbPath))
+	}
+	return &conn{c: c}, nil
+}
+
+// close tears down the statements then the connection. Statements go
+// first: the header requires it.
+func (c *conn) close() {
+	for _, stmt := range c.stmts {
 		C.zu_stmt_close(stmt)
 	}
-	s.stmts = nil
-	if s.sess != nil {
-		C.zu_conn_close(s.sess)
-		s.sess = nil
+	c.stmts = nil
+	if c.c != nil {
+		C.zu_conn_close(c.c)
+		c.c = nil
 	}
 }
 
-// preparedLocked returns the cached statement for text, compiling it on
-// first sighting. Caller holds s.mu.
-func (s *Session) preparedLocked(text string) (*C.zu_stmt, error) {
-	if stmt, ok := s.stmts[text]; ok {
+// prepared returns this connection's cached statement for text,
+// compiling it on first sighting.
+func (c *conn) prepared(text string) (*C.zu_stmt, error) {
+	if stmt, ok := c.stmts[text]; ok {
 		return stmt, nil
 	}
 	ctext := C.CString(text)
 	defer C.free(unsafe.Pointer(ctext))
 	var stmt *C.zu_stmt
 	var cerr *C.zu_error
-	if st := C.zu_prepare_z(s.sess, ctext, &stmt, &cerr); st != C.ZU_OK {
+	if st := C.zu_prepare_z(c.c, ctext, &stmt, &cerr); st != C.ZU_OK {
 		return nil, takeErr(st, cerr, "zu: prepare failed")
 	}
-	if s.stmts == nil {
-		s.stmts = make(map[string]*C.zu_stmt)
+	if c.stmts == nil {
+		c.stmts = make(map[string]*C.zu_stmt)
 	}
-	s.stmts[text] = stmt
+	c.stmts[text] = stmt
 	return stmt, nil
 }
 

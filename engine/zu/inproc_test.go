@@ -4,8 +4,10 @@ package zu
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/tamnd/graph-bench/engine"
@@ -91,8 +93,13 @@ func TestInprocParamBinding(t *testing.T) {
 			t.Errorf("seed %d: got %v, want %d", tc.seed, rows, tc.want)
 		}
 	}
-	if len(s.stmts) != 1 {
-		t.Errorf("statement cache has %d entries, want 1 for one text", len(s.stmts))
+	// Nothing here overlaps, so the pool never had to open a second
+	// connection and the one it has compiled the one text once.
+	if len(s.all) != 1 {
+		t.Fatalf("pool has %d connections, want 1 for serial calls", len(s.all))
+	}
+	if n := len(s.all[0].stmts); n != 1 {
+		t.Errorf("statement cache has %d entries, want 1 for one text", n)
 	}
 }
 
@@ -135,6 +142,122 @@ func TestInprocBoolParamBinds(t *testing.T) {
 	}
 }
 
+// Concurrent reads through one Session, which is the thing the pool is
+// for. A single connection would answer ZU_MISUSE_CONCURRENT here, so a
+// clean run is evidence that no two goroutines got the same one. Run it
+// under -race to have the detector look at the pool bookkeeping too.
+func TestInprocConcurrentReads(t *testing.T) {
+	s := startInproc(t)
+
+	const workers, each = 8, 25
+	errs := make(chan error, workers*each)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			// Each worker asks a different seed, so they are not all
+			// reading one cached answer.
+			seed := int64(w % 4)
+			want := []int64{2, 1, 1, 0}[seed]
+			for range each {
+				res, err := s.Exec(context.Background(), engine.Op{
+					QueryID: "conc", Class: engine.PointRead, Dialect: engine.ZuQL,
+					Text:   `MATCH (a:node {id: $seed})-[:edge]->(b:node) RETURN count(b) AS n`,
+					Params: map[string]engine.Value{"seed": seed},
+				})
+				if err != nil {
+					errs <- fmt.Errorf("worker %d: exec: %w", w, err)
+					return
+				}
+				var got engine.Value
+				for res.Next() {
+					got = res.Row()[0]
+				}
+				err = res.Err()
+				res.Close()
+				if err != nil {
+					errs <- fmt.Errorf("worker %d: drain: %w", w, err)
+					return
+				}
+				if got != want {
+					errs <- fmt.Errorf("worker %d: seed %d gave %v, want %d", w, seed, got, want)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// The pool opened what the run needed and no more. It cannot have
+	// opened more than one per worker, and one is proof it never
+	// overlapped, which would make the test above vacuous.
+	s.mu.Lock()
+	opened := len(s.all)
+	s.mu.Unlock()
+	if opened < 2 {
+		t.Errorf("pool opened %d connections, want more than 1 (the calls never overlapped)", opened)
+	}
+	if opened > workers {
+		t.Errorf("pool opened %d connections for %d workers, want no more than one each", opened, workers)
+	}
+}
+
+// Concurrent writes through one Session. Every connection on one file
+// queues for the same write side, so these serialize inside zu rather
+// than racing, and all of them have to land.
+func TestInprocConcurrentWrites(t *testing.T) {
+	s := startInproc(t)
+
+	const workers, each = 4, 10
+	errs := make(chan error, workers*each)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := range each {
+				id := 1000 + w*each + i
+				res, err := s.Exec(context.Background(), engine.Op{
+					QueryID: "conc-write", Class: engine.Write, Dialect: engine.ZuQL,
+					Text:   `INSERT (:node {id: $id})`,
+					Params: map[string]engine.Value{"id": int64(id)},
+				})
+				if err != nil {
+					errs <- fmt.Errorf("worker %d: insert %d: %w", w, id, err)
+					return
+				}
+				for res.Next() {
+				}
+				err = res.Err()
+				res.Close()
+				if err != nil {
+					errs <- fmt.Errorf("worker %d: insert %d: %w", w, id, err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if t.Failed() {
+		return
+	}
+
+	_, rows := execRows(t, s, `MATCH (n:node) RETURN count(n) AS n`, nil)
+	want := int64(4 + workers*each)
+	if len(rows) != 1 || rows[0][0] != want {
+		t.Errorf("count = %v, want %d (4 loaded plus %d inserted)", rows, want, workers*each)
+	}
+}
+
 func TestInprocCloseIdempotent(t *testing.T) {
 	s := startInproc(t)
 	execRows(t, s, `MATCH (n:node) RETURN count(n) AS n`, nil)
@@ -159,8 +282,8 @@ func TestInprocInfo(t *testing.T) {
 	if len(info.Dialects) != 1 || info.Dialects[0] != engine.ZuQL {
 		t.Errorf("Dialects = %v, want [zuql]", info.Dialects)
 	}
-	if info.Caps.MaxConcurrency != 1 {
-		t.Errorf("MaxConcurrency = %d, want 1 (a libzu session is not thread safe)", info.Caps.MaxConcurrency)
+	if info.Caps.MaxConcurrency != 0 {
+		t.Errorf("MaxConcurrency = %d, want 0 (a Session pools connections, so the runner sets the limit)", info.Caps.MaxConcurrency)
 	}
 }
 
