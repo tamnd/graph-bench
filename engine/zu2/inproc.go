@@ -25,6 +25,17 @@
 // which writes libzu2.dylib (macOS) or libzu2.so (Linux) into
 // target/release.
 //
+// # Windows
+//
+// Windows gets its own LDFLAGS line and it is not cosmetic. cargo writes
+// three things into target/release there: zu2.dll, its import library
+// zu2.dll.lib, and a static zu2.lib. A bare -lzu2 makes mingw's ld pick
+// the static one, whose Rust std objects reference __imp_RtlNtStatusToDosError
+// and __chkstk, and the link fails with those two undefined. Naming the
+// import library with -l:zu2.dll.lib picks the DLL instead, which resolved
+// those symbols when it was itself linked. There is no rpath on Windows,
+// so target/release has to be on PATH when the binary runs.
+//
 // # When the database opens
 //
 // At Load, not at Start, and that is deliberate. zu2 sizes its hash
@@ -51,7 +62,8 @@
 package zu2
 
 // #cgo CFLAGS: -I${SRCDIR}/../../../zu/crates/zu2-capi/include
-// #cgo LDFLAGS: -L${SRCDIR}/../../../zu/target/release -lzu2 -Wl,-rpath,${SRCDIR}/../../../zu/target/release
+// #cgo !windows LDFLAGS: -L${SRCDIR}/../../../zu/target/release -lzu2 -Wl,-rpath,${SRCDIR}/../../../zu/target/release
+// #cgo windows LDFLAGS: -L${SRCDIR}/../../../zu/target/release -l:zu2.dll.lib
 // #include <stdlib.h>
 // #include "zu2.h"
 import "C"
