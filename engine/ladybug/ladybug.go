@@ -16,8 +16,18 @@
 // LBUG_INCLUDE / LBUG_LIB seam:
 //
 //	CGO_CFLAGS="-I$LBUG_INCLUDE" \
-//	CGO_LDFLAGS="-L$LBUG_LIB -llbug" \
+//	CGO_LDFLAGS="$LBUG_LIB/liblbug.dylib" \
 //	go build -tags ladybug ./...
+//
+// On darwin the library is named by its full path rather than with -L and
+// -llbug, which looks fussy and is not. A -L is global to the link, not to
+// this package, so putting /opt/homebrew/lib on the search path lets it
+// answer every other package's -l as well. Homebrew ships its own DuckDB
+// there, go-duckdb ships a different one in its module directory, and with
+// -tags duckdb,ladybug the Homebrew copy won that race and the link failed
+// on a missing duckdb::ExtensionHelper::LoadAllExtensions. Naming the file
+// takes this package out of that argument entirely. Other platforms keep
+// -L and -llbug, where no such collision has shown up yet.
 //
 // # Capability probes
 //
@@ -33,7 +43,8 @@
 package ladybug
 
 // #cgo CFLAGS: -I/opt/homebrew/include
-// #cgo LDFLAGS: -L/opt/homebrew/lib -llbug
+// #cgo darwin LDFLAGS: /opt/homebrew/lib/liblbug.dylib
+// #cgo !darwin LDFLAGS: -L/opt/homebrew/lib -llbug
 // #include "lbug.h"
 // #include <stdlib.h>
 import "C"

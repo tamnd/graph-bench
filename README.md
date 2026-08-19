@@ -20,7 +20,7 @@ It is not a leaderboard that crowns a winner, not a vendor benchmark, and not a 
 
 ## Measured results
 
-Every number in the laptop tables came out of this harness on 2026-08-17, and the desktop tables date from 2026-08-12. Each one is service-time latency at the stated percentile, after a fixed 2 second warmup, with no engine tuning (`tuned=false` in the result files). Nothing is timed before it is verified: the harness computes the answer itself from the canonical CSV and compares it to what the engine returned, and a query that fails verification is reported as a failure instead of a latency. The verification dialect is recorded per query, so a fast number can always be traced to the text the engine actually ran.
+The seven engine table below dates from 2026-08-19. Every number in the zu-against-ladybug laptop tables came out of this harness on 2026-08-17, and the desktop tables date from 2026-08-12. Each one is service-time latency at the stated percentile, after a fixed 2 second warmup, with no engine tuning (`tuned=false` in the result files). Nothing is timed before it is verified: the harness computes the answer itself from the canonical CSV and compares it to what the engine returned, and a query that fails verification is reported as a failure instead of a latency. The verification dialect is recorded per query, so a fast number can always be traced to the text the engine actually ran.
 
 The result JSON for each table is under `results/<workload>/<scale>/`, named by timestamp, engine, plane, and dataset checksum.
 
@@ -29,13 +29,52 @@ The result JSON for each table is under `results/<workload>/<scale>/`, named by 
 | Engine | Plane | Version | Machine | Scale | Workloads measured |
 | --- | --- | --- | --- | --- | --- |
 | zu | in-process, cgo | 0.0.1 | laptop | smoke | micro-read, micro-er, micro-powerlaw, micro-write |
-| ladybug | in-process, cgo | 0.19.1 | laptop | smoke | micro-read, micro-er, micro-powerlaw, micro-write |
+| zu2 | in-process, cgo | 0.0.1 | laptop | sf1 | micro-read |
+| ladybug | in-process, cgo | 0.19.1 | laptop | smoke, sf1 | micro-read, micro-er, micro-powerlaw, micro-write |
+| SQLite | in-process, cgo | 3.53.4 | laptop | sf1 | micro-read |
+| DuckDB | in-process, cgo | 1.4.1 | laptop | sf1 | micro-read |
+| PostgreSQL | driver, pgx | 18.6 | laptop | sf1 | micro-read |
+| MongoDB | driver | 8.3.7 | laptop | sf1 | micro-read |
 | Neo4j | Bolt | 2026.06.0 | desktop | sf1 | micro-read, micro-er |
 | Memgraph | Bolt | not measured | desktop | sf1 | none, see below |
 
 zu and ladybug both run in-process here. zu links libzu and calls it directly, ladybug links liblbug and calls it directly, and neither pays anything to reach the engine. That is the whole point of the pairing: the difference between the two columns is the engine and the query plan, not the transport.
 
 The laptop tables and the desktop tables are different machines at different scales. Compare engines within one table. Do not read a zu number from one table against a zu number from the other, and do not put ladybug's laptop numbers next to Neo4j's desktop numbers, because nothing in that comparison is held constant.
+
+### Seven engines, one invocation
+
+A graph engine, a document engine, a relational engine on a wire, two relational engines in the process, and two graph engines in the process, all loaded from the same CSV and asked the same nine questions in one run of the harness. Apple silicon laptop, `micro-read` at sf1 on `grid-100x100` (checksum `fd000c2a`, 10000 nodes, 19800 edges), one worker, service-time p50, nothing tuned. Every engine's nine answers verified against the harness oracle before anything was timed.
+
+| Query | zu2 | sqlite | sqlite-mem | duckdb | ladybug | postgres | mongodb |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| micro-point | 333ns | 2.6µs | 1.3µs | 57.6µs | 54.2µs | 160.2µs | 119.5µs |
+| micro-point-miss | 209ns | 2.2µs | 1.0µs | 60.0µs | 56.7µs | 166.5µs | 109.8µs |
+| micro-edge | 625ns | 2.9µs | 1.9µs | 114.3µs | 234.0µs | 155.8µs | 144.7µs |
+| micro-khop1 | 375ns | 2.6µs | 1.6µs | 79.5µs | 189.5µs | 157.8µs | 136.3µs |
+| micro-khop2 | 333ns | 4.5µs | 3.5µs | 268.0µs | 619.6µs | 151.8µs | 232.1µs |
+| micro-khop3 | 375ns | 5.5µs | 4.4µs | 387.2µs | 1.06ms | 170.8µs | 393.8µs |
+| micro-varlen | 292ns | 9.8µs | 8.7µs | 515.8µs | 744.6µs | 154.1µs | 161.5µs |
+| micro-scan-count | 125ns | 2.7µs | 1.4µs | 42.8µs | 179.5µs | 297.2µs | 710.9µs |
+| micro-scan-stats | SKIP | 155.3µs | 155.5µs | 55.0µs | 210.8µs | 408.0µs | 1.32ms |
+
+Load time and footprint from the same run, against 392.4 KiB of source CSV:
+
+| Engine | Load | After load |
+| --- | --- | --- |
+| sqlite | 41ms | 508.0 KiB |
+| sqlite-mem | 39ms | 508.0 KiB |
+| postgres | 42ms | 2776.0 KiB |
+| duckdb | 54ms | 2560.0 KiB |
+| ladybug | 101ms | 2348.0 KiB |
+| mongodb | 137ms | 1264.0 KiB |
+| zu2 | 575ms | 1320.0 KiB |
+
+The two engines on a wire are close to flat across the small reads, because a round trip costs what it costs and it is more than any of these queries. That is the honest reading of those columns and not a criticism of either query planner: PostgreSQL answers a three hop expansion in about what it needs for a point read. The in-process engines are where the query work is visible, and there the shape is the usual one, a point read cheap and a k-hop growing with the fan-out.
+
+Two rows are worth stopping on. MongoDB's `micro-varlen` at 161.5µs beats its own three hop join at 393.8µs, because `$graphLookup` runs the whole bounded walk server side while `micro-khop3` is three nested `$lookup` stages. Give a document store a graph operator and it uses it properly. And ladybug, the only other engine here that was built for graphs, is the fastest of the four non-zu engines on a point read and the slowest of them on three hops, which is a planner shape rather than a storage one.
+
+The footprint table is not flattering to zu2. SQLite holds this graph in 508 KiB, MongoDB holds it as 19800 BSON documents that repeat their field names plus two compound indexes and still lands at 1264 KiB, and zu2's hybrid log needs 1320 KiB because nothing reclaims a superseded version until there is a checkpoint.
 
 ### How to read the tables
 
@@ -344,6 +383,14 @@ To include the in-process ladybug adapter, which links liblbug through cgo:
 ```
 go build -tags ladybug ./...
 ```
+
+Anywhere liblbug is not under `/opt/homebrew`, name the header and the library file:
+
+```
+CGO_CFLAGS="-I$LBUG_INCLUDE" CGO_LDFLAGS="$LBUG_LIB/liblbug.dylib" go build -tags ladybug ./...
+```
+
+The library is named by path rather than through `-L` and `-llbug` because a `-L` is global to the link and not local to the package that asked for it. Homebrew ships its own DuckDB in the same directory, go-duckdb ships a different one inside its module, and with both tags on the Homebrew copy won and the link failed. Naming the file keeps `-tags duckdb,ladybug` building, which is what a run that compares the two in one invocation needs.
 
 To make zu runnable, which links libzu through cgo:
 
