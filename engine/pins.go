@@ -28,6 +28,10 @@ var Pins = []Pin{
 	{Engine: "sqlite", Pinned: "3.53.4 (go-sqlite3 v1.14.50)", Source: "go.mod"},
 	{Engine: "sqlite-sync", Pinned: "3.53.4 (go-sqlite3 v1.14.50)", Source: "go.mod"},
 	{Engine: "sqlite-mem", Pinned: "3.53.4 (go-sqlite3 v1.14.50)", Source: "go.mod"},
+	// DuckDB is the same story: go-duckdb carries a prebuilt library and
+	// the driver version is what pins the engine.
+	{Engine: "duckdb", Pinned: "1.4.1 (go-duckdb v2.4.3)", Source: "go.mod"},
+	{Engine: "duckdb-mem", Pinned: "1.4.1 (go-duckdb v2.4.3)", Source: "go.mod"},
 }
 
 // PinFor returns the pin for an engine name, if recorded.

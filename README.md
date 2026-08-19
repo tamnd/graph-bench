@@ -357,6 +357,27 @@ It expects a sibling zu checkout built with `cargo build --release -p zu-cli -p 
 CGO_CFLAGS="-I$ZU_INCLUDE" CGO_LDFLAGS="-L$ZU_LIB -lzu -Wl,-rpath,$ZU_LIB" go build -tags zuinproc ./...
 ```
 
+To make zu2 runnable, which links libzu2 through cgo and expects the same sibling checkout built with `cargo build --release -p zu2-capi`:
+
+```
+go build -tags zu2inproc ./...
+```
+
+To include the relational adapters, each of which links its engine's C library through cgo:
+
+```
+go build -tags sqlite ./...
+go build -tags duckdb ./...
+```
+
+SQLite registers three engines (`sqlite`, `sqlite-sync`, `sqlite-mem`) and DuckDB two (`duckdb`, `duckdb-mem`), because the durability setting and where the database lives move the numbers by more than most engines differ from each other and a report column should say which one it is. Both carry their engine's library rather than linking a system one, so the pinned version is the driver's.
+
+Tags combine, and a head-to-head build is the union of the ones it needs:
+
+```
+go build -tags 'zu2inproc sqlite duckdb' -o gb ./cmd/graph-bench
+```
+
 ## Spec
 
 The complete design lives at `notes/Spec/2060/bench/`. Start with `00-overview.md` for the mission and the fairness contract, `02-architecture.md` for the layout, and `10-roadmap.md` for what ships when.

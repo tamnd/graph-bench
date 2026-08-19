@@ -46,6 +46,39 @@ func Edges(ctx context.Context, files []string, fn func(src, dst int64) error) e
 	})
 }
 
+// HeaderNames returns the actual header of the column carrying each
+// suffix, in the order the suffixes were given: for a node file and
+// []string{":ID"} it answers []string{"id:ID"}. An engine that reads the
+// CSV itself needs the name rather than the position, because it names
+// the columns from the header too and then has to be told which one to
+// select.
+func HeaderNames(path string, suffixes []string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = -1
+	head, err := r.Read()
+	if err != nil {
+		return nil, fmt.Errorf("read header of %s: %w", path, err)
+	}
+	names := make([]string, len(suffixes))
+	for i, suffix := range suffixes {
+		for _, cell := range head {
+			if strings.HasSuffix(cell, suffix) {
+				names[i] = cell
+				break
+			}
+		}
+		if names[i] == "" {
+			return nil, fmt.Errorf("%s: header has no %s column", path, suffix)
+		}
+	}
+	return names, nil
+}
+
 // each reads the files, locates one column per header suffix, and calls
 // fn with those cells for every data row. The context is checked every
 // few thousand rows so a cancelled load stops within a load rather than

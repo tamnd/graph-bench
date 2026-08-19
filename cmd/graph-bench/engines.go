@@ -13,6 +13,7 @@ package main
 
 import (
 	"github.com/tamnd/graph-bench/engine"
+	"github.com/tamnd/graph-bench/engine/duckdb"
 	"github.com/tamnd/graph-bench/engine/sqlite"
 	"github.com/tamnd/graph-bench/engine/zu"
 	"github.com/tamnd/graph-bench/engine/zu2"
@@ -25,6 +26,10 @@ func init() {
 	// mode changes its numbers more than most engines differ from each
 	// other and a report column should say which one it is.
 	for _, e := range sqlite.New() {
+		engine.Register(e)
+	}
+	// DuckDB registers twice, on disk and in memory, for the same reason.
+	for _, e := range duckdb.New() {
 		engine.Register(e)
 	}
 }
