@@ -186,7 +186,25 @@ func (s *Session) Begin(ctx context.Context, mode engine.AccessMode) (engine.Tx,
 // relationship type is refused for the matching reason: there is one
 // adjacency here and no edge types in it, so a query that asks about one
 // type would be answered from all of them.
-func (s *Session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
+//
+// # Why the load runs async and syncs once
+//
+// zu2's durability setting is per record: a durable session waits for
+// the device on every append. A load is 30000 appends, so a durable load
+// waits for the device 30000 times, and on a Linux machine whose fsync
+// floor is 100 a second that is five minutes to load a graph sqlite
+// loads in half of one. It was measured at 75 to 660 records a second on
+// four machines before this, which is the floor and not the engine.
+//
+// So the load switches the session to async, appends, restores the
+// configured setting and syncs once, which puts the whole load on the
+// device before anything measures the file. That is the same bargain
+// sqlite makes with the single transaction its loader uses and postgres
+// makes with COPY: the records are not individually durable while the
+// load is running, and they all are when it returns. The method string
+// says `capi-async-sync` rather than `capi` so a result file cannot
+// hide which of the two was measured.
+func (s *Session) Load(ctx context.Context, ds engine.Dataset) (stats engine.LoadStats, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -212,6 +230,19 @@ func (s *Session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats
 		return engine.LoadStats{}, err
 	}
 	defer s.releaseLocked(c)
+	if st := C.zu2_set_durability(c.s, C.ZU2_ASYNC); st != C.ZU2_OK {
+		return engine.LoadStats{}, sessErr(c.s, st, "set async for the load")
+	}
+	// Restores whatever the run configured before this session goes back
+	// in the pool, on the error paths as well, because a session left in
+	// async would quietly measure a write workload at the wrong
+	// durability. It runs before releaseLocked, defers being last in
+	// first out.
+	defer func() {
+		if st := C.zu2_set_durability(c.s, s.durability); st != C.ZU2_OK && err == nil {
+			stats, err = engine.LoadStats{}, sessErr(c.s, st, "restore durability after the load")
+		}
+	}()
 
 	ids := make(map[string]C.uint32_t)
 	for label := range schema.Nodes {
@@ -256,7 +287,7 @@ func (s *Session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats
 		Nodes:       s.nodes,
 		Edges:       s.edges,
 		BytesOnDisk: onDisk,
-		Method:      "capi",
+		Method:      "capi-async-sync",
 	}, nil
 }
 
