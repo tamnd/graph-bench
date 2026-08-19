@@ -32,6 +32,12 @@ var Pins = []Pin{
 	// the driver version is what pins the engine.
 	{Engine: "duckdb", Pinned: "1.4.1 (go-duckdb v2.4.3)", Source: "go.mod"},
 	{Engine: "duckdb-mem", Pinned: "1.4.1 (go-duckdb v2.4.3)", Source: "go.mod"},
+	// PostgreSQL is a server, so the pin is the image the run verb starts
+	// and setup.Postgres reads it from here. A run against an operator's
+	// own server stamps that server's version instead, which is the whole
+	// reason results carry a live version next to the pin.
+	{Engine: "postgres", Pinned: "postgres:18.6", Source: "docker"},
+	{Engine: "pgx", Pinned: "v5.10.0", Source: "go.mod"},
 }
 
 // PinFor returns the pin for an engine name, if recorded.

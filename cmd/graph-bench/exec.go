@@ -82,7 +82,12 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 		return nil, err
 	}
 	if container != nil {
-		cfg.Values["uri"] = container.BoltURI
+		// Each adapter reads its connection string from its own key: the
+		// Bolt ones from "uri", PostgreSQL from "dsn". Both get the same
+		// URL, which keeps the per-engine switch out of here and costs
+		// nothing, since no adapter reads a key it did not ask for.
+		cfg.Values["uri"] = container.URI
+		cfg.Values["dsn"] = container.URI
 		defer container.Stop(context.WithoutCancel(ctx))
 	}
 
@@ -747,9 +752,11 @@ func paramsChecksum(ds engine.Dataset) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
 }
 
-// startContainerIfNeeded launches a managed server container for Bolt-plane
-// engines when no server is configured: NEO4J_URI / MEMGRAPH_URI unset,
-// Docker present, and neither --no-docker nor GRAPH_BENCH_SKIP_DOCKER given.
+// startContainerIfNeeded launches a managed server container for an engine
+// that needs one when no server is already configured: the engine's env
+// var unset, Docker present, and neither --no-docker nor
+// GRAPH_BENCH_SKIP_DOCKER given. An engine that is not served, or one
+// whose server the operator supplied, gets nil and no container.
 func startContainerIfNeeded(ctx context.Context, engName string, rc runConfig) (*setup.Container, error) {
 	if rc.noDocker || os.Getenv("GRAPH_BENCH_SKIP_DOCKER") != "" {
 		return nil, nil
@@ -766,13 +773,18 @@ func startContainerIfNeeded(ctx context.Context, engName string, rc runConfig) (
 			return nil, nil
 		}
 		spec = setup.Memgraph("")
+	case "postgres":
+		if os.Getenv("GRAPH_BENCH_PG_DSN") != "" || os.Getenv("DATABASE_URL") != "" {
+			return nil, nil
+		}
+		spec = setup.Postgres("")
 	default:
 		return nil, nil
 	}
 	if !dockerAvailable() {
 		return nil, nil
 	}
-	fmt.Fprintf(rc.stderr, "run: starting managed %s container (no %s_URI set)\n", engName, envPrefix(engName))
+	fmt.Fprintf(rc.stderr, "run: starting managed %s container (no %s set)\n", engName, envVar(engName))
 	c, err := setup.Start(ctx, spec)
 	if err != nil {
 		return nil, fmt.Errorf("%s: managed container: %w", engName, err)
@@ -780,11 +792,17 @@ func startContainerIfNeeded(ctx context.Context, engName string, rc runConfig) (
 	return c, nil
 }
 
-func envPrefix(engName string) string {
-	if engName == "memgraph" {
-		return "MEMGRAPH"
+// envVar names the environment variable that would have pointed an engine
+// at an existing server, for the message that says why one was started.
+func envVar(engName string) string {
+	switch engName {
+	case "memgraph":
+		return "MEMGRAPH_URI"
+	case "postgres":
+		return "GRAPH_BENCH_PG_DSN"
+	default:
+		return "NEO4J_URI"
 	}
-	return "NEO4J"
 }
 
 // dockerAvailable reports whether a docker client binary is on PATH.

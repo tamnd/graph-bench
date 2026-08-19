@@ -43,15 +43,39 @@ type ContainerSpec struct {
 	// ReadyTimeout is how long to wait for ReadyAddr to accept connections.
 	// Default 60s.
 	ReadyTimeout time.Duration
+
+	// Primary is the container port the adapter connects to, "7687/tcp"
+	// when left empty. It is what Container.Addr reports and what the URI
+	// template is filled with. Bolt was the only wire this package spoke
+	// when it was written, which is why the default is Bolt's port.
+	Primary string
+	// URI is a template for the adapter's connection string with one %s
+	// where the host:port goes, "bolt://%s" when left empty. A Postgres
+	// spec carries a libpq URL here and a Mongo spec a mongodb:// one, so
+	// the run verb hands the adapter a string it can dial rather than
+	// reassembling one from a port.
+	URI string
 }
 
 // Container is a running container returned by Start.
 type Container struct {
-	ID      string // Docker container ID
-	BoltURI string // bolt://host:port, ready to dial
-	spec    ContainerSpec
-	ports   map[string]string // container port -> local port
+	ID string // Docker container ID
+	// URI is the spec's template with the mapped host:port filled in: the
+	// string the adapter connects with, whatever wire it speaks.
+	URI string
+	// BoltURI is URI when the primary port is Bolt's and empty otherwise.
+	// It is the older name for the same thing, kept because the Bolt
+	// adapters read it.
+	BoltURI string
+	// Addr is the host:port the primary container port is published on.
+	Addr  string
+	spec  ContainerSpec
+	ports map[string]string // container port -> local port
 }
+
+// Port returns the host port a container port is published on, or the
+// empty string when that port was not mapped.
+func (c *Container) Port(containerPort string) string { return c.ports[containerPort] }
 
 // pinnedImage returns the pin-table image for an engine, or def when the
 // engine has no pin entry.
@@ -102,6 +126,51 @@ func Memgraph(image string) ContainerSpec {
 	}
 }
 
+// Postgres returns a ContainerSpec for the given PostgreSQL image; an
+// empty image means the pinned one. Nothing is configured beyond the
+// credentials: the server runs on its own defaults, which is the
+// configuration a run without a tuning claim has to measure.
+//
+// Readiness here is TCP only, and a Postgres container accepts a
+// connection some way before it will answer a query, because initdb runs
+// a server on a unix socket first and restarts it. The adapter retries
+// its first connection rather than trusting this.
+func Postgres(image string) ContainerSpec {
+	if image == "" {
+		image = pinnedImage("postgres", "postgres:18.6")
+	}
+	return ContainerSpec{
+		Image: image,
+		Env: map[string]string{
+			"POSTGRES_USER":     "bench",
+			"POSTGRES_PASSWORD": "bench",
+			"POSTGRES_DB":       "bench",
+		},
+		Ports:        map[string]string{"5432/tcp": "0"},
+		Primary:      "5432/tcp",
+		URI:          "postgres://bench:bench@%s/bench?sslmode=disable",
+		ReadyTimeout: 90 * time.Second,
+	}
+}
+
+// Mongo returns a ContainerSpec for the given MongoDB image; an empty
+// image means the pinned one. Authentication is off, which is the
+// default for a container with no root credentials set, and the server
+// otherwise runs on its own defaults.
+func Mongo(image string) ContainerSpec {
+	if image == "" {
+		image = pinnedImage("mongodb", "mongo:8.3.8")
+	}
+	return ContainerSpec{
+		Image:        image,
+		Env:          map[string]string{},
+		Ports:        map[string]string{"27017/tcp": "0"},
+		Primary:      "27017/tcp",
+		URI:          "mongodb://%s",
+		ReadyTimeout: 90 * time.Second,
+	}
+}
+
 // Start launches a container from spec, waits for it to accept connections, and
 // returns a Container with the Bolt URI. The container is stopped and removed
 // only when the caller calls Stop.
@@ -142,16 +211,27 @@ func Start(ctx context.Context, spec ContainerSpec) (*Container, error) {
 
 	c := &Container{ID: id, spec: spec, ports: ports}
 
-	boltPort, ok := ports["7687/tcp"]
+	primary, uri := spec.Primary, spec.URI
+	if primary == "" {
+		primary = "7687/tcp"
+	}
+	if uri == "" {
+		uri = "bolt://%s"
+	}
+	port, ok := ports[primary]
 	if !ok {
 		_ = stopContainer(ctx, id)
-		return nil, fmt.Errorf("setup: no 7687/tcp binding for container %s", id[:12])
+		return nil, fmt.Errorf("setup: no %s binding for container %s", primary, id[:12])
 	}
-	c.BoltURI = "bolt://127.0.0.1:" + boltPort
+	c.Addr = "127.0.0.1:" + port
+	c.URI = fmt.Sprintf(uri, c.Addr)
+	if primary == "7687/tcp" {
+		c.BoltURI = c.URI
+	}
 
 	readyAddr := spec.ReadyAddr
 	if readyAddr == "" {
-		readyAddr = "127.0.0.1:" + boltPort
+		readyAddr = c.Addr
 	}
 	timeout := spec.ReadyTimeout
 	if timeout <= 0 {
