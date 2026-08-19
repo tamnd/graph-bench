@@ -14,6 +14,7 @@ package main
 import (
 	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/engine/duckdb"
+	"github.com/tamnd/graph-bench/engine/postgres"
 	"github.com/tamnd/graph-bench/engine/sqlite"
 	"github.com/tamnd/graph-bench/engine/zu"
 	"github.com/tamnd/graph-bench/engine/zu2"
@@ -32,4 +33,8 @@ func init() {
 	for _, e := range duckdb.New() {
 		engine.Register(e)
 	}
+	// PostgreSQL registers unconditionally because pgx is pure Go and needs
+	// no build tag. What it needs is a server, and it says so at Start when
+	// there is none.
+	engine.Register(postgres.New())
 }

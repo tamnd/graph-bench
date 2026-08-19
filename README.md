@@ -372,6 +372,14 @@ go build -tags duckdb ./...
 
 SQLite registers three engines (`sqlite`, `sqlite-sync`, `sqlite-mem`) and DuckDB two (`duckdb`, `duckdb-mem`), because the durability setting and where the database lives move the numbers by more than most engines differ from each other and a report column should say which one it is. Both carry their engine's library rather than linking a system one, so the pinned version is the driver's.
 
+PostgreSQL needs no tag. Its driver, pgx, is pure Go, so `postgres` is in every build and what it needs instead is a server:
+
+```
+GRAPH_BENCH_PG_DSN='postgres://bench:bench@127.0.0.1:5432/bench?sslmode=disable' ./gb run --workload micro-read --engines postgres
+```
+
+Without a DSN in `GRAPH_BENCH_PG_DSN` or `DATABASE_URL`, `run` starts the pinned container itself unless `--no-docker` is set. It is the only relational engine here that is not in the harness process, and the round trip is most of what its small-read numbers say.
+
 Tags combine, and a head-to-head build is the union of the ones it needs:
 
 ```
