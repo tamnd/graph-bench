@@ -1,9 +1,10 @@
-// Engine registration for every build: zu registers here, and whether it
-// can actually start depends on the zuinproc tag, since the adapter links
-// libzu. Registration is a cheap descriptor either way, and a binary built
-// without the tag fails at Start with the build line to use rather than
-// reporting an unknown engine. Engine construction reads its environment
-// ($ZU_BIN and the rest of the discovery order, spec 09 §4) at Start.
+// Engine registration for every build: zu and zu2 register here, and
+// whether either can actually start depends on its build tag (zuinproc,
+// zu2inproc), since both adapters link a C library. Registration is a
+// cheap descriptor either way, and a binary built without the tag fails
+// at Start with the build line to use rather than reporting an unknown
+// engine. Engine construction reads its environment ($ZU_BIN and the rest
+// of the discovery order, spec 09 §4) at Start.
 //
 // Bolt-plane adapters (neo4j, memgraph) register in engines_bolt.go under
 // -tags bolt; the Ladybug in-process adapter self-registers via its own init
@@ -13,8 +14,10 @@ package main
 import (
 	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/engine/zu"
+	"github.com/tamnd/graph-bench/engine/zu2"
 )
 
 func init() {
 	engine.Register(zu.New())
+	engine.Register(zu2.New())
 }
