@@ -40,6 +40,15 @@
 // queries. What they cost is the point of putting them here: a two-hop
 // expansion is one adjacency read on a graph engine and a self-join on a
 // table, and the ratio between those two numbers is the whole argument.
+//
+// The fifth text is a MongoDB aggregation pipeline, for the document
+// engine, and nine of the thirteen have one. It is the same argument
+// carried one store further: a hop is a correlated $lookup, a bounded
+// walk is $graphLookup, and a distinct count is a $reduce over $setUnion
+// because a pipeline has no DISTINCT. Where a question needs an answer
+// row even when nothing matched, the pipeline starts from the node
+// collection and reaches the edges through $lookup rather than using
+// $facet, which MongoDB documents as never using an index.
 package micro
 
 import (
@@ -209,6 +218,9 @@ var pointQuery = &workload.Query{
 		engine.ZuQL:   `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
 		engine.Prim:   `point key=$id as id`,
 		engine.SQL:    `SELECT id FROM node WHERE id = CAST($id AS BIGINT)`,
+		engine.Mongo: `{"collection": "node", "columns": ["id"],
+ "pipeline": [{"$match": {"$expr": {"$eq": ["$_id", {"$toLong": "$$id"}]}}},
+              {"$project": {"_id": 0, "id": "$_id"}}]}`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -250,6 +262,9 @@ var pointMissQuery = &workload.Query{
 		engine.ZuQL:   `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
 		engine.Prim:   `point key=$id as id`,
 		engine.SQL:    `SELECT id FROM node WHERE id = CAST($id AS BIGINT)`,
+		engine.Mongo: `{"collection": "node", "columns": ["id"],
+ "pipeline": [{"$match": {"$expr": {"$eq": ["$_id", {"$toLong": "$$id"}]}}},
+              {"$project": {"_id": 0, "id": "$_id"}}]}`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -295,6 +310,20 @@ var edgeQuery = &workload.Query{
 		engine.ZuQL: `MATCH (a:Node {id: $src})-[:EDGE]->(b:Node {id: $dst}) WITH count(*) AS c RETURN c > 0 AS found`,
 		engine.Prim: `edge src=$src dst=$dst as found`,
 		engine.SQL:  `SELECT count(*) > 0 AS "found::bool" FROM edge WHERE src = CAST($src AS BIGINT) AND dst = CAST($dst AS BIGINT)`,
+		// The probe starts from the node collection rather than the edge
+		// collection so it returns a row even when the edge is absent,
+		// which is what the reference says the answer is. $facet would
+		// have been the obvious way to get a default and is documented
+		// never to use an index, so this reaches the edge through a
+		// correlated $lookup, which does.
+		engine.Mongo: `{"collection": "node", "columns": ["found"],
+ "pipeline": [{"$match": {"$expr": {"$eq": ["$_id", {"$toLong": "$$src"}]}}},
+              {"$lookup": {"from": "edge", "let": {"s": "$_id", "d": {"$toLong": "$$dst"}},
+                           "pipeline": [{"$match": {"$expr": {"$and": [{"$eq": ["$src", "$$s"]},
+                                                                      {"$eq": ["$dst", "$$d"]}]}}},
+                                        {"$limit": 1}],
+                           "as": "hit"}},
+              {"$project": {"_id": 0, "found": {"$gt": [{"$size": "$hit"}, 0]}}}]}`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -329,6 +358,13 @@ var khop1Query = &workload.Query{
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
 		engine.Prim:   `degree out seed=$seed as n`,
 		engine.SQL:    `SELECT count(*) AS n FROM edge WHERE src = CAST($seed AS BIGINT)`,
+		engine.Mongo: `{"collection": "node", "columns": ["n"],
+ "pipeline": [{"$match": {"$expr": {"$eq": ["$_id", {"$toLong": "$$seed"}]}}},
+              {"$lookup": {"from": "edge", "let": {"s": "$_id"},
+                           "pipeline": [{"$match": {"$expr": {"$eq": ["$src", "$$s"]}}},
+                                        {"$project": {"_id": 0, "dst": 1}}],
+                           "as": "out"}},
+              {"$project": {"_id": 0, "n": {"$size": "$out"}}}]}`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -361,6 +397,22 @@ var khop2Query = &workload.Query{
 		engine.SQL: `SELECT count(DISTINCT e2.dst) AS n FROM edge e1
   JOIN edge e2 ON e2.src = e1.dst
   WHERE e1.src = CAST($seed AS BIGINT)`,
+		// The nested $lookup is the self-join, and the $reduce over
+		// $setUnion is the DISTINCT: MongoDB has no distinct count inside
+		// a pipeline, so the second hop's endpoints are unioned into a set
+		// and the set is sized.
+		engine.Mongo: `{"collection": "node", "columns": ["n"],
+ "pipeline": [{"$match": {"$expr": {"$eq": ["$_id", {"$toLong": "$$seed"}]}}},
+              {"$lookup": {"from": "edge", "let": {"s": "$_id"},
+                           "pipeline": [{"$match": {"$expr": {"$eq": ["$src", "$$s"]}}},
+                                        {"$lookup": {"from": "edge", "let": {"m": "$dst"},
+                                                     "pipeline": [{"$match": {"$expr": {"$eq": ["$src", "$$m"]}}},
+                                                                  {"$project": {"_id": 0, "dst": 1}}],
+                                                     "as": "two"}},
+                                        {"$project": {"_id": 0, "two": "$two.dst"}}],
+                           "as": "hops"}},
+              {"$project": {"_id": 0, "n": {"$size": {"$reduce": {"input": "$hops.two", "initialValue": [],
+                                                                  "in": {"$setUnion": ["$$value", "$$this"]}}}}}}]}`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -395,6 +447,23 @@ var khop3Query = &workload.Query{
   JOIN edge e2 ON e2.src = e1.dst
   JOIN edge e3 ON e3.src = e2.dst
   WHERE e1.src = CAST($seed AS BIGINT)`,
+		engine.Mongo: `{"collection": "node", "columns": ["n"],
+ "pipeline": [{"$match": {"$expr": {"$eq": ["$_id", {"$toLong": "$$seed"}]}}},
+              {"$lookup": {"from": "edge", "let": {"s": "$_id"},
+                           "pipeline": [{"$match": {"$expr": {"$eq": ["$src", "$$s"]}}},
+                                        {"$lookup": {"from": "edge", "let": {"m": "$dst"},
+                                                     "pipeline": [{"$match": {"$expr": {"$eq": ["$src", "$$m"]}}},
+                                                                  {"$lookup": {"from": "edge", "let": {"m2": "$dst"},
+                                                                               "pipeline": [{"$match": {"$expr": {"$eq": ["$src", "$$m2"]}}},
+                                                                                            {"$project": {"_id": 0, "dst": 1}}],
+                                                                               "as": "three"}},
+                                                                  {"$project": {"_id": 0, "three": "$three.dst"}}],
+                                                     "as": "two"}},
+                                        {"$project": {"_id": 0, "three": {"$reduce": {"input": "$two.three", "initialValue": [],
+                                                                                      "in": {"$setUnion": ["$$value", "$$this"]}}}}}],
+                           "as": "hops"}},
+              {"$project": {"_id": 0, "n": {"$size": {"$reduce": {"input": "$hops.three", "initialValue": [],
+                                                                  "in": {"$setUnion": ["$$value", "$$this"]}}}}}}]}`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -431,6 +500,15 @@ var varlenQuery = &workload.Query{
   SELECT e.dst, r.d + 1 FROM reach r JOIN edge e ON e.src = r.v WHERE r.d < 3
 )
 SELECT count(DISTINCT v) AS n FROM reach`,
+		// This is the one query where MongoDB has a native answer rather
+		// than a spelled-out join: $graphLookup is a bounded recursive
+		// expansion, maxDepth 2 follows three edges, and the endpoints it
+		// returns are exactly the nodes reachable in one to three hops.
+		engine.Mongo: `{"collection": "node", "columns": ["n"],
+ "pipeline": [{"$match": {"$expr": {"$eq": ["$_id", {"$toLong": "$$seed"}]}}},
+              {"$graphLookup": {"from": "edge", "startWith": "$_id", "connectFromField": "dst",
+                                "connectToField": "src", "maxDepth": 2, "as": "reach"}},
+              {"$project": {"_id": 0, "n": {"$size": {"$setUnion": ["$reach.dst", []]}}}}]}`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -589,6 +667,7 @@ var scanCountQuery = &workload.Query{
 		engine.ZuQL:   `MATCH (n:Node) RETURN count(n) AS n`,
 		engine.Prim:   `count nodes as n`,
 		engine.SQL:    `SELECT count(*) AS n FROM node`,
+		engine.Mongo:  `{"collection": "node", "columns": ["n"], "pipeline": [{"$count": "n"}]}`,
 	},
 	Params: workload.Fixed{},
 	Reference: &workload.RefStrategy{
@@ -615,6 +694,9 @@ var scanStatsQuery = &workload.Query{
 		engine.Cypher: `MATCH (n:Node) RETURN count(n) AS n, avg(n.id) AS avgId`,
 		engine.ZuQL:   `MATCH (n:Node) RETURN count(n) AS n, avg(n.id) AS avgId`,
 		engine.SQL:    `SELECT count(*) AS n, avg(CAST(id AS DOUBLE PRECISION)) AS "avgId" FROM node`,
+		engine.Mongo: `{"collection": "node", "columns": ["n", "avgId"],
+ "pipeline": [{"$group": {"_id": null, "n": {"$sum": 1}, "avgId": {"$avg": "$_id"}}},
+              {"$project": {"_id": 0, "n": 1, "avgId": 1}}]}`,
 	},
 	Params: workload.Fixed{},
 	Reference: &workload.RefStrategy{

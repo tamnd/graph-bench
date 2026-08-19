@@ -142,7 +142,7 @@ func (s *Session) Version(ctx context.Context) (string, error) {
 // that nobody could query.
 func (s *Session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats, error) {
 	start := time.Now()
-	nodeFiles, relFiles, err := singleTable(s.drv.Name(), ds)
+	nodeFiles, relFiles, err := SingleTable(s.drv.Name(), ds)
 	if err != nil {
 		return engine.LoadStats{}, err
 	}
@@ -375,9 +375,14 @@ func argValue(v engine.Value) (any, error) {
 	}
 }
 
-// singleTable checks the dataset fits the two-table schema and returns
-// its node and relationship files.
-func singleTable(name string, ds engine.Dataset) (nodeFiles, relFiles []string, err error) {
+// SingleTable checks the dataset fits the two-table schema and returns
+// its node and relationship files. It is exported because the shape it
+// checks for is not a SQL shape: the MongoDB adapter holds the same
+// dataset as one node collection and one edge collection, refuses the
+// same datasets for the same reason, and reads the same CSV through
+// Nodes and Edges. Sharing the check keeps the three engines refusing
+// identically rather than each inventing its own message.
+func SingleTable(name string, ds engine.Dataset) (nodeFiles, relFiles []string, err error) {
 	if ds.Dir() == "" {
 		return nil, nil, fmt.Errorf("%s: needs a file dataset; this one is statements only", name)
 	}
