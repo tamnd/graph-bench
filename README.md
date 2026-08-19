@@ -20,7 +20,7 @@ It is not a leaderboard that crowns a winner, not a vendor benchmark, and not a 
 
 ## Measured results
 
-The seven engine table below dates from 2026-08-19. Every number in the zu-against-ladybug laptop tables came out of this harness on 2026-08-17, and the desktop tables date from 2026-08-12. Each one is service-time latency at the stated percentile, after a fixed 2 second warmup, with no engine tuning (`tuned=false` in the result files). Nothing is timed before it is verified: the harness computes the answer itself from the canonical CSV and compares it to what the engine returned, and a query that fails verification is reported as a failure instead of a latency. The verification dialect is recorded per query, so a fast number can always be traced to the text the engine actually ran.
+The seven engine table below and the five machine table under it both date from 2026-08-19. Every number in the zu-against-ladybug laptop tables came out of this harness on 2026-08-17, and the desktop tables date from 2026-08-12. Each one is service-time latency at the stated percentile, after a fixed 2 second warmup, with no engine tuning (`tuned=false` in the result files). Nothing is timed before it is verified: the harness computes the answer itself from the canonical CSV and compares it to what the engine returned, and a query that fails verification is reported as a failure instead of a latency. The verification dialect is recorded per query, so a fast number can always be traced to the text the engine actually ran.
 
 The result JSON for each table is under `results/<workload>/<scale>/`, named by timestamp, engine, plane, and dataset checksum.
 
@@ -35,8 +35,13 @@ The result JSON for each table is under `results/<workload>/<scale>/`, named by 
 | DuckDB | in-process, cgo | 1.4.1 | laptop | sf1 | micro-read |
 | PostgreSQL | driver, pgx | 18.6 | laptop | sf1 | micro-read |
 | MongoDB | driver | 8.3.7 | laptop | sf1 | micro-read |
-| Neo4j | Bolt | 2026.06.0 | desktop | sf1 | micro-read, micro-er |
-| Memgraph | Bolt | not measured | desktop | sf1 | none, see below |
+| Neo4j | Bolt | 2026.06.0 | desktop, server3 | sf1 | micro-read, micro-er |
+| Memgraph | Bolt | 3.10.0 | server3 | sf1 | micro-read |
+| zu2 | in-process, cgo | 0.0.1 | server1, server2, server3, gamingpc | sf1 | micro-read |
+| SQLite | in-process, cgo | 3.53.4 | server1, server2, server3, gamingpc | sf1 | micro-read |
+| DuckDB | in-process, cgo | 1.4.1 | server1, server2, server3, gamingpc | sf1 | micro-read |
+| PostgreSQL | driver, pgx | 18.6 | server3 | sf1 | micro-read |
+| MongoDB | driver | 8.3.8 | server3 | sf1 | micro-read |
 
 zu and ladybug both run in-process here. zu links libzu and calls it directly, ladybug links liblbug and calls it directly, and neither pays anything to reach the engine. That is the whole point of the pairing: the difference between the two columns is the engine and the query plan, not the transport.
 
@@ -75,6 +80,26 @@ The two engines on a wire are close to flat across the small reads, because a ro
 Two rows are worth stopping on. MongoDB's `micro-varlen` at 161.5µs beats its own three hop join at 393.8µs, because `$graphLookup` runs the whole bounded walk server side while `micro-khop3` is three nested `$lookup` stages. Give a document store a graph operator and it uses it properly. And ladybug, the only other engine here that was built for graphs, is the fastest of the four non-zu engines on a point read and the slowest of them on three hops, which is a planner shape rather than a storage one.
 
 The footprint table is not flattering to zu2. SQLite holds this graph in 508 KiB, MongoDB holds it as 19800 BSON documents that repeat their field names plus two compound indexes and still lands at 1264 KiB, and zu2's hybrid log needs 1320 KiB because nothing reclaims a superseded version until there is a checkpoint.
+
+### The same nine questions on five machines
+
+The table above is one machine, which is the weakest thing about it. The same workload then ran on the other four: three Linux servers and a Windows desktop, same dataset checksum, same verification before timing, no failures. zu2 on the left of each cell, SQLite on the right.
+
+| Query | laptop | server1 | server2 | server3 | gamingpc |
+| --- | --- | --- | --- | --- | --- |
+| micro-point | 333ns / 2.6µs | 1.4µs / 7.4µs | 6.9µs / 12.7µs | 5.1µs / 10.5µs | 0.7µs / 6.7µs |
+| micro-point-miss | 209ns / 2.2µs | 801ns / 6.9µs | 1.0µs / 8.3µs | 1.0µs / 7.9µs | 0.5µs / 6.5µs |
+| micro-edge | 625ns / 2.9µs | 2.0µs / 8.2µs | 5.9µs / 11.3µs | 3.0µs / 10.3µs | 1.2µs / 8.2µs |
+| micro-khop1 | 375ns / 2.6µs | 1.2µs / 6.9µs | 1.7µs / 11.3µs | 2.1µs / 9.6µs | 0.8µs / 7.3µs |
+| micro-khop2 | 333ns / 4.5µs | 1.2µs / 9.8µs | 1.5µs / 16.5µs | 2.3µs / 19.1µs | 0.8µs / 10.4µs |
+| micro-khop3 | 375ns / 5.5µs | 1.3µs / 11.4µs | 1.8µs / 20.0µs | 2.5µs / 22.1µs | 0.9µs / 11.4µs |
+| micro-varlen | 292ns / 9.8µs | 1.3µs / 19.8µs | 1.5µs / 34.4µs | 1.7µs / 38.8µs | 0.8µs / 17.5µs |
+| micro-scan-count | 125ns / 2.7µs | 461ns / 7.2µs | 601ns / 9.3µs | 631ns / 11.2µs | 0.4µs / 6.5µs |
+| micro-scan-stats | SKIP / 155.3µs | SKIP / 618.5µs | SKIP / 1.99ms | SKIP / 1.05ms | SKIP / 218.9µs |
+
+Read the servers for shape and the laptop and gamingpc for microseconds. All three Linux boxes were carrying unrelated work at load averages between 8 and 72, and at these latencies a busy scheduler is a large part of what gets measured. gamingpc was idle at 1 percent. server1 and gamingpc have no Docker available to the harness, so they ran the four in-process engines only, and server2 has neither Go nor Rust installed, so its binary and libzu2 were built on server1 and copied to it, same distribution and same glibc, every answer still verified on the machine that ran it.
+
+Neo4j 2026.06.0 and Memgraph 3.10.0 ran on server3 alongside zu2 and SQLite, in one invocation, all thirty six answers verified. Neo4j answers a point read in 4.33ms and a three hop expansion in 2.46ms, Memgraph 528.7µs and 776.5µs. Both are on Bolt over loopback on a host at a load average of 37, so what those columns mostly measure is a round trip, a driver and a planner rather than either engine's storage, and the one shape worth keeping is that neither one costs meaningfully more for three hops than for one at this size.
 
 ### How to read the tables
 
