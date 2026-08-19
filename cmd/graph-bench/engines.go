@@ -13,6 +13,7 @@ package main
 
 import (
 	"github.com/tamnd/graph-bench/engine"
+	"github.com/tamnd/graph-bench/engine/sqlite"
 	"github.com/tamnd/graph-bench/engine/zu"
 	"github.com/tamnd/graph-bench/engine/zu2"
 )
@@ -20,4 +21,10 @@ import (
 func init() {
 	engine.Register(zu.New())
 	engine.Register(zu2.New())
+	// SQLite registers three times, one per durability mode, because the
+	// mode changes its numbers more than most engines differ from each
+	// other and a report column should say which one it is.
+	for _, e := range sqlite.New() {
+		engine.Register(e)
+	}
 }

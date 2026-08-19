@@ -31,6 +31,15 @@
 // Ten of the thirteen queries have one; the property scan and the two
 // whole-graph triangle counts do not, because there is no operation under
 // them to name, and those SKIP with "no-dialect-text".
+//
+// The fourth text is SQL, for the relational engines. All thirteen have one,
+// including the two the primitive dialect cannot express, because a join is a
+// hop and a recursive CTE is a walk and SQL can say both. The texts are the
+// common core SQLite, DuckDB and PostgreSQL all accept, so the three columns
+// differ by engine rather than by how hard someone tuned three separate
+// queries. What they cost is the point of putting them here: a two-hop
+// expansion is one adjacency read on a graph engine and a self-join on a
+// table, and the ratio between those two numbers is the whole argument.
 package micro
 
 import (
@@ -199,6 +208,7 @@ var pointQuery = &workload.Query{
 		engine.KuzuCy: `MATCH (n:Node {id: CAST($id AS INT64)}) RETURN n.id AS id`,
 		engine.ZuQL:   `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
 		engine.Prim:   `point key=$id as id`,
+		engine.SQL:    `SELECT id FROM node WHERE id = CAST($id AS BIGINT)`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -239,6 +249,7 @@ var pointMissQuery = &workload.Query{
 		engine.KuzuCy: `MATCH (n:Node {id: CAST($id AS INT64)}) RETURN n.id AS id`,
 		engine.ZuQL:   `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
 		engine.Prim:   `point key=$id as id`,
+		engine.SQL:    `SELECT id FROM node WHERE id = CAST($id AS BIGINT)`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -283,6 +294,7 @@ var edgeQuery = &workload.Query{
 		// the RETURN. Same probe, same two rows of work, different spelling.
 		engine.ZuQL: `MATCH (a:Node {id: $src})-[:EDGE]->(b:Node {id: $dst}) WITH count(*) AS c RETURN c > 0 AS found`,
 		engine.Prim: `edge src=$src dst=$dst as found`,
+		engine.SQL:  `SELECT count(*) > 0 AS "found::bool" FROM edge WHERE src = CAST($src AS BIGINT) AND dst = CAST($dst AS BIGINT)`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -316,6 +328,7 @@ var khop1Query = &workload.Query{
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
 		engine.Prim:   `degree out seed=$seed as n`,
+		engine.SQL:    `SELECT count(*) AS n FROM edge WHERE src = CAST($seed AS BIGINT)`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -345,6 +358,9 @@ var khop2Query = &workload.Query{
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
 		engine.Prim:   `khop out 2 seed=$seed as n`,
+		engine.SQL: `SELECT count(DISTINCT e2.dst) AS n FROM edge e1
+  JOIN edge e2 ON e2.src = e1.dst
+  WHERE e1.src = CAST($seed AS BIGINT)`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -375,6 +391,10 @@ var khop3Query = &workload.Query{
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
 		engine.Prim:   `khop out 3 seed=$seed as n`,
+		engine.SQL: `SELECT count(DISTINCT e3.dst) AS n FROM edge e1
+  JOIN edge e2 ON e2.src = e1.dst
+  JOIN edge e3 ON e3.src = e2.dst
+  WHERE e1.src = CAST($seed AS BIGINT)`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -405,6 +425,12 @@ var varlenQuery = &workload.Query{
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
 		engine.Prim:   `reach out 1..3 seed=$seed as n`,
+		engine.SQL: `WITH RECURSIVE reach(v, d) AS (
+  SELECT dst, 1 FROM edge WHERE src = CAST($seed AS BIGINT)
+  UNION
+  SELECT e.dst, r.d + 1 FROM reach r JOIN edge e ON e.src = r.v WHERE r.d < 3
+)
+SELECT count(DISTINCT v) AS n FROM reach`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -445,6 +471,28 @@ var spQuery = &workload.Query{
 		// the rest would be work nobody reads.
 		engine.ZuQL: `MATCH ANY SHORTEST (a:Node {id: $src})-[r:EDGE*]->(b:Node {id: $dst}) RETURN size(r) AS d`,
 		engine.Prim: `sp out src=$src dst=$dst as d`,
+		// SQL has no shortest path, so this is a breadth-first search written
+		// out: a recursive CTE carrying (node, depth), UNION to drop a pair it
+		// has already produced, and min over the depths the target turned up
+		// at. What it cannot have is a visited set, because UNION deduplicates
+		// the whole row and the row carries the depth, so a node comes back
+		// round at every depth a walk can reach it at. That is why the bound
+		// is here at all: without it the CTE walks a cycle forever, and with
+		// it the walk costs one pass over the reachable edges per level rather
+		// than stopping when the frontier is exhausted.
+		//
+		// The bound belongs to the recursion and not to the question, so it is
+		// set past anything the query is asked: the longest directed distance
+		// in the shortest-path pool is 34 hops on powerlaw-10k, since most
+		// edges in a preferential-attachment graph point the same way and a
+		// directed route between two nodes is long. HAVING with no GROUP BY is
+		// what returns no row rather than one NULL row when there is no path.
+		engine.SQL: `WITH RECURSIVE reach(v, d) AS (
+  SELECT CAST($src AS BIGINT), 0
+  UNION
+  SELECT e.dst, r.d + 1 FROM reach r JOIN edge e ON e.src = r.v WHERE r.d < 64
+)
+SELECT min(d) AS d FROM reach WHERE v = CAST($dst AS BIGINT) HAVING count(*) > 0`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -485,6 +533,27 @@ var spBidirQuery = &workload.Query{
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($src AS INT64)})-[r:EDGE* SHORTEST 1..]-(b:Node {id: CAST($dst AS INT64)}) RETURN length(r) AS d`,
 		engine.ZuQL:   `MATCH ANY SHORTEST (a:Node {id: $src})-[r:EDGE*]-(b:Node {id: $dst}) RETURN size(r) AS d`,
 		engine.Prim:   `sp both src=$src dst=$dst as d`,
+		// The undirected step is where the relational shape shows: an edge row
+		// is reachable from either end, so the walk probes the primary key on
+		// src and the secondary index on dst and takes whichever column it did
+		// not arrive on. That second index is what an undirected adjacency
+		// costs in a table, and it is in the storage number too.
+		//
+		// The bound is 16 rather than the 64 the directed walk needs. Dropping
+		// the arrows collapses the distances: the longest undirected distance
+		// in the pool is 9 hops where the longest directed one is 34, which is
+		// the small-world property showing up as a benchmark parameter. It
+		// matters because every level past the last real one still costs a
+		// full pass over the component, so the bound is most of what this
+		// query costs.
+		engine.SQL: `WITH RECURSIVE reach(v, d) AS (
+  SELECT CAST($src AS BIGINT), 0
+  UNION
+  SELECT CASE WHEN e.src = r.v THEN e.dst ELSE e.src END, r.d + 1
+  FROM reach r, edge e
+  WHERE (e.src = r.v OR e.dst = r.v) AND r.d < 16
+)
+SELECT min(d) AS d FROM reach WHERE v = CAST($dst AS BIGINT) HAVING count(*) > 0`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -519,6 +588,7 @@ var scanCountQuery = &workload.Query{
 		engine.Cypher: `MATCH (n:Node) RETURN count(n) AS n`,
 		engine.ZuQL:   `MATCH (n:Node) RETURN count(n) AS n`,
 		engine.Prim:   `count nodes as n`,
+		engine.SQL:    `SELECT count(*) AS n FROM node`,
 	},
 	Params: workload.Fixed{},
 	Reference: &workload.RefStrategy{
@@ -544,6 +614,7 @@ var scanStatsQuery = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (n:Node) RETURN count(n) AS n, avg(n.id) AS avgId`,
 		engine.ZuQL:   `MATCH (n:Node) RETURN count(n) AS n, avg(n.id) AS avgId`,
+		engine.SQL:    `SELECT count(*) AS n, avg(CAST(id AS DOUBLE PRECISION)) AS "avgId" FROM node`,
 	},
 	Params: workload.Fixed{},
 	Reference: &workload.RefStrategy{
@@ -577,6 +648,9 @@ var triangleDirectedQuery = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (a:Node)-[:EDGE]->(b:Node)-[:EDGE]->(c:Node)-[:EDGE]->(a) RETURN count(*) AS n`,
 		engine.ZuQL:   `MATCH (a:Node)-[:EDGE]->(b:Node)-[:EDGE]->(c:Node)-[:EDGE]->(a) RETURN count(*) AS n`,
+		engine.SQL: `SELECT count(*) AS n FROM edge a
+  JOIN edge b ON b.src = a.dst
+  JOIN edge c ON c.src = b.dst AND c.dst = a.src`,
 	},
 	Params: workload.Fixed{},
 	Reference: &workload.RefStrategy{
@@ -613,6 +687,18 @@ var triangleUndirectedQuery = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (a:Node)-[:EDGE]-(b:Node)-[:EDGE]-(c:Node)-[:EDGE]-(a) WHERE a.id < b.id AND b.id < c.id RETURN count(DISTINCT [a.id, b.id, c.id]) AS n`,
 		engine.ZuQL:   `MATCH (a:Node)-[:EDGE]-(b:Node)-[:EDGE]-(c:Node)-[:EDGE]-(a) WHERE a.id < b.id AND b.id < c.id RETURN count(DISTINCT [a.id, b.id, c.id]) AS n`,
+		// The undirected adjacency is built once as a CTE of ordered pairs,
+		// which is both the deduplication of a reciprocal edge and the
+		// a < b < c ordering that counts each triple once.
+		engine.SQL: `WITH u(a, b) AS (
+  SELECT DISTINCT
+    CASE WHEN src < dst THEN src ELSE dst END,
+    CASE WHEN src < dst THEN dst ELSE src END
+  FROM edge WHERE src <> dst
+)
+SELECT count(*) AS n FROM u x
+  JOIN u y ON y.a = x.b
+  JOIN u z ON z.a = x.a AND z.b = y.b`,
 	},
 	Params: workload.Fixed{},
 	Reference: &workload.RefStrategy{
