@@ -15,12 +15,22 @@
 // Fidelity is "harness-native" (spec 07 §6): these queries mirror no external
 // standard; they are the harness's own microscope.
 //
-// A note on the dialect texts below: both spell the labels the manifest
-// declares, :Node and :EDGE. The zuQL texts used to say :node and :edge,
-// because zu's loader named its two tables that way whatever the dataset
-// called them, and the table load ended that: one zu node table per label,
-// named after the label. A query with no zuQL text SKIPs on zu rather than
-// falling back to the Cypher one.
+// A note on the dialect texts below: the Cypher ones and the zuQL ones both
+// spell the labels the manifest declares, :Node and :EDGE. The zuQL texts
+// used to say :node and :edge, because zu's loader named its two tables that
+// way whatever the dataset called them, and the table load ended that: one zu
+// node table per label, named after the label. A query with no zuQL text
+// SKIPs on zu rather than falling back to the Cypher one.
+//
+// The third text on most of these is the primitive dialect, which is not a
+// query language: it names one storage operation and its operands, for zu2,
+// which has no parser at all. It is written out here beside the other two on
+// purpose. Which operation answers "count the distinct nodes two hops out" is
+// a choice about what is being measured, and it belongs where a reader can
+// see it next to the Cypher that engine-for-engine it is being compared with.
+// Ten of the thirteen queries have one; the property scan and the two
+// whole-graph triangle counts do not, because there is no operation under
+// them to name, and those SKIP with "no-dialect-text".
 package micro
 
 import (
@@ -188,6 +198,7 @@ var pointQuery = &workload.Query{
 		engine.Cypher: `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
 		engine.KuzuCy: `MATCH (n:Node {id: CAST($id AS INT64)}) RETURN n.id AS id`,
 		engine.ZuQL:   `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
+		engine.Prim:   `point key=$id as id`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -227,6 +238,7 @@ var pointMissQuery = &workload.Query{
 		engine.Cypher: `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
 		engine.KuzuCy: `MATCH (n:Node {id: CAST($id AS INT64)}) RETURN n.id AS id`,
 		engine.ZuQL:   `MATCH (n:Node {id: $id}) RETURN n.id AS id`,
+		engine.Prim:   `point key=$id as id`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -270,6 +282,7 @@ var edgeQuery = &workload.Query{
 		// the comparison moves one stage down: count in a WITH, compare in
 		// the RETURN. Same probe, same two rows of work, different spelling.
 		engine.ZuQL: `MATCH (a:Node {id: $src})-[:EDGE]->(b:Node {id: $dst}) WITH count(*) AS c RETURN c > 0 AS found`,
+		engine.Prim: `edge src=$src dst=$dst as found`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -302,6 +315,7 @@ var khop1Query = &workload.Query{
 		engine.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE]->(b:Node) RETURN count(b) AS n`,
+		engine.Prim:   `degree out seed=$seed as n`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -330,6 +344,7 @@ var khop2Query = &workload.Query{
 		engine.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->(c:Node) RETURN count(DISTINCT c) AS n`,
+		engine.Prim:   `khop out 2 seed=$seed as n`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -359,6 +374,7 @@ var khop3Query = &workload.Query{
 		engine.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE]->()-[:EDGE]->()-[:EDGE]->(d:Node) RETURN count(DISTINCT d) AS n`,
+		engine.Prim:   `khop out 3 seed=$seed as n`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -388,6 +404,7 @@ var varlenQuery = &workload.Query{
 		engine.Cypher: `MATCH (a:Node {id: $seed})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($seed AS INT64)})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
 		engine.ZuQL:   `MATCH (a:Node {id: $seed})-[:EDGE*1..3]->(c:Node) RETURN count(DISTINCT c) AS n`,
+		engine.Prim:   `reach out 1..3 seed=$seed as n`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -427,6 +444,7 @@ var spQuery = &workload.Query{
 		// so one minimum-hop path per endpoint answers it and enumerating
 		// the rest would be work nobody reads.
 		engine.ZuQL: `MATCH ANY SHORTEST (a:Node {id: $src})-[r:EDGE*]->(b:Node {id: $dst}) RETURN size(r) AS d`,
+		engine.Prim: `sp out src=$src dst=$dst as d`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -466,6 +484,7 @@ var spBidirQuery = &workload.Query{
 		engine.Cypher: `MATCH p = shortestPath((a:Node {id: $src})-[:EDGE*]-(b:Node {id: $dst})) RETURN length(p) AS d`,
 		engine.KuzuCy: `MATCH (a:Node {id: CAST($src AS INT64)})-[r:EDGE* SHORTEST 1..]-(b:Node {id: CAST($dst AS INT64)}) RETURN length(r) AS d`,
 		engine.ZuQL:   `MATCH ANY SHORTEST (a:Node {id: $src})-[r:EDGE*]-(b:Node {id: $dst}) RETURN size(r) AS d`,
+		engine.Prim:   `sp both src=$src dst=$dst as d`,
 	},
 	Reference: &workload.RefStrategy{
 		Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -499,6 +518,7 @@ var scanCountQuery = &workload.Query{
 	Texts: map[engine.Dialect]string{
 		engine.Cypher: `MATCH (n:Node) RETURN count(n) AS n`,
 		engine.ZuQL:   `MATCH (n:Node) RETURN count(n) AS n`,
+		engine.Prim:   `count nodes as n`,
 	},
 	Params: workload.Fixed{},
 	Reference: &workload.RefStrategy{

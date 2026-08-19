@@ -28,6 +28,19 @@ const (
 	MAGE Dialect = "mage"
 	// ZuQL is zu's read-only GQL-flavored dialect.
 	ZuQL Dialect = "zuql"
+	// Prim is the primitive dialect: one line naming an operation and its
+	// parameters, for a storage engine that has no query language at all.
+	// `khop out 2 seed=$seed as n` is a text in it.
+	//
+	// It is a dialect and not a special case inside one adapter because of
+	// the same rule the rest of this file is about. An engine with no
+	// parser still has to be told which question to answer, and the choice
+	// belongs next to the Cypher and zuQL spellings of that question where
+	// a reader can see all three together. An adapter that instead matched
+	// on QueryID would be answering a question nobody wrote down, and a
+	// query with no Prim text would quietly become whatever the adapter
+	// guessed rather than a SKIP.
+	Prim Dialect = "prim"
 	// SQLPGQ is SQL:2023 property-graph query syntax (DuckPGQ seam).
 	SQLPGQ Dialect = "sqlpgq"
 )
