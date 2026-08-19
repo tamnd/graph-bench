@@ -1,0 +1,305 @@
+{
+  "schema": 3,
+  "workload": "lsqb",
+  "family": "lsqb",
+  "fidelity": "spec-following",
+  "condition": {
+    "HarnessVersion": "0.3.0",
+    "HarnessCommit": "none",
+    "Engine": "zu",
+    "EngineVersion": "0.0.1",
+    "Plane": "inproc",
+    "DialectUsed": {
+      "lsqb-q1": "zuql",
+      "lsqb-q2": "zuql",
+      "lsqb-q3": "zuql",
+      "lsqb-q4": "zuql",
+      "lsqb-q5": "zuql",
+      "lsqb-q6": "zuql",
+      "lsqb-q7": "zuql",
+      "lsqb-q8": "zuql",
+      "lsqb-q9": "zuql"
+    },
+    "Config": {
+      "path": "/var/folders/_g/lq_pglm508df70x751kkxrl80000gp/T/graph-bench-db-3397864016/bench.zu1",
+      "zu_bin": "/Users/apple/github/tamnd/zu-g0/target/release/zu",
+      "zu_mode": "capi",
+      "zu_spawn_floor": "0s"
+    },
+    "Tuned": false,
+    "Dataset": "social-p1000",
+    "Scale": "sf1",
+    "DatasetChecksum": "sha256:46dceb23e8857913db5bea64625744fe9f81a95177054e6366faa38d5f965cd3",
+    "ParamsChecksum": "none",
+    "Workload": "lsqb",
+    "MixSeed": 1,
+    "LatencyModel": "service-time",
+    "Rate": 0,
+    "Concurrency": [
+      1
+    ],
+    "WarmupOutcome": "fixed-2s",
+    "Cache": "warm",
+    "ColdProtocol": "none",
+    "ValidationMode": "sampled",
+    "Repetitions": 2,
+    "Hardware": {
+      "CPU": "Apple M4",
+      "Cores": 10,
+      "RAMBytes": 25769803776,
+      "OS": "darwin",
+      "Arch": "arm64"
+    },
+    "StartedAt": "2026-08-19T15:12:25.115597Z",
+    "FinishedAt": "2026-08-19T15:14:10.590122Z"
+  },
+  "verification": [
+    {
+      "query_id": "lsqb-q1",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    },
+    {
+      "query_id": "lsqb-q2",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    },
+    {
+      "query_id": "lsqb-q3",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    },
+    {
+      "query_id": "lsqb-q4",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    },
+    {
+      "query_id": "lsqb-q5",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    },
+    {
+      "query_id": "lsqb-q6",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    },
+    {
+      "query_id": "lsqb-q7",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    },
+    {
+      "query_id": "lsqb-q8",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    },
+    {
+      "query_id": "lsqb-q9",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "zuql"
+    }
+  ],
+  "classes": {
+    "aggregation": {
+      "class": "aggregation",
+      "count": 18,
+      "errors": 0,
+      "min": 101166,
+      "p50": 4307458,
+      "p90": 45486089500,
+      "p95": 58853392459,
+      "p99": 58853392459,
+      "max": 58853392459,
+      "mean": 5859611891,
+      "stddev": 16524619203,
+      "throughput": 0,
+      "row_throughput": 0
+    }
+  },
+  "queries": {
+    "lsqb-q1": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 154541,
+      "p50": 154541,
+      "p90": 264500,
+      "p95": 264500,
+      "p99": 264500,
+      "max": 264500,
+      "mean": 209520,
+      "stddev": 54979,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q2": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 2277959,
+      "p50": 2277959,
+      "p90": 2507708,
+      "p95": 2507708,
+      "p99": 2507708,
+      "max": 2507708,
+      "mean": 2392833,
+      "stddev": 114874,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q3": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 101166,
+      "p50": 101166,
+      "p90": 136375,
+      "p95": 136375,
+      "p99": 136375,
+      "max": 136375,
+      "mean": 118770,
+      "stddev": 17604,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q4": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 36107875,
+      "p50": 36107875,
+      "p90": 36616917,
+      "p95": 36616917,
+      "p99": 36616917,
+      "max": 36616917,
+      "mean": 36362396,
+      "stddev": 254521,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q5": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 46415917,
+      "p50": 46415917,
+      "p90": 47595167,
+      "p95": 47595167,
+      "p99": 47595167,
+      "max": 47595167,
+      "mean": 47005542,
+      "stddev": 589625,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q6": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 421615042,
+      "p50": 421615042,
+      "p90": 524025208,
+      "p95": 524025208,
+      "p99": 524025208,
+      "max": 524025208,
+      "mean": 472820125,
+      "stddev": 51205083,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q7": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 45486089500,
+      "p50": 45486089500,
+      "p90": 58853392459,
+      "p95": 58853392459,
+      "p99": 58853392459,
+      "max": 58853392459,
+      "mean": 52169740979,
+      "stddev": 6683651479,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q8": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 4307458,
+      "p50": 4307458,
+      "p90": 5000334,
+      "p95": 5000334,
+      "p99": 5000334,
+      "max": 5000334,
+      "mean": 4653896,
+      "stddev": 346438,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q9": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 2813833,
+      "p50": 2813833,
+      "p90": 3592083,
+      "p95": 3592083,
+      "p99": 3592083,
+      "max": 3592083,
+      "mean": 3202958,
+      "stddev": 389125,
+      "throughput": 0,
+      "row_throughput": 0
+    }
+  },
+  "load": {
+    "duration": 190000000,
+    "nodes": 11050,
+    "edges": 70406,
+    "bytes_on_disk": 14417920,
+    "method": "copy (tables)"
+  },
+  "resource": {
+    "HeapAllocBytes": 522952,
+    "HeapSysBytes": 16023552,
+    "GoSysBytes": 23697688,
+    "TotalAllocBytes": 134096824,
+    "NumGC": 44,
+    "GCPauseTotalNs": 6218702,
+    "MaxRSSBytes": 257818624,
+    "ChildMaxRSSBytes": 26132480,
+    "CPUUserNs": 168217891000,
+    "CPUSysNs": 2908332000,
+    "ChildCPUUserNs": 44426000,
+    "ChildCPUSysNs": 18491000,
+    "MinorFaults": 32052,
+    "MajorFaults": 220,
+    "VoluntaryCtxSwitches": 138,
+    "InvoluntaryCtxSwitches": 217526,
+    "BlockInputOps": 0,
+    "BlockOutputOps": 0,
+    "ChildMinorFaults": 2235,
+    "ChildMajorFaults": 111,
+    "ChildVoluntaryCtxSwitches": 113,
+    "ChildInvoluntaryCtxSwitches": 324,
+    "ChildBlockInputOps": 0,
+    "ChildBlockOutputOps": 0,
+    "DatasetBytes": 2193680,
+    "LoadBytes": 14417920,
+    "StoreBytes": 14417920,
+    "StoreGrowthBytes": 0,
+    "DiskReadBytes": -1,
+    "DiskWriteBytes": -1
+  }
+}

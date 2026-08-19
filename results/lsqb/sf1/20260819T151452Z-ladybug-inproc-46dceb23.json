@@ -1,0 +1,302 @@
+{
+  "schema": 3,
+  "workload": "lsqb",
+  "family": "lsqb",
+  "fidelity": "spec-following",
+  "condition": {
+    "HarnessVersion": "0.3.0",
+    "HarnessCommit": "none",
+    "Engine": "ladybug",
+    "EngineVersion": "0.19.1",
+    "Plane": "inproc",
+    "DialectUsed": {
+      "lsqb-q1": "cypher",
+      "lsqb-q2": "cypher",
+      "lsqb-q3": "cypher",
+      "lsqb-q4": "cypher",
+      "lsqb-q5": "cypher",
+      "lsqb-q6": "cypher",
+      "lsqb-q7": "cypher",
+      "lsqb-q8": "cypher",
+      "lsqb-q9": "cypher"
+    },
+    "Config": {
+      "path": "/var/folders/_g/lq_pglm508df70x751kkxrl80000gp/T/graph-bench-db-2966077990/bench.zu1"
+    },
+    "Tuned": false,
+    "Dataset": "social-p1000",
+    "Scale": "sf1",
+    "DatasetChecksum": "sha256:46dceb23e8857913db5bea64625744fe9f81a95177054e6366faa38d5f965cd3",
+    "ParamsChecksum": "none",
+    "Workload": "lsqb",
+    "MixSeed": 1,
+    "LatencyModel": "service-time",
+    "Rate": 0,
+    "Concurrency": [
+      1
+    ],
+    "WarmupOutcome": "fixed-2s",
+    "Cache": "warm",
+    "ColdProtocol": "none",
+    "ValidationMode": "sampled",
+    "Repetitions": 2,
+    "Hardware": {
+      "CPU": "Apple M4",
+      "Cores": 10,
+      "RAMBytes": 25769803776,
+      "OS": "darwin",
+      "Arch": "arm64"
+    },
+    "StartedAt": "2026-08-19T15:14:52.522479Z",
+    "FinishedAt": "2026-08-19T15:15:28.815929Z"
+  },
+  "verification": [
+    {
+      "query_id": "lsqb-q1",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    },
+    {
+      "query_id": "lsqb-q2",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    },
+    {
+      "query_id": "lsqb-q3",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    },
+    {
+      "query_id": "lsqb-q4",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    },
+    {
+      "query_id": "lsqb-q5",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    },
+    {
+      "query_id": "lsqb-q6",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    },
+    {
+      "query_id": "lsqb-q7",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    },
+    {
+      "query_id": "lsqb-q8",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    },
+    {
+      "query_id": "lsqb-q9",
+      "outcome": "PASS",
+      "samples": 1,
+      "dialect": "cypher"
+    }
+  ],
+  "classes": {
+    "aggregation": {
+      "class": "aggregation",
+      "count": 18,
+      "errors": 0,
+      "min": 2043292,
+      "p50": 122993375,
+      "p90": 12439126375,
+      "p95": 16627105500,
+      "p99": 16627105500,
+      "max": 16627105500,
+      "mean": 2016268344,
+      "stddev": 4559859465,
+      "throughput": 0,
+      "row_throughput": 0
+    }
+  },
+  "queries": {
+    "lsqb-q1": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 2043292,
+      "p50": 2043292,
+      "p90": 2299375,
+      "p95": 2299375,
+      "p99": 2299375,
+      "max": 2299375,
+      "mean": 2171333,
+      "stddev": 128041,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q2": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 7979959,
+      "p50": 7979959,
+      "p90": 8396667,
+      "p95": 8396667,
+      "p99": 8396667,
+      "max": 8396667,
+      "mean": 8188313,
+      "stddev": 208354,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q3": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 2098209,
+      "p50": 2098209,
+      "p90": 2212792,
+      "p95": 2212792,
+      "p99": 2212792,
+      "max": 2212792,
+      "mean": 2155500,
+      "stddev": 57291,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q4": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 122993375,
+      "p50": 122993375,
+      "p90": 129503416,
+      "p95": 129503416,
+      "p99": 129503416,
+      "max": 129503416,
+      "mean": 126248395,
+      "stddev": 3255020,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q5": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 476115833,
+      "p50": 476115833,
+      "p90": 519750875,
+      "p95": 519750875,
+      "p99": 519750875,
+      "max": 519750875,
+      "mean": 497933354,
+      "stddev": 21817521,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q6": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 2651566750,
+      "p50": 2651566750,
+      "p90": 2937454125,
+      "p95": 2937454125,
+      "p99": 2937454125,
+      "max": 2937454125,
+      "mean": 2794510437,
+      "stddev": 142943687,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q7": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 12439126375,
+      "p50": 12439126375,
+      "p90": 16627105500,
+      "p95": 16627105500,
+      "p99": 16627105500,
+      "max": 16627105500,
+      "mean": 14533115937,
+      "stddev": 2093989562,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q8": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 14103166,
+      "p50": 14103166,
+      "p90": 15174375,
+      "p95": 15174375,
+      "p99": 15174375,
+      "max": 15174375,
+      "mean": 14638770,
+      "stddev": 535604,
+      "throughput": 0,
+      "row_throughput": 0
+    },
+    "lsqb-q9": {
+      "class": "aggregation",
+      "count": 2,
+      "errors": 0,
+      "min": 151948500,
+      "p50": 151948500,
+      "p90": 182957625,
+      "p95": 182957625,
+      "p99": 182957625,
+      "max": 182957625,
+      "mean": 167453062,
+      "stddev": 15504562,
+      "throughput": 0,
+      "row_throughput": 0
+    }
+  },
+  "load": {
+    "duration": 517749166,
+    "nodes": 11050,
+    "edges": 70406,
+    "bytes_on_disk": 6299648,
+    "method": "copy"
+  },
+  "resource": {
+    "HeapAllocBytes": 530168,
+    "HeapSysBytes": 15990784,
+    "GoSysBytes": 23333128,
+    "TotalAllocBytes": 129553848,
+    "NumGC": 41,
+    "GCPauseTotalNs": 2730169,
+    "MaxRSSBytes": 494010368,
+    "ChildMaxRSSBytes": 1212416,
+    "CPUUserNs": 327830114000,
+    "CPUSysNs": 2873315000,
+    "ChildCPUUserNs": 1518000,
+    "ChildCPUSysNs": 3850000,
+    "MinorFaults": 58054,
+    "MajorFaults": 397,
+    "VoluntaryCtxSwitches": 596,
+    "InvoluntaryCtxSwitches": 527656,
+    "BlockInputOps": 0,
+    "BlockOutputOps": 0,
+    "ChildMinorFaults": 541,
+    "ChildMajorFaults": 5,
+    "ChildVoluntaryCtxSwitches": 0,
+    "ChildInvoluntaryCtxSwitches": 6,
+    "ChildBlockInputOps": 0,
+    "ChildBlockOutputOps": 0,
+    "DatasetBytes": 2193680,
+    "LoadBytes": 6299648,
+    "StoreBytes": 6299648,
+    "StoreGrowthBytes": 0,
+    "DiskReadBytes": -1,
+    "DiskWriteBytes": -1
+  }
+}
