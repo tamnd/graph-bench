@@ -380,6 +380,14 @@ GRAPH_BENCH_PG_DSN='postgres://bench:bench@127.0.0.1:5432/bench?sslmode=disable'
 
 Without a DSN in `GRAPH_BENCH_PG_DSN` or `DATABASE_URL`, `run` starts the pinned container itself unless `--no-docker` is set. It is the only relational engine here that is not in the harness process, and the round trip is most of what its small-read numbers say.
 
+MongoDB is the same story with a different wire:
+
+```
+GRAPH_BENCH_MONGO_URI=mongodb://127.0.0.1:27017 ./gb run --workload micro-read --engines mongodb
+```
+
+It answers through the `mongo` dialect, which is an aggregation pipeline rather than a query language, so a hop is a correlated `$lookup` and a bounded walk is `$graphLookup`. Nine of the thirteen micro queries have one; the rest SKIP.
+
 Tags combine, and a head-to-head build is the union of the ones it needs:
 
 ```

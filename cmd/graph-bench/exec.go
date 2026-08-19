@@ -778,6 +778,11 @@ func startContainerIfNeeded(ctx context.Context, engName string, rc runConfig) (
 			return nil, nil
 		}
 		spec = setup.Postgres("")
+	case "mongodb":
+		if os.Getenv("GRAPH_BENCH_MONGO_URI") != "" || os.Getenv("MONGODB_URI") != "" {
+			return nil, nil
+		}
+		spec = setup.Mongo("")
 	default:
 		return nil, nil
 	}
@@ -800,6 +805,8 @@ func envVar(engName string) string {
 		return "MEMGRAPH_URI"
 	case "postgres":
 		return "GRAPH_BENCH_PG_DSN"
+	case "mongodb":
+		return "GRAPH_BENCH_MONGO_URI"
 	default:
 		return "NEO4J_URI"
 	}

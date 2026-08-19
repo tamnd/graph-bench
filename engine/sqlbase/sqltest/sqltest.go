@@ -93,7 +93,7 @@ func Run(t *testing.T, e engine.Engine) {
 	}
 
 	t.Run("a dataset the schema cannot hold is refused", func(t *testing.T) {
-		_, err := Start(t, e).Load(ctx, twoLabelDataset(t))
+		_, err := Start(t, e).Load(ctx, TwoLabelDataset(t))
 		if err == nil {
 			t.Fatal("want an error")
 		}
@@ -273,9 +273,12 @@ func Dataset(t *testing.T) engine.Dataset {
 	return finalize(t, w, dir)
 }
 
-// twoLabelDataset is the same graph with its nodes split across two
-// labels, which is a shape the two-table schema has no place for.
-func twoLabelDataset(t *testing.T) engine.Dataset {
+// TwoLabelDataset is the same graph with its nodes split across two
+// labels, which is a shape the two-table schema has no place for. It is
+// exported for the same reason Dataset is: an adapter that holds the
+// dataset in two collections rather than two tables refuses this one too,
+// and it should refuse it with the same message.
+func TwoLabelDataset(t *testing.T) engine.Dataset {
 	t.Helper()
 	dir := t.TempDir()
 	w := writer(t, dir)

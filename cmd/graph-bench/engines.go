@@ -14,6 +14,7 @@ package main
 import (
 	"github.com/tamnd/graph-bench/engine"
 	"github.com/tamnd/graph-bench/engine/duckdb"
+	"github.com/tamnd/graph-bench/engine/mongo"
 	"github.com/tamnd/graph-bench/engine/postgres"
 	"github.com/tamnd/graph-bench/engine/sqlite"
 	"github.com/tamnd/graph-bench/engine/zu"
@@ -37,4 +38,7 @@ func init() {
 	// no build tag. What it needs is a server, and it says so at Start when
 	// there is none.
 	engine.Register(postgres.New())
+	// MongoDB likewise: a pure Go driver, no tag, and a server it asks for
+	// at Start.
+	engine.Register(mongo.New())
 }
