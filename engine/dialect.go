@@ -41,8 +41,30 @@ const (
 	// query with no Prim text would quietly become whatever the adapter
 	// guessed rather than a SKIP.
 	Prim Dialect = "prim"
+	// SQL is the portable SQL a relational engine answers a graph question
+	// in: the node table, the edge table, a join per hop and a recursive
+	// CTE where the hop count is not fixed. It is written to the common
+	// core SQLite, DuckDB and PostgreSQL all accept, so one text serves
+	// all three and the difference between their numbers is the engine
+	// rather than three hand-written queries.
+	//
+	// Two conventions belong to this dialect and to no other. A parameter
+	// is spelled $name, as it is in Cypher, and each adapter rewrites it
+	// to whatever its driver wants (? or $1); the text never carries a
+	// driver's placeholder syntax. And a result column may be aliased
+	// "name::type" to say what the value is, because SQLite has no boolean
+	// type and would otherwise answer an existence probe with the integer
+	// 1 where the reference says true. The adapter names the column `name`
+	// and decodes the value as `type`. Only bool is annotated today, and
+	// on an engine that already returns a boolean it changes nothing.
+	SQL Dialect = "sql"
 	// SQLPGQ is SQL:2023 property-graph query syntax (DuckPGQ seam).
 	SQLPGQ Dialect = "sqlpgq"
+	// Mongo is a MongoDB aggregation pipeline as JSON: an array of stages,
+	// with $graphLookup where the question is a traversal. Parameters are
+	// spelled $$name, which is how a pipeline names a variable, and the
+	// adapter binds them through the aggregation's let.
+	Mongo Dialect = "mongo"
 )
 
 // ResolveText picks the text for an engine's dialect chain. It returns
