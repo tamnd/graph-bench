@@ -75,6 +75,8 @@ Load time and footprint from the same run, against 392.4 KiB of source CSV:
 | mongodb | 137ms | 1264.0 KiB |
 | zu2 | 575ms | 1320.0 KiB |
 
+The zu2 load row is kept as it was measured and it is no longer current. zu2's durability setting applies to every append and this adapter loaded at the configured setting, which defaults to durable, so it waited for the device once per record where sqlite's loader commits once for the whole load. It now loads async and syncs once before anything measures the file, which puts the same load at 6.9ms here and at 12.5ms to 143.8ms on the other four machines, 3.0x to 11.4x faster than sqlite instead of slower. Nothing else in the table moved: the footprint is the same and no query path changed.
+
 The two engines on a wire are close to flat across the small reads, because a round trip costs what it costs and it is more than any of these queries. That is the honest reading of those columns and not a criticism of either query planner: PostgreSQL answers a three hop expansion in about what it needs for a point read. The in-process engines are where the query work is visible, and there the shape is the usual one, a point read cheap and a k-hop growing with the fan-out.
 
 Two rows are worth stopping on. MongoDB's `micro-varlen` at 161.5µs beats its own three hop join at 393.8µs, because `$graphLookup` runs the whole bounded walk server side while `micro-khop3` is three nested `$lookup` stages. Give a document store a graph operator and it uses it properly. And ladybug, the only other engine here that was built for graphs, is the fastest of the four non-zu engines on a point read and the slowest of them on three hops, which is a planner shape rather than a storage one.
