@@ -38,6 +38,9 @@ var Pins = []Pin{
 	// reason results carry a live version next to the pin.
 	{Engine: "postgres", Pinned: "postgres:18.6", Source: "docker"},
 	{Engine: "pgx", Pinned: "v5.10.0", Source: "go.mod"},
+	// MongoDB is a server too, and setup.Mongo reads its image from here.
+	{Engine: "mongodb", Pinned: "mongo:8.3.8", Source: "docker"},
+	{Engine: "mongo-driver", Pinned: "v2.8.0", Source: "go.mod"},
 }
 
 // PinFor returns the pin for an engine name, if recorded.
