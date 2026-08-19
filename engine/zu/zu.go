@@ -46,8 +46,7 @@ var _ engine.Engine = (*Engine)(nil)
 
 // Info reports zu's static identity and honest capabilities as of the
 // v0.3.0 pin (spec 04 §2). Every false is a dated fact, not a design
-// constant. MaxConcurrency stays 1 because a libzu connection is not
-// safe to use from two threads at once.
+// constant.
 func (e *Engine) Info() engine.Info {
 	return engine.Info{
 		Name:  "zu",
@@ -80,7 +79,14 @@ func (e *Engine) Info() engine.Info {
 			// parameters rather than literals only, so the window is
 			// pushed into the expansion instead of filtered after it.
 			PathPredicates: true,
-			MaxConcurrency: 1,
+			// 0 is unbounded, and the runner applies its own worker
+			// limit. One libzu connection is still not safe from two
+			// threads at once, but a Session is a pool of them now, and
+			// several connections on one file in one process are
+			// supported: they share a file handle, queue for the write
+			// side, and read through one block cache. So there is no
+			// number here for the adapter to declare.
+			MaxConcurrency: 0,
 			Persistent:     true,
 		},
 	}
