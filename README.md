@@ -157,6 +157,45 @@ Smoke scale, macOS, both columns from one run of the harness on the same machine
 
 This is the one row where zu loses, and it loses by 3.5x. The reason is in the engine, not in the harness: zu's reader only reads the sealed file, so every committed write is followed by a fold, and a fold is three more fsyncs plus a rewrite of the columns the write touched. zu's own write bench measures the same thing from the inside, four fdatasyncs and about 1.5 MB written per single-cell SET on a 10k row table. The read rows above are what the same design buys.
 
+### LDBC Graphalytics kernels, sf1, zu 0.0.1 against ladybug 0.19.1
+
+The tables above are read and write shapes. This one is the whole-graph algorithms, which is a different question: not how fast a neighbourhood comes back but how fast an engine sweeps every node it has. Both columns are one invocation of the harness on the same machine, the same datasets, and the same process, and every zu answer was validated row by row against the harness oracle before it was timed, which for PageRank is a float comparison at the Graphalytics tolerance of 1e-4 and for the label kernels is exact.
+
+**galytics**, dataset `rmat-s14-e16` (checksum `0b9ec5e5`, 16384 nodes, 259.6K edges), fidelity spec-following. zu answered all five through zuQL, ladybug answered three through its kuzu dialect.
+
+| Query | zu p50 | zu p99 | ladybug p50 | ladybug p99 | zu speedup |
+| --- | --- | --- | --- | --- | --- |
+| ga-bfs | 1.05ms | 1.26ms | 32.51ms | 33.20ms | 31.0x |
+| ga-pr | 8.18ms | 8.99ms | 2.540s | 2.555s | 310.4x |
+| ga-wcc | 2.02ms | 2.13ms | 110.70ms | 112.04ms | 54.9x |
+| ga-cdlp | 18.09ms | 18.15ms | SKIP | SKIP | n/a |
+| ga-lcc | 195.08ms | 195.12ms | SKIP | SKIP | n/a |
+
+**galytics-w**, dataset `rmat-s14-e16-w` (checksum `a45cbe9c`), the same edge set with the uniform 1..255 weights the weighted SSSP oracle needs.
+
+| Query | zu p50 | zu p99 | ladybug p50 | ladybug p99 | zu speedup |
+| --- | --- | --- | --- | --- | --- |
+| ga-sssp | 9.68ms | 10.20ms | SKIP | SKIP | n/a |
+
+On BFS that is 225.18 M edges per second against 7.90 M, harmonic mean over the timed repetitions from the one source the kernel drew. The three skips are capability skips, not failures: ladybug ships no CDLP, no LCC and no SSSP procedure, so the harness withholds the text rather than emulate the kernel in Cypher and measure the emulation. Neo4j is absent from this table for the same kind of reason and one level up, because these kernels live in GDS and the community image the harness manages does not carry it, so the neo4j adapter declares no algorithms at all and skips the whole family.
+
+PageRank is the widest gap and it is worth saying why, because 310x is the sort of number that usually means the two engines answered different questions. They did not. Both run to a convergence criterion rather than a fixed round count, both are checked against the same oracle at the same tolerance, and ladybug's ranks are sum-normalized in the query text because its kernel drops the mass on dangling nodes instead of redistributing it. What is left is that zu iterates over a CSR it already has in the file and ladybug builds a named projection first.
+
+The resource figures below come from two more invocations, one engine each, since a peak resident figure only belongs to one engine when only one engine ran.
+
+| Resource | zu 0.0.1 | ladybug 0.19.1 |
+| --- | --- | --- |
+| peak rss | 101.8 MiB | 233.2 MiB |
+| cpu user | 2.181s | 17.644s |
+| cpu sys | 74.7ms | 29.695s |
+| minor faults | 6969 | 17116 |
+| major faults | 203 | 401 |
+| involuntary switches | 6523 | 3332059 |
+| store after load | 2.8 MiB | 4.7 MiB |
+| store growth over the run | 0 B | 0 B |
+
+The system time and the involuntary switches are the same story the read tables tell, ladybug's thread pool against zu's single sweep, and here the ratio is at its largest anywhere in this file: 397x the system time and 511x the involuntary switches for a run that produced three answers to zu's five. zu spends more on the Go side than ladybug does, 362.7 MiB allocated against 220.8 MiB, because the harness materializes one row per node for five kernels rather than three.
+
 ### Why there is only one zu plane
 
 There used to be a second zu adapter that drove the zu CLI over a pipe, one JSON frame per query, and both adapters appeared in these tables so the frame cost could be read off as a column. It measured a flat 11µs to 13µs per query, which does not scale with the query and is therefore most of the cost of the cheap reads: `micro-scan-count` spends about 5µs in the engine, so over a pipe it looked four times slower than it is.
