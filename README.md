@@ -105,9 +105,9 @@ Neo4j 2026.06.0 and Memgraph 3.10.0 ran on server3 alongside zu2 and SQLite, in 
 
 ### How to read the tables
 
-The `zu speedup` column is the other engine's p50 divided by zu's p50. Above 1.0 means zu is faster by that factor, below 1.0 means zu is slower. Rows in **bold** are the ones where zu loses. Ratios are computed from the nanosecond figures in the result files, not from the rounded cells.
+The `zu speedup` column is the other engine's p50 divided by zu's p50. Above 1.0 means zu is faster by that factor, below 1.0 means zu is slower. A row where zu loses is set in bold, and as of the 2026-08-22 rerun there are none left in the laptop tables. Ratios are computed from the nanosecond figures in the result files, not from the rounded cells.
 
-The laptop was not a quiet machine on 2026-08-17: it carried a load average near 15 from unrelated work. Both engines ran inside one invocation of the harness, alternating over the same datasets in the same process, so the comparison is still matched, but the absolute microseconds would be lower on an idle machine. Repeated runs of each engine agreed within about 15 percent, which is far inside the ratios below.
+The laptop tables below were remeasured on 2026-08-22 on an idle machine. The first set of them was taken on 2026-08-17 under a load average near 15 from unrelated work, and every absolute figure moved down when the machine went quiet, ladybug's by 15 to 25 percent and zu's by more on the shapes it has since changed. Both engines ran inside one invocation of the harness, alternating over the same datasets in the same process, so either set is matched against itself. Repeated runs of each engine agreed within about 15 percent, which is far inside the ratios below.
 
 ### Apple silicon laptop, zu 0.0.1 against ladybug 0.19.1
 
@@ -117,45 +117,49 @@ Smoke scale, macOS, both columns from one run of the harness on the same machine
 
 | Query | zu p50 | zu p99 | ladybug p50 | ladybug p99 | zu speedup |
 | --- | --- | --- | --- | --- | --- |
-| micro-point | 6.2µs | 6.9µs | 107.8µs | 174.5µs | 17.5x |
-| micro-point-miss | 3.4µs | 3.8µs | 105.2µs | 696.9µs | 30.8x |
-| micro-edge | 9.7µs | 22.2µs | 593.5µs | 1.04ms | 61.4x |
-| micro-khop1 | 6.7µs | 20.1µs | 414.7µs | 654.0µs | 61.8x |
-| micro-khop2 | 11.0µs | 31.5µs | 1.35ms | 2.41ms | 123.5x |
-| micro-khop3 | 11.5µs | 12.0µs | 2.27ms | 3.79ms | 196.9x |
-| micro-varlen | 8.7µs | 10.5µs | 843.1µs | 7.21ms | 97.3x |
-| micro-scan-count | 5.4µs | 7.5µs | 491.5µs | 2.56ms | 91.4x |
-| micro-scan-stats | 11.9µs | 16.7µs | 471.5µs | 1.81ms | 39.7x |
+| micro-point | 5.5µs | 6.4µs | 92.6µs | 150.4µs | 16.8x |
+| micro-point-miss | 3.2µs | 3.5µs | 90.5µs | 121.1µs | 28.6x |
+| micro-edge | 8.0µs | 9.8µs | 462.6µs | 844.6µs | 57.5x |
+| micro-khop1 | 6.2µs | 12.3µs | 303.1µs | 955.5µs | 49.1x |
+| micro-khop2 | 9.1µs | 10.0µs | 1.05ms | 2.02ms | 115.5x |
+| micro-khop3 | 9.8µs | 13.9µs | 1.87ms | 2.41ms | 189.7x |
+| micro-varlen | 6.8µs | 8.3µs | 880.2µs | 1.40ms | 129.6x |
+| micro-scan-count | 5.1µs | 7.4µs | 215.0µs | 324.8µs | 42.3x |
+| micro-scan-stats | 8.0µs | 9.3µs | 236.2µs | 300.9µs | 29.5x |
 
 **micro-er**, dataset `er-n1000-p0.01` (checksum `d3c97598`, 1000 nodes, 10219 edges), fidelity harness-native. Both triangle counts verified against the harness's own counting oracle, zu through zuQL and ladybug through Cypher.
 
 | Query | zu p50 | zu p99 | ladybug p50 | ladybug p99 | zu speedup |
 | --- | --- | --- | --- | --- | --- |
-| micro-triangle | 953.8µs | 2.92ms | 8.63ms | 13.08ms | 9.1x |
-| micro-triangle-undirected | 2.87ms | 5.33ms | 20.99ms | 28.40ms | 7.3x |
+| micro-triangle | 346.5µs | 414.6µs | 6.09ms | 13.63ms | 17.6x |
+| micro-triangle-undirected | 1.49ms | 1.59ms | 13.54ms | 14.93ms | 9.1x |
 
-**micro-powerlaw**, dataset `powerlaw-n1000-g2.5` (checksum `82425f5a`), fidelity harness-native. The two shortest-path queries used to SKIP on zu and now run, so this is the first table where every query in the workload has a zu number.
+**micro-powerlaw**, dataset `powerlaw-n1000-g2.5` (checksum `82425f5a`), fidelity harness-native. Every query in the workload has a zu number.
 
 | Query | zu p50 | zu p99 | ladybug p50 | ladybug p99 | zu speedup |
 | --- | --- | --- | --- | --- | --- |
-| micro-point | 6.8µs | 8.2µs | 107.5µs | 179.2µs | 15.9x |
-| micro-point-miss | 6.4µs | 23.6µs | 101.5µs | 140.4µs | 15.8x |
-| micro-khop1 | 10.8µs | 23.2µs | 516.1µs | 3.23ms | 47.8x |
-| micro-khop2 | 12.1µs | 35.3µs | 1.25ms | 3.06ms | 103.4x |
-| micro-khop3 | 13.0µs | 19.8µs | 2.05ms | 3.36ms | 157.1x |
-| micro-varlen | 9.0µs | 72.7µs | 631.5µs | 1.29ms | 70.5x |
-| micro-sp | 464.5µs | 895.5µs | 917.2µs | 2.04ms | 2.0x |
-| micro-sp-bidir | 830.0µs | 1.32ms | 1.55ms | 2.66ms | 1.9x |
-| micro-triangle | 240.3µs | 297.1µs | 2.60ms | 4.75ms | 10.8x |
-| micro-triangle-undirected | 758.6µs | 1.21ms | 11.40ms | 17.14ms | 15.0x |
+| micro-point | 6.4µs | 10.7µs | 51.5µs | 78.0µs | 8.1x |
+| micro-point-miss | 3.8µs | 4.2µs | 51.1µs | 74.1µs | 13.6x |
+| micro-khop1 | 6.8µs | 7.8µs | 185.4µs | 245.1µs | 27.3x |
+| micro-khop2 | 10.8µs | 14.0µs | 594.6µs | 917.2µs | 54.9x |
+| micro-khop3 | 11.3µs | 15.2µs | 1.10ms | 1.55ms | 97.3x |
+| micro-varlen | 7.9µs | 24.1µs | 493.0µs | 713.8µs | 62.3x |
+| micro-sp | 19.2µs | 38.2µs | 567.0µs | 1.02ms | 29.5x |
+| micro-sp-bidir | 20.0µs | 45.8µs | 687.0µs | 3.05ms | 34.3x |
+| micro-triangle | 137.8µs | 153.4µs | 1.44ms | 2.01ms | 10.4x |
+| micro-triangle-undirected | 352.1µs | 403.3µs | 6.20ms | 6.65ms | 17.6x |
+
+The two shortest-path rows are the ones that moved most between the two measurement dates, from 2.0x and 1.9x ahead to 29.5x and 34.3x. Only part of that is the quieter machine: micro-sp went from 464.5µs to 19.2µs while ladybug's went from 917.2µs to 567.0µs, so the shape got about 20x faster on zu against ladybug's 1.6x, and the rest is the search itself rather than the scheduler.
 
 **micro-write**, dataset `lb-1k` (checksum `b974efcf`), fidelity harness-native. One property update per repetition, verified by reading the row back.
 
 | Query | zu p50 | zu p99 | ladybug p50 | ladybug p99 | zu speedup |
 | --- | --- | --- | --- | --- | --- |
-| **micro-set** | 14.17ms | 21.95ms | 4.00ms | 6.41ms | 0.3x |
+| micro-set | 3.01ms | 4.03ms | 3.97ms | 8.21ms | 1.3x |
 
-This is the one row where zu loses, and it loses by 3.5x. The reason is in the engine, not in the harness: zu's reader only reads the sealed file, so every committed write is followed by a fold, and a fold is three more fsyncs plus a rewrite of the columns the write touched. zu's own write bench measures the same thing from the inside, four fdatasyncs and about 1.5 MB written per single-cell SET on a 10k row table. The read rows above are what the same design buys.
+This used to be the one row where zu lost, at 14.17ms against 4.00ms, and it is now level. Four repeats of this workload put zu between 3.01ms and 3.93ms and ladybug between 3.93ms and 4.15ms, which is a spread wide enough that the honest reading is a tie rather than the 1.3x the table's own run shows. What is no longer true is the 3.5x loss.
+
+The shape of the cost has not changed, only its size. zu's reader still only reads the sealed file, so every committed write is followed by a fold, and a fold is three more fsyncs plus a rewrite of the columns the write touched. zu's own write bench measures the same thing from the inside. The read rows above are what the same design buys, and the write row is now what it costs.
 
 ### LDBC Graphalytics kernels, sf1, zu 0.0.1 against ladybug 0.19.1
 
@@ -245,29 +249,29 @@ Both engines below therefore ran alone, one invocation each, same machine and sa
 
 | Resource | zu 0.0.1 | ladybug 0.19.1 |
 | --- | --- | --- |
-| peak rss | 29.8 MiB | 197.8 MiB |
-| cpu user | 1.004s | 2.467s |
-| cpu sys | 36.3ms | 1.716s |
-| minor faults | 1795 | 15739 |
-| major faults | 115 | 401 |
-| involuntary switches | 6279 | 228615 |
-| store after load | 4.0 MiB | 2.0 MiB |
+| peak rss | 28.5 MiB | 201.3 MiB |
+| cpu user | 745.9ms | 2.939s |
+| cpu sys | 16.2ms | 2.409s |
+| minor faults | 1389 | 12619 |
+| major faults | 194 | 396 |
+| involuntary switches | 3255 | 466831 |
+| store after load | 2.2 MiB | 2.0 MiB |
 | store growth over the run | 0 B | 0 B |
 
 **micro-write** on `lb-1k`, the write microscope:
 
 | Resource | zu 0.0.1 | ladybug 0.19.1 |
 | --- | --- | --- |
-| peak rss | 36.1 MiB | 196.7 MiB |
-| cpu user | 159.1ms | 289.4ms |
-| cpu sys | 228.9ms | 359.2ms |
-| minor faults | 2457 | 14233 |
-| major faults | 111 | 47 |
-| involuntary switches | 8458 | 43863 |
-| store after load | 5.5 MiB | 2.9 MiB |
-| store growth over the run | 512.0 KiB | 0 B |
+| peak rss | 30.7 MiB | 204.1 MiB |
+| cpu user | 34.4ms | 176.9ms |
+| cpu sys | 60.0ms | 329.0ms |
+| minor faults | 1656 | 14017 |
+| major faults | 16 | 24 |
+| involuntary switches | 4603 | 36510 |
+| store after load | 5.8 MiB | 2.9 MiB |
+| store growth over the run | 2.6 MiB | 0 B |
 
-zu holds the graph in a sixth of the memory, takes an eighth of the minor faults, and spends a fortieth of the system time on the read workload, where ladybug's thread pool is most of the difference in both the sys time and the involuntary switches. It also stores the graph in twice the bytes and grows its store by two blocks over 200 self-assignments, which is the fold again. Those are the two numbers to watch as the read path learns to consult overlays.
+zu holds the graph in a seventh of the memory, takes a ninth of the minor faults, and spends a hundred and fiftieth of the system time on the read workload, where ladybug's thread pool is most of the difference in both the sys time and the involuntary switches. It also stores the graph in twice the bytes and grows its store by 2.6 MiB over 200 self-assignments, which is the fold again. Those are the two numbers to watch as the read path learns to consult overlays.
 
 Disk read and write bytes are per-process kernel counters read from `/proc/self/io`, so they are present on Linux and absent on macOS, where the equivalent lives behind libproc and this harness stays cgo-free by default. A figure a platform cannot answer is -1 in the document and `n/a` in the table, and a row no engine could answer is dropped rather than printed as a column of `n/a`.
 
@@ -310,7 +314,7 @@ The places it loses have one cause each and all of them are filed. The lsqb four
 
 ### The gap that closed
 
-`micro-triangle-undirected` on the ER graph was the only read query in these tables where zu lost, 22.45ms against ladybug's 13.69ms. It now runs 2.87ms against 20.99ms. The query is the undirected triangle with an ordering predicate on the `id` property and a `count(DISTINCT [a.id, b.id, c.id])` on top.
+`micro-triangle-undirected` on the ER graph was the only read query in these tables where zu lost, 22.45ms against ladybug's 13.69ms. It now runs 1.49ms against 13.54ms. The query is the undirected triangle with an ordering predicate on the `id` property and a `count(DISTINCT [a.id, b.id, c.id])` on top.
 
 The first reading of it was wrong and worth writing down. zu's own `explain_analyze` on the 1k ER graph put 16.27ms of the 29.79ms total in one place, the `b.id < c.id` filter over 217664 rows at about 75ns each, and that looked like a property read in the wrong loop. The property read was never the story. Those 217664 rows were, and they existed because the engine never intersected the closing edge: an undirected end reads two stored lists, and both of zu's planners took that as a reason to leave the close as a storage probe per candidate row, so the query enumerated every 2-path in the graph and then threw most of them away one predicate at a time.
 
