@@ -54,6 +54,43 @@ func BudgetFor(class engine.Class, plane engine.Plane) (time.Duration, bool) {
 	return 0, false
 }
 
+// DurableWriteSyncs is how many durable syncs a write p99 may cost on a
+// machine whose sync is slower than the table's write ceiling. One for
+// the statement's own commit, one for a group commit already in flight
+// that it has to wait out, and a factor of two because this gates a p99
+// and the tail of a group is where the waiting lands.
+//
+// Both engines measured on this laptop sit at about three of them, 11.96
+// ms and 12.01 ms p99 against a sync of about 3 ms, at eight concurrent
+// writers. Two engines with nothing in common landing on the same number
+// is the sign that the number is the drive's and not theirs.
+const DurableWriteSyncs = 4
+
+// WriteCeiling is the write budget for a plane on the machine the run was
+// measured on. A durable commit costs one sync of that machine's storage
+// and nothing an engine does goes below it, so on a disk where a sync is
+// slower than the table says a write may be, the table is a statement
+// about the disk and every correct engine fails it. The ceiling is then
+// what the disk allows instead. syncNanos of -1, the unprobed run, or a
+// disk fast enough for the table leaves the table's number alone.
+//
+// raised reports which of the two the caller got, so a pass under a
+// ceiling the disk set reads as one.
+func WriteCeiling(plane engine.Plane, syncNanos int64) (ceiling time.Duration, raised bool) {
+	table, ok := BudgetFor(engine.Write, plane)
+	if !ok {
+		return 0, false
+	}
+	if syncNanos <= 0 {
+		return table, false
+	}
+	floor := time.Duration(syncNanos) * DurableWriteSyncs
+	if floor <= table {
+		return table, false
+	}
+	return floor, true
+}
+
 // Workload-specific gates layered on top of the class table (spec 08 §6).
 const (
 	// FinBenchReadP99 is the FinBench SLO: every fb-* read query holds

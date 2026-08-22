@@ -122,12 +122,25 @@ func CheckBudgets(res measure.Result, plane engine.Plane, workloadName string) [
 		if !ok {
 			continue
 		}
+		// The write ceiling is the table's or the disk's, whichever is
+		// higher: a durable commit costs a sync and no engine goes
+		// below one, so on slow storage the table's number is a
+		// statement about the drive.
+		source := "spec 08 §6"
+		if class == engine.Write {
+			raised := false
+			ceiling, raised = WriteCeiling(plane, res.Condition.Hardware.SyncNanos)
+			if raised {
+				source = fmt.Sprintf("%d durable syncs of %v, over the spec 08 §6 ceiling",
+					DurableWriteSyncs, time.Duration(res.Condition.Hardware.SyncNanos))
+			}
+		}
 		if stat.P99 > ceiling {
 			out = append(out, Violation{
 				Kind:  "budget",
 				Where: string(class),
-				Detail: fmt.Sprintf("p99 %v over the %v %s/%s ceiling (spec 08 §6)",
-					stat.P99, ceiling, class, plane),
+				Detail: fmt.Sprintf("p99 %v over the %v %s/%s ceiling (%s)",
+					stat.P99, ceiling, class, plane, source),
 			})
 		}
 	}

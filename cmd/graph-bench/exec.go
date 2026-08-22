@@ -64,6 +64,10 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	// managed container when no server is configured (port of v1 behavior).
 	cfg := engine.Config{Values: map[string]string{}, Tuned: rc.tuned}
 	var dbTempDir string
+	// -1 until a store of our own says otherwise: a served engine keeps
+	// its files somewhere this process cannot probe, and reporting this
+	// machine's disk for it would be reporting the wrong disk.
+	syncNanos := int64(-1)
 	if info.Plane == engine.Subprocess || info.Plane == engine.InProc {
 		tmp, err := os.MkdirTemp("", "graph-bench-db-*")
 		if err != nil {
@@ -71,6 +75,10 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 		}
 		dbTempDir = tmp
 		cfg.Values["path"] = filepath.Join(tmp, "bench.zu1")
+		// Taken here, before anything has been loaded or run, because
+		// what the write budget wants is the drive's floor and a drive
+		// that has just taken a write workload answers with its queue.
+		syncNanos = measure.DurableSyncNanos(tmp)
 	}
 	defer func() {
 		if dbTempDir != "" {
@@ -154,7 +162,7 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	finishedAt := time.Now().UTC()
 
 	res.Load = loadStats
-	res.Condition = buildCondition(ctx, info, sess, cfg, wl, ds, plan, rc, engVersion, res, measured, startedAt, finishedAt)
+	res.Condition = buildCondition(ctx, info, sess, cfg, wl, ds, plan, rc, engVersion, res, measured, syncNanos, startedAt, finishedAt)
 
 	// Close the session before the closing reading, and take the store size
 	// after the close. A subprocess engine's CPU and peak resident set only
@@ -658,6 +666,7 @@ func buildCondition(
 	engVersion string,
 	res measure.Result,
 	measured bool,
+	syncNanos int64,
 	startedAt, finishedAt time.Time,
 ) measure.Condition {
 	dialects := map[string]string{}
@@ -733,7 +742,7 @@ func buildCondition(
 		ColdProtocol:    coldProtocol,
 		ValidationMode:  validation,
 		Repetitions:     reps,
-		Hardware:        measure.CollectHardware(),
+		Hardware:        measure.CollectHardware(syncNanos),
 		StartedAt:       startedAt,
 		FinishedAt:      finishedAt,
 	}
