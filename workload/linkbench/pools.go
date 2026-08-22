@@ -22,7 +22,12 @@ func BuildPools(ds engine.Dataset) (map[string][]workload.Params, error) {
 	if err != nil {
 		return nil, err
 	}
-	hot := g.hotSources(poolMax)
+	// One more than the pools need, so dropping the scratch object still
+	// leaves a full pool when it turns out to be one of the hot ones.
+	hot := withoutScratch(g.hotSources(poolMax + 1))
+	if len(hot) > poolMax {
+		hot = hot[:poolMax]
+	}
 	if len(hot) == 0 {
 		return nil, fmt.Errorf("linkbench: dataset %s has no LINK sources", ds.Name())
 	}
@@ -85,6 +90,23 @@ func Bind(w *workload.Workload, ds engine.Dataset) error {
 		q.Params = workload.NewPoolSource(p)
 	}
 	return nil
+}
+
+// withoutScratch drops the object lb-update-node writes to. It has to
+// go: lb-get-node checks an object's otype, version, time and payload
+// against the values the generator wrote, and the update changes two of
+// them, so a read pool holding it would report a verification failure
+// for a write that worked. Nothing else in the mix reads an object's
+// properties, so dropping it from every pool rather than only the node
+// one costs nothing and keeps the four pools drawn from one list.
+func withoutScratch(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != scratchID {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // hotSources returns up to k object ids ranked by out-link degree

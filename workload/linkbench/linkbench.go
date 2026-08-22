@@ -13,26 +13,35 @@
 // native counts would carry its own dialect text and disclose the
 // modeling difference per the spec.
 //
-// zu carries its own text for eight of the ten operations. The reads
-// and the object insert are the same query written in zuQL, and the
-// three association writes differ only in that the association type is
-// a WHERE predicate rather than an inline pattern property. The
-// brackets are dialect-specific for the same reason: a creation is
-// INSERT and not CREATE, and a post-condition that compares a count has
-// to carry the count through a WITH, because zu takes an aggregate only
-// as a bare projection item.
+// zu carries its own text for nine of the ten operations. The reads and
+// the object insert are the same query written in zuQL, and the three
+// association writes differ only in that the association type is a
+// WHERE predicate rather than an inline pattern property. The brackets
+// are dialect-specific for the same reason: a creation is INSERT and
+// not CREATE, and a post-condition that compares a count has to carry
+// the count through a WITH, because zu takes an aggregate only as a
+// bare projection item.
 //
-// The two that have no zu text are lb-update-node and lb-delete-node,
-// and the reason is that a zu node id is the row offset the loader gave
-// it, not a column an INSERT can choose. The scratch object those two
-// operations work on therefore lands at whatever offset the store is
-// next free at, and no statement written ahead of the run can name it.
-// Matching it on its payload instead would put a scan of the whole
+// What shapes the three object writes is that a zu node id is the row
+// offset the loader gave it, not a column an INSERT can choose. An
+// object the setup creates therefore lands wherever the store was next
+// free, and no statement written ahead of the run can name it.
+//
+// Two of the three get around that and one does not. lb-add-node needs
+// no id at all: the insert does not name one, and only its untimed
+// post-condition and teardown look the object up, by payload.
+// lb-update-node addresses an object the dataset already holds
+// (ScratchObj) and puts it back the way it found it, which is both what
+// LinkBench's update_node does and something a literal id can express.
+//
+// lb-delete-node has no zu text and SKIPs. The same trick does not work
+// for it: an object that has been deleted cannot be put back at the id
+// it had, so the next repetition would delete nothing and a
+// post-condition that asserts absence would pass without the operation
+// having run. Matching on payload instead would put a scan of the whole
 // object table inside the timed statement, which is not the point
-// operation LinkBench measures, so they SKIP rather than report the
-// wrong thing. lb-add-node is the one of the three that survives: the
-// insert itself needs no id, and only its untimed post-condition and
-// teardown look the object up by payload.
+// operation LinkBench measures. It is 1.0 of the mix's 100, and it is a
+// write, so its absence flatters an engine that skips it.
 //
 // The three association writes address the pairs (0,1), (0,2) and (0,3),
 // which the generator leaves unlinked at every scale. That matters on zu
@@ -58,6 +67,28 @@ func init() {
 // and object ids 9000001+ are beyond any generated scale, so the write
 // operations can address exactly their own data with literal
 // post-conditions and teardowns while repetitions stay stationary.
+
+// ScratchObj is the object lb-update-node writes to. The three
+// association writes address objects 0 through 3, so 4 is the first one
+// no other operation in the mix touches, and every lb scale is far
+// larger than five objects.
+//
+// The read pools drop it (BuildPools), because lb-get-node verifies an
+// object's properties against the generator's own values and this one's
+// no longer match them.
+const ScratchObj = 4
+
+// scratchID is ScratchObj as it appears in the literal brackets, which
+// take no parameters.
+const scratchID = "4"
+
+// The two payloads lb-update-node swaps between. Both are the
+// generator's 64-character payload width, so the update writes a row
+// the size it found.
+const (
+	scratchSeed    = "seed000000000000000000000000000000000000000000000000000000000000"
+	scratchUpdated = "updated000000000000000000000000000000000000000000000000000000000"
+)
 
 func build() *workload.Workload {
 	return &workload.Workload{
@@ -277,9 +308,24 @@ RETURN c = 1 AS ok`,
 }
 
 // updateNode is LinkBench update_node: it bumps the version and swaps
-// the payload of a scratch object the setup creates. No zu text: the
-// setup cannot choose the object's id, so the timed statement has
-// nothing to name it by. [Write]
+// the payload of one object.
+//
+// The object is ScratchObj, which the dataset already holds, rather than
+// one the setup creates. LinkBench updates an object that is already
+// there, so this is the more faithful of the two shapes anyway, and it
+// is the only one zu can run: an id it did not hand out is not an id an
+// INSERT can choose, so a scratch object created by the setup has no
+// name a statement written ahead of the run could use.
+//
+// Both payloads are the generator's own payload width, so the update
+// swaps one 64-character string for another and the row it writes is
+// the size it was. A repetition that grew the row would move it, and
+// then the operation being measured would be a different one each time.
+//
+// The post-condition checks the payload and not the version, because
+// the version is a counter and the run bumps it once per repetition:
+// asserting a value for it would hold for the first write and no other.
+// [Write]
 func updateNode() *workload.Query {
 	return &workload.Query{
 		ID:    "lb-update-node",
@@ -287,21 +333,40 @@ func updateNode() *workload.Query {
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (o:Obj {id: $id})
 SET o.payload = $payload, o.version = o.version + 1`,
+			engine.ZuQL: `MATCH (o:Obj {id: $id})
+SET o.payload = $payload, o.version = o.version + 1`,
 		},
 		Params: workload.Fixed{P: workload.Params{
-			"id": int64(9000002), "payload": "updated",
+			"id": int64(ScratchObj), "payload": scratchUpdated,
 		}},
-		Setup:         `CREATE (:Obj {id: 9000002, otype: 1, version: 0, time: 0, payload: "seed"})`,
-		PostCondition: `MATCH (o:Obj {id: 9000002}) RETURN o.payload = "updated" AND o.version = 1`,
-		Teardown:      `MATCH (o:Obj {id: 9000002}) DETACH DELETE o`,
-		AutocommitOK:  true,
+		Setup: `MATCH (o:Obj {id: ` + scratchID + `})
+SET o.payload = "` + scratchSeed + `", o.version = 0`,
+		Setups: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (o:Obj {id: ` + scratchID + `})
+SET o.payload = '` + scratchSeed + `', o.version = 0`,
+		},
+		PostCondition: `MATCH (o:Obj {id: ` + scratchID + `})
+RETURN o.payload = "` + scratchUpdated + `"`,
+		PostConditions: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (o:Obj {id: ` + scratchID + `})
+RETURN o.payload = '` + scratchUpdated + `' AS ok`,
+		},
+		Teardown: `MATCH (o:Obj {id: ` + scratchID + `})
+SET o.payload = "` + scratchSeed + `", o.version = 0`,
+		Teardowns: map[engine.Dialect]string{
+			engine.ZuQL: `MATCH (o:Obj {id: ` + scratchID + `})
+SET o.payload = '` + scratchSeed + `', o.version = 0`,
+		},
+		AutocommitOK: true,
 	}
 }
 
 // deleteNode is LinkBench delete_node: it removes the scratch object
 // the setup creates; the teardown is an idempotent sweep in case the
-// operation itself failed. No zu text, for the reason updateNode gives.
-// [Write]
+// operation itself failed. No zu text: a deleted object cannot be put
+// back at the id it had, so unlike updateNode there is no object the
+// dataset already holds that this could address twice. See the package
+// comment. [Write]
 func deleteNode() *workload.Query {
 	return &workload.Query{
 		ID:    "lb-delete-node",
