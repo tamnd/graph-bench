@@ -55,6 +55,13 @@ type Sample struct {
 	Latency time.Duration
 	Rows    int
 	Err     error
+
+	// Start is how far into the measured window this sample began, so a
+	// run can be cut into windows afterwards and asked whether it ended
+	// the way it started (drift.go). Zero for a sample that came from
+	// somewhere with no run clock, which is every analytics repetition
+	// and every cold-cache probe.
+	Start time.Duration
 }
 
 // Stat is the per-class latency distribution over the steady-state window.
@@ -98,6 +105,12 @@ type Result struct {
 	Traversal map[string]Traversal  // per-kernel traversal rate, keyed by query id (teps.go)
 	Latency   LatencyModel          // which clock the latencies were measured against
 	Condition Condition             // the full stamp (spec 08 §7)
+
+	// Drift is the per-class comparison between the run's first window and
+	// its worst one (drift.go). Nil for a run too short to hold two whole
+	// windows, which is most of them: it is the sustained runs that this
+	// is for.
+	Drift map[engine.Class]Drift
 }
 
 // SweepPoint is one concurrency point of the latency-under-load curve: the

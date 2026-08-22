@@ -232,3 +232,58 @@ func TestCheckBudgetsReadsTheRunsConcurrency(t *testing.T) {
 		t.Errorf("a sweep is gated at its busiest point, got %v", v)
 	}
 }
+
+// TestCheckDriftFailsADegradingRun proves the gate reads what a sustained run
+// did over its own length, not just the one p99 it published. A run that is
+// fast for its first window and slower for the rest reports a fine p99 over
+// the whole thing, because the fast part is averaged in.
+func TestCheckDriftFailsADegradingRun(t *testing.T) {
+	res := func(first, worst time.Duration) measure.Result {
+		return measure.Result{
+			Drift: map[engine.Class]measure.Drift{
+				engine.Write: {
+					Window:  10 * time.Second,
+					Windows: 6,
+					First:   measure.Stat{P99: first},
+					Worst:   measure.Stat{P99: worst},
+					WorstAt: 50 * time.Second,
+					Trend:   float64(worst) / float64(first),
+				},
+			},
+		}
+	}
+	if v := CheckDrift(res(10*time.Millisecond, 10*time.Millisecond), Options{}); len(v) != 0 {
+		t.Errorf("a run that ended the way it started is not drift, got %v", v)
+	}
+	if v := CheckDrift(res(10*time.Millisecond, 11*time.Millisecond), Options{}); len(v) != 0 {
+		t.Errorf("a tenth is inside the allowed factor, got %v", v)
+	}
+	v := CheckDrift(res(10*time.Millisecond, 40*time.Millisecond), Options{})
+	if len(v) != 1 || v[0].Kind != "drift" || v[0].Where != string(engine.Write) {
+		t.Fatalf("four times slower by the end must fail, got %v", v)
+	}
+	if !strings.Contains(v[0].Detail, "4.00x") || !strings.Contains(v[0].Detail, "10ms in the first") {
+		t.Errorf("the detail does not carry the trend and what it started at: %q", v[0].Detail)
+	}
+	// A caller who says what they will accept gets that instead.
+	if v := CheckDrift(res(10*time.Millisecond, 40*time.Millisecond), Options{DriftFactor: 5.0}); len(v) != 0 {
+		t.Errorf("4x is inside a 5x factor, got %v", v)
+	}
+}
+
+// TestCheckDriftIgnoresAnalyticsAndShortRuns proves the two cases that decide
+// nothing: analytics is tracked and never gated, and a run too short to hold
+// two windows records no drift to read.
+func TestCheckDriftIgnoresAnalyticsAndShortRuns(t *testing.T) {
+	analytics := measure.Result{
+		Drift: map[engine.Class]measure.Drift{
+			engine.Analytical: {Window: 10 * time.Second, Windows: 6, Trend: 9.0},
+		},
+	}
+	if v := CheckDrift(analytics, Options{}); len(v) != 0 {
+		t.Errorf("analytics is tracked, never gated, got %v", v)
+	}
+	if v := CheckDrift(measure.Result{}, Options{}); len(v) != 0 {
+		t.Errorf("a run with no drift recorded decides nothing, got %v", v)
+	}
+}

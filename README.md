@@ -380,6 +380,12 @@ A regression gate compares two numbers and calls the difference a change in the 
 
 Passing that measured floor to `gate --noise-floor` moves differences inside it out of the violations list and into a separate section, reported and not ruled on. They are not excused: a finding inside the floor is the harness saying this run cannot answer the question, which is a different thing from saying the answer is no. Budget checks and verification integrity are unaffected, because neither is a comparison between two runs. The default is zero, no floor, which is the right setting for the controlled machine the full matrix runs on.
 
+### A number the run can hold
+
+A p99 over a whole run is one number for a thing that changed while it was being measured. A run that is fast for ten seconds and slower for the next fifty publishes a p99 somewhere in between, and nothing in the report says the engine was never doing it. A store that fragments, a cache that fills, a compaction backlog that builds all look like that.
+
+So a run long enough to hold two ten-second windows is cut into them and reported per class as the p99 of the first window, of the worst, and the trend from the run's first half to its second. The trend is the one to gate on, and `gate --drift-factor` fails a run whose second half is more than a tenth slower than its first. The worst window is for reading, not for gating: it is the largest of however many windows the run held, so it beats the first window even on a run that never changed, and a check built on it would get stricter every time the run got longer. The full per-window series is in the result JSON, which is what separates a run that drifted from a run that wobbled.
+
 ### Two builds, one machine
 
 `gate --baseline` compares today's run against a run recorded on some other day. That holds while the machine is the same machine, and stops holding the moment something else is compiling on it: every query drifts by the same tenth at once and the gate reads the load as a regression in code that never touched the read path. `ab` is the answer to that. It takes two lineages, one per build, and compares them query by query, so whatever the machine was doing lands on both sides of the comparison instead of on one.

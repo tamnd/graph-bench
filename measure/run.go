@@ -66,6 +66,12 @@ type Options struct {
 	Count    int
 	Duration time.Duration
 
+	// DriftWindow is how long a window is when the run is cut up to ask
+	// whether it ended the way it started (drift.go). Zero means
+	// DefaultDriftWindow, and a run shorter than two windows reports no
+	// drift at all.
+	DriftWindow time.Duration
+
 	// Warmup is the window at the start of the run where ops are fired but
 	// not recorded. Steady-state measurement begins when an op's Offset
 	// reaches or exceeds Warmup. Warmup samples are discarded (spec 08 §3).
@@ -227,6 +233,10 @@ func Run(ctx context.Context, sess engine.Session, ops []Op, opt Options) Result
 	var wg sync.WaitGroup
 
 	start := time.Now()
+	// begun is where a sample's Start is measured from: the open of the
+	// measured window, after warmup, so the first window of a drift check
+	// is the first window of steady state and not of the warmup.
+	begun := start.Add(opt.Warmup)
 	for i, op := range ops {
 		arrival := start.Add(op.Offset)
 		if wait := time.Until(arrival); wait > 0 {
@@ -290,7 +300,7 @@ func Run(ctx context.Context, sess engine.Session, ops []Op, opt Options) Result
 				p.acquire()
 			}
 			defer p.release()
-			s := Sample{Class: o.Op.Class, QueryID: o.Op.QueryID}
+			s := Sample{Class: o.Op.Class, QueryID: o.Op.QueryID, Start: time.Since(begun)}
 			qctx, cancel := context.WithTimeout(ctx, opt.timeout())
 			defer cancel()
 
@@ -345,7 +355,12 @@ drain:
 	if serviceTime {
 		model = ServiceTimeLatency
 	}
-	return Result{Stats: byClass, ByQuery: byQuery, Latency: model}
+	return Result{
+		Stats:   byClass,
+		ByQuery: byQuery,
+		Latency: model,
+		Drift:   DriftOf(steady, opt.DriftWindow),
+	}
 }
 
 // untimed runs one bracket statement and discards its rows. It borrows the

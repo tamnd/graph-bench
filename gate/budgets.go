@@ -119,6 +119,15 @@ const (
 	// stored baseline before the gate fails (--regression-factor).
 	DefaultRegressionFactor = 1.10
 
+	// DefaultDriftFactor is how much a sustained run's p99 may grow from
+	// its first window to its worst before the run counts as degrading.
+	// It is the regression factor turned on the run itself: a build that
+	// may not be a tenth slower than yesterday's build may not be a tenth
+	// slower than it was a minute ago either, and a store that fragments
+	// or a backlog that builds shows up here while the run's single p99
+	// averages the good opening in and hides it.
+	DefaultDriftFactor = 1.10
+
 	// DefaultFlatnessFactor bounds the small-vs-large dataset latency
 	// ratio for PointRead: an index that works is flat.
 	DefaultFlatnessFactor = 2.0
