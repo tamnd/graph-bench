@@ -201,6 +201,64 @@ func TestPoolsAndReferences(t *testing.T) {
 	}
 }
 
+// TestPoolsExcludeScratchObject proves no read pool draws the object
+// lb-update-node writes to. lb-get-node checks an object's properties
+// against the generator's values and the update changes two of them, so
+// a pool holding it would turn a write that worked into a verification
+// failure, and one failure discards the measurement for the whole
+// workload.
+func TestPoolsExcludeScratchObject(t *testing.T) {
+	pools, err := BuildPools(genLB(t))
+	if err != nil {
+		t.Fatalf("BuildPools: %v", err)
+	}
+	for key, pool := range pools {
+		if len(pool) == 0 {
+			t.Errorf("pool %q is empty", key)
+		}
+		for i, p := range pool {
+			for _, field := range []string{"id", "src", "dst"} {
+				v, ok := p[field]
+				if !ok {
+					continue
+				}
+				// A numeric id comes through IDValue as an int64.
+				if n, ok := v.(int64); ok && n == ScratchObj {
+					t.Errorf("pool %q[%d] draws the scratch object as %s", key, i, field)
+				}
+			}
+		}
+	}
+}
+
+// TestUpdateNodeIsStationary proves the operation puts the object back
+// the way it found it: both payloads are the generator's own width, so
+// a repetition writes a row the size the one before it wrote, and the
+// bracket restores the seed rather than leaving the last update in
+// place.
+func TestUpdateNodeIsStationary(t *testing.T) {
+	if len(scratchSeed) != 64 || len(scratchUpdated) != 64 {
+		t.Errorf("payload widths = %d/%d, want the generator's 64 for both",
+			len(scratchSeed), len(scratchUpdated))
+	}
+	q := updateNode()
+	for _, d := range []engine.Dialect{engine.Cypher, engine.ZuQL} {
+		if q.Before(d) == "" {
+			t.Errorf("%s: no setup", d)
+		}
+		if q.Before(d) != q.After(d) {
+			t.Errorf("%s: teardown does not restore what the setup set:\n%s\nvs\n%s",
+				d, q.Before(d), q.After(d))
+		}
+		if q.Check(d) == "" {
+			t.Errorf("%s: no post-condition", d)
+		}
+		if q.Texts[d] == "" {
+			t.Errorf("%s: no text", d)
+		}
+	}
+}
+
 func TestBind(t *testing.T) {
 	ds := genLB(t)
 	w, err := workload.Lookup("linkbench")
