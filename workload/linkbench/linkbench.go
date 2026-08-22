@@ -99,8 +99,8 @@ func getNode() *workload.Query {
 		Texts: map[engine.Dialect]string{
 			engine.Cypher: `MATCH (o:Obj {id: $id})
 RETURN o.otype AS otype, o.version AS version, o.time AS time, o.payload AS payload`,
-			engine.ZuQL: `MATCH (o:Obj {id: $id})
-RETURN o.otype AS otype, o.version AS version, o.time AS time, o.payload AS payload`,
+			engine.ZuQL: "MATCH (o:Obj {id: $id})\n" +
+				"RETURN o.otype AS otype, o.version AS version, o.time AS `time`, o.payload AS payload",
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
@@ -181,11 +181,11 @@ WHERE l.ltype = $ltype
 RETURN b.id AS dst, l.time AS time, l.payload AS payload
 ORDER BY time DESC, payload ASC
 LIMIT 10000`,
-			engine.ZuQL: `MATCH (:Obj {id: $src})-[l:LINK]->(b:Obj)
-WHERE l.ltype = $ltype
-RETURN b.id AS dst, l.time AS time, l.payload AS payload
-ORDER BY time DESC, payload ASC
-LIMIT 10000`,
+			engine.ZuQL: "MATCH (:Obj {id: $src})-[l:LINK]->(b:Obj)\n" +
+				"WHERE l.ltype = $ltype\n" +
+				"RETURN b.id AS dst, l.time AS `time`, l.payload AS payload\n" +
+				"ORDER BY `time` DESC, payload ASC\n" +
+				"LIMIT 10000",
 		},
 		Reference: &workload.RefStrategy{
 			Compute: func(ds engine.Dataset, p workload.Params) (*workload.Answer, error) {
