@@ -62,10 +62,15 @@ type Sample struct {
 // so P99 describes completed queries only. Throughput is queries/second over
 // the measured window; zero for a single-client latency-only run or when
 // the window duration was not supplied.
+//
+// FirstError is what the first failing sample said. A count alone tells you
+// a query did not run and nothing about why, and the samples are gone by the
+// time the matrix is rendered, so the message is kept here.
 type Stat struct {
 	Class         engine.Class
 	Count         int
 	Errors        int
+	FirstError    string
 	Min           time.Duration
 	P50           time.Duration
 	P90           time.Duration
@@ -255,6 +260,9 @@ func summarizeGroup(class engine.Class, group []Sample, window time.Duration) St
 	for _, s := range group {
 		if s.Err != nil {
 			stat.Errors++
+			if stat.FirstError == "" {
+				stat.FirstError = s.Err.Error()
+			}
 			continue
 		}
 		lat = append(lat, s.Latency)
