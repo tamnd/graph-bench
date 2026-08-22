@@ -27,11 +27,14 @@
 //
 // # What the C API does and does not cover
 //
-// zu.h covers open, prepare, bind, execute, and columnar result reads. It
-// has no bulk-load entry point, so Load still shells out to `zu copy
-// --reorder degree` and then opens the file it produced. Load is not in a
-// timed region, so the plane claim stays honest: every measured operation
-// here is a C call.
+// zu.h covers open, prepare, bind, execute, and columnar result reads.
+// Load still shells out to `zu copy --reorder degree` and then opens the
+// file it produced. That is no longer because there is nowhere else to
+// go: zu_loader_create, zu_loader_table, zu_loader_edges and
+// zu_loader_finish have been in the ABI since 0.11, and this adapter
+// should be calling them. Load is not in a timed region, so the plane
+// claim stays honest either way, every measured operation here is a C
+// call. tamnd/zu#375.
 //
 // # Threading
 //
