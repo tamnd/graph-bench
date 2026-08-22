@@ -2,6 +2,8 @@ package measure
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -281,7 +283,7 @@ func TestConditionFields(t *testing.T) {
 // strings and reports a plausible core count — the spec 08 §7 rule that
 // hardware is collected, not hand-entered, and never silently blank.
 func TestCollectHardware(t *testing.T) {
-	h := CollectHardware()
+	h := CollectHardware(DurableSyncNanos(t.TempDir()))
 	if h.CPU == "" {
 		t.Error("CPU is empty; want a model string or \"unknown\"")
 	}
@@ -293,5 +295,34 @@ func TestCollectHardware(t *testing.T) {
 	}
 	if h.RAMBytes == 0 {
 		t.Errorf("RAMBytes = 0, want positive or -1 (explicit unknown)")
+	}
+	if h.SyncNanos <= 0 {
+		t.Errorf("SyncNanos = %d, want the probed cost of a durable sync", h.SyncNanos)
+	}
+	// A run that owned no store carries the unprobed value through
+	// rather than reporting the cost of a volume its engine never
+	// wrote to.
+	if unprobed := CollectHardware(-1).SyncNanos; unprobed != -1 {
+		t.Errorf("SyncNanos with no store dir = %d, want -1", unprobed)
+	}
+}
+
+// TestDurableSyncNanos proves the probe measures a real flush and leaves
+// nothing behind: a store size taken after it has to be the store's.
+func TestDurableSyncNanos(t *testing.T) {
+	dir := t.TempDir()
+	got := DurableSyncNanos(dir)
+	if got <= 0 {
+		t.Fatalf("DurableSyncNanos = %d, want a positive duration", got)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("probe left %d files behind: %v", len(entries), entries)
+	}
+	if DurableSyncNanos(filepath.Join(dir, "nowhere")) != -1 {
+		t.Error("a directory that is not there should read -1, not a duration")
 	}
 }

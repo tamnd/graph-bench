@@ -1,6 +1,7 @@
 package gate
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -117,5 +118,67 @@ func TestCheckVerificationAndExitCodes(t *testing.T) {
 	}
 	if !(Decision{}).Pass() || (Decision{}).ExitCode() != ExitPass {
 		t.Error("empty decision must pass with exit 0")
+	}
+}
+
+// TestWriteCeilingFollowsTheDisk covers the rule that a durable commit
+// costs a sync and no engine goes below one, so the write ceiling is the
+// table's number or the disk's, whichever is higher.
+func TestWriteCeilingFollowsTheDisk(t *testing.T) {
+	table, _ := BudgetFor(engine.Write, engine.InProc)
+
+	// A disk fast enough for the table leaves it alone, and so does a
+	// run that never probed one.
+	for _, sync := range []int64{-1, 0, int64(100 * time.Microsecond)} {
+		if got, raised := WriteCeiling(engine.InProc, sync); got != table || raised {
+			t.Errorf("WriteCeiling(%d) = %v, %v; want the table's %v", sync, got, raised, table)
+		}
+	}
+	// A disk whose sync is slower than the whole budget sets it instead.
+	slow := int64(3 * time.Millisecond)
+	got, raised := WriteCeiling(engine.InProc, slow)
+	if want := DurableWriteSyncs * 3 * time.Millisecond; got != want || !raised {
+		t.Errorf("WriteCeiling(slow) = %v, %v; want %v, true", got, raised, want)
+	}
+	if _, ok := BudgetFor(engine.Write, engine.Native); ok {
+		t.Error("the native plane has no write budget to calibrate")
+	}
+	if got, raised := WriteCeiling(engine.Native, slow); got != 0 || raised {
+		t.Errorf("WriteCeiling on an unbudgeted plane = %v, %v; want 0, false", got, raised)
+	}
+}
+
+// TestCheckBudgetsCalibratesWrites proves the gate reads that ceiling: the
+// same 5ms write p99 fails on a fast disk and passes on a disk where one
+// durable sync costs 3ms, because on that disk 5ms is two syncs of work
+// and there is no faster correct answer.
+func TestCheckBudgetsCalibratesWrites(t *testing.T) {
+	res := func(sync int64) measure.Result {
+		return measure.Result{
+			Stats: map[engine.Class]measure.Stat{
+				engine.Write: stat(engine.Write, 4*time.Millisecond, 5*time.Millisecond),
+			},
+			Condition: measure.Condition{
+				Hardware: measure.Hardware{SyncNanos: sync},
+			},
+		}
+	}
+	v := CheckBudgets(res(int64(100*time.Microsecond)), engine.InProc, "snb-update")
+	if len(v) != 1 || v[0].Where != string(engine.Write) {
+		t.Fatalf("on a fast disk 5ms must fail the 2ms ceiling, got %v", v)
+	}
+	if v := CheckBudgets(res(int64(3*time.Millisecond)), engine.InProc, "snb-update"); len(v) != 0 {
+		t.Errorf("on a 3ms sync 5ms is inside two syncs, got %v", v)
+	}
+	// And a run that still fails the raised ceiling says whose ceiling
+	// it was, so a reader is never left thinking the spec table held.
+	slow := res(int64(3 * time.Millisecond))
+	slow.Stats[engine.Write] = stat(engine.Write, 4*time.Millisecond, 30*time.Millisecond)
+	v = CheckBudgets(slow, engine.InProc, "snb-update")
+	if len(v) != 1 {
+		t.Fatalf("30ms must fail even the raised ceiling, got %v", v)
+	}
+	if !strings.Contains(v[0].Detail, "durable syncs") {
+		t.Errorf("the detail does not say the disk set the ceiling: %q", v[0].Detail)
 	}
 }

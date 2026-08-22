@@ -117,6 +117,14 @@ type Hardware struct {
 	RAMBytes int64  // physical memory, -1 when unreadable
 	OS       string // runtime.GOOS
 	Arch     string // runtime.GOARCH
+	// SyncNanos is what one durable sync costs on the volume the run's
+	// store sat on: write a page, flush it through the drive's own
+	// cache, and take the median of that (sync.go). A committing engine
+	// pays at least one of these per transaction and no amount of
+	// engine work goes below it, so a write budget that does not know
+	// this number is a budget about the disk. -1 when the run owned no
+	// store to probe, which is every served engine.
+	SyncNanos int64
 }
 
 // Condition is the stamp every published number carries (spec 08 §7). It is
@@ -166,13 +174,20 @@ type Condition struct {
 // effort, the platform (sysctl on darwin, /proc on linux). It never returns
 // empty strings: an unreadable CPU model reads "unknown", unreadable RAM
 // reads -1, so an incomplete stamp is visible instead of silently blank.
-func CollectHardware() Hardware {
+//
+// syncNanos is what DurableSyncNanos read on the volume the run's store
+// sat on, taken before the run rather than here: a drive still draining
+// a write workload answers with its queue and not with its latency, and
+// the number this stamp is for is the floor. Pass -1 for a run that
+// owned no store, which is every served engine.
+func CollectHardware(syncNanos int64) Hardware {
 	h := Hardware{
-		CPU:      cpuModel(),
-		Cores:    runtime.NumCPU(),
-		RAMBytes: ramBytes(),
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
+		CPU:       cpuModel(),
+		Cores:     runtime.NumCPU(),
+		RAMBytes:  ramBytes(),
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
+		SyncNanos: syncNanos,
 	}
 	if h.CPU == "" {
 		h.CPU = "unknown"
