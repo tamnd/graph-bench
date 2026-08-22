@@ -14,12 +14,26 @@ import (
 // resolution is not this package's job in v0.3.0). weights gives each query
 // id's firing weight; ids with a non-positive weight or no ops are skipped.
 //
-// Each of the totalCount slots is drawn from the weighted distribution using
-// a PRNG seeded with seed, so the mix converges to the weights while the
-// interleaving stays irregular the way real traffic is — and two builds with
-// the same inputs and seed produce the identical schedule (the seed goes into
-// the Condition stamp as MixSeed, spec 08 §7). A query's ops are consumed in
-// order, cycling when the draw count exceeds the ops provided.
+// The slots are handed out to match the weights exactly and then shuffled
+// with a PRNG seeded with seed, so the mix is the composition the workload
+// asked for while the interleaving stays irregular the way real traffic is,
+// and two builds with the same inputs and seed produce the identical
+// schedule (the seed goes into the Condition stamp as MixSeed, spec 08 §7).
+// A query's ops are consumed in order, cycling when its share exceeds the
+// ops provided.
+//
+// Allocating rather than drawing is what makes a rare query measurable.
+// SNB's mix gives its two delete shapes a tenth of a percent each, and with
+// independent draws eight thousand queries left snb-id2 with no samples at
+// all while snb-id3 got some: the report read n/a, which looks like a broken
+// query and was a coin flip. It also means two runs measure the same mix
+// instead of two samples of it, so a difference between them is the engine.
+//
+// A query whose share does not buy a whole slot still gets none, and a run
+// that short genuinely did not measure it. The difference is that now that
+// is a fact about the count and the weight rather than about the seed: a
+// tenth of a percent needs a thousand slots, and gets exactly one of them
+// every time.
 //
 // rate and warmup are forwarded to BuildSchedule after interleaving; the
 // returned slice has Offset already set.
@@ -44,19 +58,42 @@ func BuildMixedSchedule(perQuery map[string][]engine.Op, weights map[string]floa
 		totalWeight += weights[id]
 	}
 
+	// Largest remainder: every query gets the whole slots its share buys,
+	// then the slots left over go to the queries whose shares were cut by
+	// the most.
+	share := make([]int, len(ids))
+	rem := make([]float64, len(ids))
+	handed := 0
+	for i, id := range ids {
+		exact := weights[id] / totalWeight * float64(totalCount)
+		share[i] = int(exact)
+		rem[i] = exact - float64(share[i])
+		handed += share[i]
+	}
+	order := make([]int, len(ids))
+	for i := range order {
+		order[i] = i
+	}
+	// Ties go to the id that sorts first, so the schedule does not depend
+	// on how the sort happened to break them.
+	sort.SliceStable(order, func(a, b int) bool { return rem[order[a]] > rem[order[b]] })
+	for n := 0; handed < totalCount; n++ {
+		share[order[n%len(order)]]++
+		handed++
+	}
+
+	slots := make([]int, 0, totalCount)
+	for i, count := range share {
+		for range count {
+			slots = append(slots, i)
+		}
+	}
 	rng := rand.New(rand.NewSource(seed))
+	rng.Shuffle(len(slots), func(a, b int) { slots[a], slots[b] = slots[b], slots[a] })
+
 	cursor := make([]int, len(ids)) // per-query op cursor
 	ops := make([]Op, 0, totalCount)
-	for n := 0; n < totalCount; n++ {
-		r := rng.Float64() * totalWeight
-		pick := len(ids) - 1
-		for i, id := range ids {
-			r -= weights[id]
-			if r < 0 {
-				pick = i
-				break
-			}
-		}
+	for _, pick := range slots {
 		pool := perQuery[ids[pick]]
 		ops = append(ops, Op{Op: pool[cursor[pick]%len(pool)]})
 		cursor[pick]++

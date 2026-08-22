@@ -95,9 +95,66 @@ func TestBuildMixedScheduleWeightedRatio(t *testing.T) {
 			lightCount++
 		}
 	}
-	ratio := float64(heavyCount) / float64(lightCount)
-	if ratio < 2.4 || ratio > 3.7 {
-		t.Errorf("heavy:light ratio=%.2f (%d:%d), want ~3.0", ratio, heavyCount, lightCount)
+	// The slots are allocated, not drawn, so 3:1 over 400 slots is 300
+	// and 100 and not something near them.
+	if heavyCount != 300 || lightCount != 100 {
+		t.Errorf("heavy:light = %d:%d, want exactly 300:100", heavyCount, lightCount)
+	}
+}
+
+// TestBuildMixedScheduleRareQueryGetsSlots covers the case the allocation is
+// for: a query so rare that independent draws could leave it out of a run
+// entirely. SNB's mix gives its delete shapes a tenth of a percent and a real
+// eight thousand query run came back with n/a for one of them, which reads as
+// a broken query and was a coin flip.
+func TestBuildMixedScheduleRareQueryGetsSlots(t *testing.T) {
+	ids := []string{"common", "rare"}
+	weights := map[string]float64{"common": 99.9, "rare": 0.1}
+	count := func(ops []Op, id string) int {
+		n := 0
+		for _, op := range ops {
+			if op.Op.QueryID == id {
+				n++
+			}
+		}
+		return n
+	}
+	// A thousand slots buys the rare query exactly one, every time,
+	// whatever the seed.
+	for _, seed := range []int64{1, 2, 3, 99, 12345} {
+		ops := BuildMixedSchedule(mixedPools(ids, 2), weights, seed, 1000, 0, 0)
+		if got := count(ops, "rare"); got != 1 {
+			t.Errorf("seed %d gave the rare query %d slots of 1000, want 1", seed, got)
+		}
+	}
+	// Below that it gets none, and the run really did not measure it.
+	// What changed is that this is now a fact about the count and the
+	// weight instead of a fact about the seed.
+	for _, seed := range []int64{1, 2, 3, 99, 12345} {
+		ops := BuildMixedSchedule(mixedPools(ids, 2), weights, seed, 300, 0, 0)
+		if got := count(ops, "rare"); got != 0 {
+			t.Errorf("seed %d gave the rare query %d slots of 300, want 0", seed, got)
+		}
+	}
+}
+
+// TestBuildMixedScheduleShuffles proves the allocation does not come out
+// grouped: a schedule that ran every write after every read would measure a
+// mix that no client produces.
+func TestBuildMixedScheduleShuffles(t *testing.T) {
+	ids := []string{"a", "b"}
+	weights := map[string]float64{"a": 1.0, "b": 1.0}
+	ops := BuildMixedSchedule(mixedPools(ids, 4), weights, 42, 200, 0, 0)
+	runs := 1
+	for i := 1; i < len(ops); i++ {
+		if ops[i].Op.QueryID != ops[i-1].Op.QueryID {
+			runs++
+		}
+	}
+	// Two grouped blocks would be 2. An even interleave would be 200.
+	// Anything a shuffle produces sits well inside that.
+	if runs < 50 {
+		t.Errorf("the schedule has %d runs of one id over 200 slots, it is grouped not shuffled", runs)
 	}
 }
 
