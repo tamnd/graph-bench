@@ -39,7 +39,7 @@
 // # When the database opens
 //
 // At Load, not at Start, and that is deliberate. zu2 sizes its hash
-// index and its vertex table once, at open, and neither grows; past the
+// index and its node table once, at open, and neither grows; past the
 // load factor the index degrades into long probes. A host embedding zu2
 // knows roughly how many records it is about to hold and says so, so
 // this adapter does the same and takes the count off the dataset
@@ -174,15 +174,15 @@ func (s *Session) Begin(ctx context.Context, mode engine.AccessMode) (engine.Tx,
 }
 
 // Load reads the dataset's node and rel CSVs and builds the graph
-// through add_vertex and add_edge, which is the only load path the
-// engine has. Vertices come first so an edge is two lookups in a map
+// through add_node and add_edge, which is the only load path the
+// engine has. Nodes come first so an edge is two lookups in a map
 // that is already complete, and the map is dropped when the load is
 // done: at query time a seed is resolved through the engine's own index,
 // which is the probe the rival engines are also paying.
 //
-// One node label only. Vertices are keyed by the id column and two
+// One node label only. Nodes are keyed by the id column and two
 // labels can carry the same id, so a dataset with two node tables would
-// quietly merge two vertices into one. A dataset with more than one
+// quietly merge two nodes into one. A dataset with more than one
 // relationship type is refused for the matching reason: there is one
 // adjacency here and no edge types in it, so a query that asks about one
 // type would be answered from all of them.
@@ -215,7 +215,7 @@ func (s *Session) Load(ctx context.Context, ds engine.Dataset) (stats engine.Loa
 	}
 	schema := ds.Schema()
 	if len(schema.Nodes) != 1 {
-		return engine.LoadStats{}, fmt.Errorf("zu2: a vertex is keyed by its id alone, so this adapter takes one node label and the dataset has %d", len(schema.Nodes))
+		return engine.LoadStats{}, fmt.Errorf("zu2: a node is keyed by its id alone, so this adapter takes one node label and the dataset has %d", len(schema.Nodes))
 	}
 	if len(schema.Rels) != 1 {
 		return engine.LoadStats{}, fmt.Errorf("zu2: there is one adjacency here and no edge types in it, so this adapter takes one relationship type and the dataset has %d", len(schema.Rels))
@@ -291,7 +291,7 @@ func (s *Session) Load(ctx context.Context, ds engine.Dataset) (stats engine.Loa
 	}, nil
 }
 
-// loadNodes adds one vertex per row of a node CSV, keyed by the id
+// loadNodes adds one node per row of a node CSV, keyed by the id
 // column, and records the dense id it came back with.
 func (c *conn) loadNodes(ctx context.Context, path string, ids map[string]C.uint32_t) error {
 	return eachRow(ctx, path, []string{":ID"}, func(cols []string) error {
@@ -301,8 +301,8 @@ func (c *conn) loadNodes(ctx context.Context, path string, ids map[string]C.uint
 		}
 		kp, kn := bytesOf(key)
 		var id C.uint32_t
-		if st := C.zu2_add_vertex(c.s, kp, kn, &id); st != C.ZU2_OK {
-			return sessErr(c.s, st, fmt.Sprintf("add vertex %q", key))
+		if st := C.zu2_add_node(c.s, kp, kn, &id); st != C.ZU2_OK {
+			return sessErr(c.s, st, fmt.Sprintf("add node %q", key))
 		}
 		ids[key] = id
 		return nil
@@ -388,7 +388,7 @@ func eachRow(ctx context.Context, path string, suffixes []string, fn func([]stri
 }
 
 // sizeOf reads the dataset's recorded node count, which is what the
-// index and the vertex table are sized from. A dataset with no manifest
+// index and the node table are sized from. A dataset with no manifest
 // says nothing and the engine's defaults stand.
 func sizeOf(ds engine.Dataset) int64 {
 	m := ds.Manifest()
@@ -435,14 +435,14 @@ func (s *Session) plan(text string) (directive, error) {
 func (c *conn) run(d directive, params map[string]engine.Value) (engine.Result, error) {
 	switch d.verb {
 	case verbCount:
-		return one(d.column, int64(C.zu2_vertices(c.db))), nil
+		return one(d.column, int64(C.zu2_nodes(c.db))), nil
 
 	case verbPoint:
 		k, err := key(params, d.seed)
 		if err != nil {
 			return nil, err
 		}
-		_, found, err := c.vertexOf(k)
+		_, found, err := c.nodeOf(k)
 		if err != nil {
 			return nil, err
 		}
@@ -533,17 +533,17 @@ func (c *conn) run(d directive, params map[string]engine.Value) (engine.Result, 
 	return nil, fmt.Errorf("zu2: %q has no implementation, which is a bug in this adapter", d.verb)
 }
 
-// seedOf resolves a directive's seed parameter to a dense vertex id.
+// seedOf resolves a directive's seed parameter to a dense node id.
 func (c *conn) seedOf(params map[string]engine.Value, d directive) (C.uint32_t, bool, error) {
 	k, err := key(params, d.seed)
 	if err != nil {
 		return 0, false, err
 	}
-	return c.vertexOf(k)
+	return c.nodeOf(k)
 }
 
 // pair resolves a directive's two endpoint parameters, reporting
-// whether both are vertices this graph has.
+// whether both are nodes this graph has.
 func (c *conn) pair(params map[string]engine.Value, d directive) (C.uint32_t, C.uint32_t, bool, error) {
 	srcKey, err := key(params, d.src)
 	if err != nil {
@@ -553,32 +553,32 @@ func (c *conn) pair(params map[string]engine.Value, d directive) (C.uint32_t, C.
 	if err != nil {
 		return 0, 0, false, err
 	}
-	src, ok, err := c.vertexOf(srcKey)
+	src, ok, err := c.nodeOf(srcKey)
 	if err != nil || !ok {
 		return 0, 0, false, err
 	}
-	dst, ok, err := c.vertexOf(dstKey)
+	dst, ok, err := c.nodeOf(dstKey)
 	if err != nil || !ok {
 		return 0, 0, false, err
 	}
 	return src, dst, true, nil
 }
 
-// vertexOf is the index probe: one hash lookup of the key a vertex was
+// nodeOf is the index probe: one hash lookup of the key a node was
 // loaded under. Every seeded directive pays exactly one, at the seed,
 // which is the same probe a Cypher engine pays to bind `{id: $seed}`.
-func (c *conn) vertexOf(k string) (C.uint32_t, bool, error) {
+func (c *conn) nodeOf(k string) (C.uint32_t, bool, error) {
 	kp, kn := bytesOf(k)
 	var id C.uint32_t
 	var found C.int
-	if st := C.zu2_vertex_of(c.s, kp, kn, &id, &found); st != C.ZU2_OK {
-		return 0, false, sessErr(c.s, st, fmt.Sprintf("vertex_of %q", k))
+	if st := C.zu2_node_of(c.s, kp, kn, &id, &found); st != C.ZU2_OK {
+		return 0, false, sessErr(c.s, st, fmt.Sprintf("node_of %q", k))
 	}
 	return id, found != 0, nil
 }
 
 // zeroOr is the answer for a seed that is not in the graph: an
-// expansion from a vertex that is not there reaches nothing, and nothing
+// expansion from a node that is not there reaches nothing, and nothing
 // counts zero. It is not an empty result, because the reference for a
 // count query is a row holding zero.
 func zeroOr(d directive, err error) (engine.Result, error) {
@@ -598,7 +598,7 @@ func slice(p *C.uint32_t, n C.size_t) []uint32 {
 	return unsafe.Slice((*uint32)(unsafe.Pointer(p)), int(n))
 }
 
-// contains reports whether a neighbour list holds a vertex. The list is
+// contains reports whether a neighbour list holds a node. The list is
 // ascending, which the header promises, so this is a descent rather than
 // a scan and a hub's neighbourhood does not turn an adjacency probe into
 // a phase.
@@ -647,7 +647,7 @@ func (s *Session) Close(ctx context.Context) error {
 
 // openLocked opens the database, sized for a dataset of n nodes. Caller
 // holds s.mu. A second call is a no-op: the file is open and neither the
-// index nor the vertex table can be resized under it.
+// index nor the node table can be resized under it.
 func (s *Session) openLocked(n int64) error {
 	if s.db != nil {
 		return nil
@@ -658,13 +658,13 @@ func (s *Session) openLocked(n int64) error {
 	}
 	opt.durability = s.durability
 	if n > 0 {
-		// One record per vertex and eight slots to a bucket, sized so
+		// One record per node and eight slots to a bucket, sized so
 		// the index sits at half its slots when the load is done.
 		// Undersizing it is what turns a probe into a walk down a
 		// chain, and the count is on the manifest, so there is no
 		// reason to find out the hard way.
 		opt.index_buckets = C.uint64_t(powerOfTwoAtLeast(uint64(n)/4 + 1))
-		opt.max_vertices = C.uint64_t(uint64(n) + uint64(n)/8 + 1024)
+		opt.max_nodes = C.uint64_t(uint64(n) + uint64(n)/8 + 1024)
 	}
 	cpath := C.CString(s.dbPath)
 	defer C.free(unsafe.Pointer(cpath))
