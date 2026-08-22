@@ -100,6 +100,24 @@ type TEPSDoc struct {
 	HarmonicMean float64   `json:"harmonic_mean"`
 }
 
+// DriftDoc is what one class's latency did over the length of a sustained
+// run: the p99 of the first window, of the worst, and the trend from the
+// run's first half to its second. A run whose Trend is 1.0 ended the way it
+// started; one that degrades as its store grows says so here and nowhere
+// else, because a single p99 over the whole run averages the good part in.
+type DriftDoc struct {
+	Window   time.Duration `json:"window"`
+	Windows  int           `json:"windows"`
+	FirstP99 time.Duration `json:"first_p99"`
+	WorstP99 time.Duration `json:"worst_p99"`
+	WorstAt  time.Duration `json:"worst_at"`
+	Trend    float64       `json:"trend"`
+
+	// P99s is every window's p99 in order, so a reader can tell a run
+	// that drifted from one that wobbled without rerunning it.
+	P99s []time.Duration `json:"p99s,omitempty"`
+}
+
 // Document is the schema-3 result document: one JSON file per (workload,
 // engine, run). Condition and Resource embed the measure types directly —
 // they are the contract of record and marshal with their Go field names.
@@ -120,6 +138,7 @@ type Document struct {
 	Load         LoadDoc              `json:"load"`
 	Resource     measure.Resource     `json:"resource"`
 	TEPS         map[string]TEPSDoc   `json:"teps,omitempty"`
+	Drift        map[string]DriftDoc  `json:"drift,omitempty"`
 }
 
 // FromMeasure builds a schema-3 Document from a measured result plus the
@@ -147,6 +166,7 @@ func FromMeasure(workload, family, fidelity string, res measure.Result, ver []Ve
 			Method:      res.Load.Method,
 		},
 		Resource: res.Resource,
+		Drift:    driftDocs(res.Drift),
 	}
 	for _, p := range res.Sweep {
 		doc.Sweep = append(doc.Sweep, SweepPoint{
@@ -195,6 +215,26 @@ func tepsDocs(in map[string]measure.Traversal) map[string]TEPSDoc {
 			Edges:        t.Edges,
 			PerRep:       t.PerRep,
 			HarmonicMean: t.HarmonicMean,
+		}
+	}
+	return out
+}
+
+// driftDocs converts the per-class drift to its JSON-stable image.
+func driftDocs(in map[engine.Class]measure.Drift) map[string]DriftDoc {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]DriftDoc, len(in))
+	for class, d := range in {
+		out[string(class)] = DriftDoc{
+			Window:   d.Window,
+			Windows:  d.Windows,
+			FirstP99: d.First.P99,
+			WorstP99: d.Worst.P99,
+			WorstAt:  d.WorstAt,
+			Trend:    d.Trend,
+			P99s:     d.P99s,
 		}
 	}
 	return out

@@ -2,6 +2,7 @@ package gate
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -96,6 +97,10 @@ type Options struct {
 	// Measure it, do not guess it: `graph-bench noise` runs one engine
 	// repeatedly and prints the floor its numbers support.
 	NoiseFloor float64
+
+	// DriftFactor is the allowed p99 growth from a sustained run's first
+	// window to its worst; 0 means DefaultDriftFactor.
+	DriftFactor float64
 }
 
 func (o Options) regression() float64 {
@@ -110,6 +115,13 @@ func (o Options) flatness() float64 {
 		return DefaultFlatnessFactor
 	}
 	return o.FlatnessFactor
+}
+
+func (o Options) drift() float64 {
+	if o.DriftFactor <= 0 {
+		return DefaultDriftFactor
+	}
+	return o.DriftFactor
 }
 
 // CheckBudgets evaluates the absolute class budgets (§6) against one
@@ -191,6 +203,36 @@ func peakConcurrency(points []int) int {
 		}
 	}
 	return peak
+}
+
+// CheckDrift fails a sustained run whose p99 grew from its first half to its
+// second by more than the allowed factor. It is the check that a run's
+// headline number is a number it can hold: a p99 taken over a whole run
+// averages a fast opening in with a slow ending and reports something the
+// engine was never doing.
+//
+// It gates the trend rather than the worst window, because the worst of
+// eight windows beats the first one even on a run that never changed and a
+// check built on that gets stricter every time the run gets longer.
+//
+// Analytical is exempt for the same reason it has no budget, and a run with
+// no drift recorded is a run too short to have any, which decides nothing.
+func CheckDrift(res measure.Result, opts Options) []Violation {
+	factor := opts.drift()
+	var out []Violation
+	for class, d := range res.Drift {
+		if class == engine.Analytical || d.Trend <= factor {
+			continue
+		}
+		out = append(out, Violation{
+			Kind:  "drift",
+			Where: string(class),
+			Detail: fmt.Sprintf("p99 rose %.2fx from the run's first half to its second (> %.2fx allowed) over %d %v windows, %v in the first and %v in the worst",
+				d.Trend, factor, d.Windows, d.Window, d.First.P99, d.Worst.P99),
+		})
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Where < out[b].Where })
+	return out
 }
 
 // CheckRegression compares per-query p50/p99 against a stored baseline.

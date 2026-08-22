@@ -883,3 +883,92 @@ func Count(v int64) string {
 		return strconv.FormatInt(v, 10)
 	}
 }
+
+// HasDrift reports whether any document ran long enough to say what its
+// latency did over time.
+func HasDrift(docs []*Document) bool {
+	for _, d := range docs {
+		if len(d.Drift) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// RenderDrift prints the sustained section: per class, the p99 of the run's
+// worst window against the p99 of its first, and the ratio. It prints
+// nothing when no document ran long enough to hold two windows, which is
+// every short run.
+//
+// This is the only place a run says whether its headline number is one it
+// can hold. A p99 over a whole run averages a fast opening in with a slow
+// ending and reports something the engine was never doing, and a store that
+// fragments or a backlog that builds looks fine there and shows up here.
+func RenderDrift(w io.Writer, docs []*Document) {
+	ordered := NewMatrix(docs).Docs
+	classes := map[string]bool{}
+	var window time.Duration
+	for _, d := range ordered {
+		for class, dr := range d.Drift {
+			classes[class] = true
+			window = dr.Window
+		}
+	}
+	if len(classes) == 0 {
+		return
+	}
+	names := make([]string, 0, len(classes))
+	for class := range classes {
+		names = append(names, class)
+	}
+	sort.Strings(names)
+
+	header := []string{fmt.Sprintf("Sustained p99 (%v windows)", window)}
+	for _, d := range ordered {
+		header = append(header, colLabel(d))
+	}
+	rows := [][]string{header}
+	for _, class := range names {
+		cells := []string{class}
+		for _, d := range ordered {
+			dr, ok := d.Drift[class]
+			if !ok || dr.FirstP99 <= 0 {
+				cells = append(cells, "n/a")
+				continue
+			}
+			cells = append(cells, fmt.Sprintf("%s first, %s worst, %.2fx trend",
+				formatLatency(dr.FirstP99, "ms"), formatLatency(dr.WorstP99, "ms"), dr.Trend))
+		}
+		rows = append(rows, cells)
+	}
+
+	widths := make([]int, len(header))
+	for _, r := range rows {
+		for i, c := range r {
+			widths[i] = max(widths[i], utf8.RuneCountInString(c))
+		}
+	}
+	for ri, r := range rows {
+		for i, c := range r {
+			if i > 0 {
+				fmt.Fprint(w, "  ")
+			}
+			fmt.Fprint(w, pad(c, widths[i]))
+		}
+		fmt.Fprintln(w)
+		if ri == 0 {
+			for i, cw := range widths {
+				if i > 0 {
+					fmt.Fprint(w, "  ")
+				}
+				fmt.Fprint(w, strings.Repeat("-", cw))
+			}
+			fmt.Fprintln(w)
+		}
+	}
+	fmt.Fprintln(w, "note: the p99 of the run's first window, of its worst, and the trend from")
+	fmt.Fprintln(w, "      the run's first half to its second. 1.00x is a run that ended the way")
+	fmt.Fprintln(w, "      it started, and the trend is the one to read: the worst of eight")
+	fmt.Fprintln(w, "      windows beats the first on a run that never changed. only whole")
+	fmt.Fprintln(w, "      windows count, so the tail past the last one is not compared.")
+}

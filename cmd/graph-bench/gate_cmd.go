@@ -24,13 +24,14 @@ func (e gateErr) ExitCode() int { return int(e) }
 // (F-contract).
 func newGateCmd() *cobra.Command {
 	var (
-		inFile     string
-		dir        string
-		baseline   string
-		gateEngine string
-		wlFilter   string
-		regression float64
-		noiseFloor float64
+		inFile      string
+		dir         string
+		baseline    string
+		gateEngine  string
+		wlFilter    string
+		regression  float64
+		noiseFloor  float64
+		driftFactor float64
 	)
 	cmd := &cobra.Command{
 		Use:   "gate",
@@ -81,6 +82,7 @@ func newGateCmd() *cobra.Command {
 				res := docToResult(doc)
 				plane := engine.Plane(doc.Condition.Plane)
 				d.Violations = append(d.Violations, gate.CheckBudgets(res, plane, doc.Workload)...)
+				d.Violations = append(d.Violations, gate.CheckDrift(res, gate.Options{DriftFactor: driftFactor})...)
 				if base, ok := baseDocs[doc.Workload]; ok {
 					d.Violations = append(d.Violations,
 						gate.CheckRegression(res, docToResult(base), gate.Options{
@@ -122,6 +124,8 @@ func newGateCmd() *cobra.Command {
 	f.StringVar(&wlFilter, "workload", "", "gate only this workload")
 	f.Float64Var(&regression, "regression-factor", gate.DefaultRegressionFactor,
 		"allowed p50/p99 growth over the baseline")
+	f.Float64Var(&driftFactor, "drift-factor", gate.DefaultDriftFactor,
+		"allowed p99 growth from a sustained run's first window to its worst")
 	f.Float64Var(&noiseFloor, "noise-floor", 0,
 		"this machine's measured run-to-run spread; differences within it are reported, not failed (see 'graph-bench noise')")
 	return cmd
@@ -153,11 +157,23 @@ func docToResult(doc *report.Document) measure.Result {
 	for id, cs := range doc.Queries {
 		byQuery[id] = classStatToStat("", cs)
 	}
+	drift := map[engine.Class]measure.Drift{}
+	for name, d := range doc.Drift {
+		drift[engine.Class(name)] = measure.Drift{
+			Window:  d.Window,
+			Windows: d.Windows,
+			First:   measure.Stat{P99: d.FirstP99},
+			Worst:   measure.Stat{P99: d.WorstP99},
+			WorstAt: d.WorstAt,
+			Trend:   d.Trend,
+		}
+	}
 	return measure.Result{
 		Stats:     stats,
 		ByQuery:   byQuery,
 		Latency:   doc.Condition.LatencyModel,
 		Condition: doc.Condition,
+		Drift:     drift,
 	}
 }
 

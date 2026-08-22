@@ -213,6 +213,10 @@ func newRunCmd() *cobra.Command {
 				report.RenderTraversal(cmd.OutOrStdout(), docs)
 				fmt.Fprintln(cmd.OutOrStdout())
 			}
+			if report.HasDrift(docs) {
+				report.RenderDrift(cmd.OutOrStdout(), docs)
+				fmt.Fprintln(cmd.OutOrStdout())
+			}
 			report.RenderResources(cmd.OutOrStdout(), docs)
 			if failed > 0 {
 				return fmt.Errorf("run: %d engine(s) failed", failed)
