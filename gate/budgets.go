@@ -54,29 +54,43 @@ func BudgetFor(class engine.Class, plane engine.Plane) (time.Duration, bool) {
 	return 0, false
 }
 
-// DurableWriteSyncs is how many durable syncs a write p99 may cost on a
-// machine whose sync is slower than the table's write ceiling. One for
-// the statement's own commit, one for a group commit already in flight
-// that it has to wait out, and a factor of two because this gates a p99
-// and the tail of a group is where the waiting lands.
+// DurableWriteSyncs is how many durable syncs a write p99 may cost at a
+// given client concurrency. Durable commits through one log are
+// serialized, so a write that arrives when the log is busy waits: at
+// worst behind the group already in flight, then behind each of the other
+// clients that got there first, then its own. That is concurrency plus
+// one, and group commit is what pulls the real number below it by letting
+// several of those writers share a single flush.
 //
-// Both engines measured on this laptop sit at about three of them, 11.96
-// ms and 12.01 ms p99 against a sync of about 3 ms, at eight concurrent
-// writers. Two engines with nothing in common landing on the same number
-// is the sign that the number is the drive's and not theirs.
-const DurableWriteSyncs = 4
+// The shape is what the measurements show. At one client a write costs
+// exactly one sync, 3.04 ms p50 against a 3.04 ms probe, so the write path
+// above the disk costs nothing measurable. At eight clients on a mixed
+// workload it is 6.16 ms p50, two syncs, because writers arrive too
+// sparsely to fill a group and each one waits out the flush it landed
+// behind. Pure writes at eight clients go the other way, 4 ms p50, one
+// sync, because eight writers arriving at once are one group.
+//
+// Never below two: even alone, a write can arrive one instruction after a
+// flush began.
+func DurableWriteSyncs(concurrency int) int {
+	if concurrency < 1 {
+		return 2
+	}
+	return concurrency + 1
+}
 
-// WriteCeiling is the write budget for a plane on the machine the run was
-// measured on. A durable commit costs one sync of that machine's storage
-// and nothing an engine does goes below it, so on a disk where a sync is
-// slower than the table says a write may be, the table is a statement
-// about the disk and every correct engine fails it. The ceiling is then
-// what the disk allows instead. syncNanos of -1, the unprobed run, or a
-// disk fast enough for the table leaves the table's number alone.
+// WriteCeiling is the write budget for a plane on the machine and at the
+// concurrency the run was measured at. A durable commit costs one sync of
+// that machine's storage and nothing an engine does goes below it, so on a
+// disk where a sync is slower than the table says a write may be, the
+// table is a statement about the disk and every correct engine fails it.
+// The ceiling is then what the disk allows instead. syncNanos of -1, the
+// unprobed run, or a disk fast enough for the table leaves the table's
+// number alone.
 //
 // raised reports which of the two the caller got, so a pass under a
 // ceiling the disk set reads as one.
-func WriteCeiling(plane engine.Plane, syncNanos int64) (ceiling time.Duration, raised bool) {
+func WriteCeiling(plane engine.Plane, syncNanos int64, concurrency int) (ceiling time.Duration, raised bool) {
 	table, ok := BudgetFor(engine.Write, plane)
 	if !ok {
 		return 0, false
@@ -84,7 +98,7 @@ func WriteCeiling(plane engine.Plane, syncNanos int64) (ceiling time.Duration, r
 	if syncNanos <= 0 {
 		return table, false
 	}
-	floor := time.Duration(syncNanos) * DurableWriteSyncs
+	floor := time.Duration(syncNanos) * time.Duration(DurableWriteSyncs(concurrency))
 	if floor <= table {
 		return table, false
 	}
