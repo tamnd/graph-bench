@@ -128,11 +128,12 @@ func CheckBudgets(res measure.Result, plane engine.Plane, workloadName string) [
 		// statement about the drive.
 		source := "spec 08 §6"
 		if class == engine.Write {
+			conc := peakConcurrency(res.Condition.Concurrency)
 			raised := false
-			ceiling, raised = WriteCeiling(plane, res.Condition.Hardware.SyncNanos)
+			ceiling, raised = WriteCeiling(plane, res.Condition.Hardware.SyncNanos, conc)
 			if raised {
-				source = fmt.Sprintf("%d durable syncs of %v, over the spec 08 §6 ceiling",
-					DurableWriteSyncs, time.Duration(res.Condition.Hardware.SyncNanos))
+				source = fmt.Sprintf("%d durable syncs of %v at a concurrency of %d, over the spec 08 §6 ceiling",
+					DurableWriteSyncs(conc), time.Duration(res.Condition.Hardware.SyncNanos), conc)
 			}
 		}
 		if stat.P99 > ceiling {
@@ -175,6 +176,21 @@ func CheckBudgets(res measure.Result, plane engine.Plane, workloadName string) [
 		}
 	}
 	return out
+}
+
+// peakConcurrency is the busiest client count the run reached. A sweep
+// reports every point it ran and the numbers it publishes are the whole
+// sweep's, so the ceiling has to allow for the point where the log was
+// most contended. An empty list is a run that did not say, which reads as
+// one client.
+func peakConcurrency(points []int) int {
+	peak := 1
+	for _, c := range points {
+		if c > peak {
+			peak = c
+		}
+	}
+	return peak
 }
 
 // CheckRegression compares per-query p50/p99 against a stored baseline.

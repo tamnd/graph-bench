@@ -130,20 +130,33 @@ func TestWriteCeilingFollowsTheDisk(t *testing.T) {
 	// A disk fast enough for the table leaves it alone, and so does a
 	// run that never probed one.
 	for _, sync := range []int64{-1, 0, int64(100 * time.Microsecond)} {
-		if got, raised := WriteCeiling(engine.InProc, sync); got != table || raised {
+		if got, raised := WriteCeiling(engine.InProc, sync, 8); got != table || raised {
 			t.Errorf("WriteCeiling(%d) = %v, %v; want the table's %v", sync, got, raised, table)
 		}
 	}
 	// A disk whose sync is slower than the whole budget sets it instead.
 	slow := int64(3 * time.Millisecond)
-	got, raised := WriteCeiling(engine.InProc, slow)
-	if want := DurableWriteSyncs * 3 * time.Millisecond; got != want || !raised {
+	got, raised := WriteCeiling(engine.InProc, slow, 8)
+	if want := time.Duration(DurableWriteSyncs(8)) * 3 * time.Millisecond; got != want || !raised {
 		t.Errorf("WriteCeiling(slow) = %v, %v; want %v, true", got, raised, want)
+	}
+	// More clients on one log means more waiting, so a busier run gets
+	// a higher ceiling than a quieter one on the same disk.
+	quiet, _ := WriteCeiling(engine.InProc, slow, 1)
+	if quiet >= got {
+		t.Errorf("ceiling at 1 client (%v) is not below the ceiling at 8 (%v)", quiet, got)
+	}
+	// A run that did not say how many clients it had is read as one,
+	// and one client still allows two syncs: a write can arrive one
+	// instruction after a flush began.
+	if DurableWriteSyncs(0) != 2 || DurableWriteSyncs(1) != 2 {
+		t.Errorf("an unstated or single client allows %d and %d syncs, want 2",
+			DurableWriteSyncs(0), DurableWriteSyncs(1))
 	}
 	if _, ok := BudgetFor(engine.Write, engine.Native); ok {
 		t.Error("the native plane has no write budget to calibrate")
 	}
-	if got, raised := WriteCeiling(engine.Native, slow); got != 0 || raised {
+	if got, raised := WriteCeiling(engine.Native, slow, 8); got != 0 || raised {
 		t.Errorf("WriteCeiling on an unbudgeted plane = %v, %v; want 0, false", got, raised)
 	}
 }
@@ -159,7 +172,8 @@ func TestCheckBudgetsCalibratesWrites(t *testing.T) {
 				engine.Write: stat(engine.Write, 4*time.Millisecond, 5*time.Millisecond),
 			},
 			Condition: measure.Condition{
-				Hardware: measure.Hardware{SyncNanos: sync},
+				Concurrency: []int{1},
+				Hardware:    measure.Hardware{SyncNanos: sync},
 			},
 		}
 	}
@@ -180,5 +194,41 @@ func TestCheckBudgetsCalibratesWrites(t *testing.T) {
 	}
 	if !strings.Contains(v[0].Detail, "durable syncs") {
 		t.Errorf("the detail does not say the disk set the ceiling: %q", v[0].Detail)
+	}
+}
+
+// TestCheckBudgetsReadsTheRunsConcurrency proves the ceiling moves with the
+// number of clients the run had. Durable commits through one log are
+// serialized, so eight clients means a write can be waiting on seven others
+// before its own flush, and the same latency that is a queue at eight
+// clients is the engine being slow at one.
+func TestCheckBudgetsReadsTheRunsConcurrency(t *testing.T) {
+	res := func(clients int) measure.Result {
+		return measure.Result{
+			Stats: map[engine.Class]measure.Stat{
+				engine.Write: stat(engine.Write, 6*time.Millisecond, 18*time.Millisecond),
+			},
+			Condition: measure.Condition{
+				Concurrency: []int{clients},
+				Hardware:    measure.Hardware{SyncNanos: int64(3 * time.Millisecond)},
+			},
+		}
+	}
+	if v := CheckBudgets(res(8), engine.InProc, "snb-mix"); len(v) != 0 {
+		t.Errorf("18ms at eight clients is inside the queue they make, got %v", v)
+	}
+	v := CheckBudgets(res(1), engine.InProc, "snb-mix")
+	if len(v) != 1 {
+		t.Fatalf("18ms alone on the log is six syncs of work with nothing to wait for, got %v", v)
+	}
+	if !strings.Contains(v[0].Detail, "at a concurrency of 1") {
+		t.Errorf("the detail does not name the concurrency it allowed for: %q", v[0].Detail)
+	}
+	// A sweep publishes one set of numbers for every point it ran, so
+	// the ceiling has to allow for the busiest of them.
+	sweep := res(1)
+	sweep.Condition.Concurrency = []int{1, 4, 8}
+	if v := CheckBudgets(sweep, engine.InProc, "snb-mix"); len(v) != 0 {
+		t.Errorf("a sweep is gated at its busiest point, got %v", v)
 	}
 }
