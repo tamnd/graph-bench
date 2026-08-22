@@ -48,6 +48,7 @@ type ClassStat struct {
 	Class         string        `json:"class,omitempty"`
 	Count         int           `json:"count"`
 	Errors        int           `json:"errors"`
+	FirstError    string        `json:"first_error,omitempty"`
 	Min           time.Duration `json:"min"`
 	P50           time.Duration `json:"p50"`
 	P90           time.Duration `json:"p90"`
@@ -205,6 +206,7 @@ func statDoc(s measure.Stat) ClassStat {
 		Class:         string(s.Class),
 		Count:         s.Count,
 		Errors:        s.Errors,
+		FirstError:    s.FirstError,
 		Min:           s.Min,
 		P50:           s.P50,
 		P90:           s.P90,

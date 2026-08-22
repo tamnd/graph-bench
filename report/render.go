@@ -11,6 +11,8 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -270,6 +272,46 @@ func writeFooters(w io.Writer, docs []*Document, prefix, suffix string) {
 	}
 }
 
+// writeErrors prints what the failing queries said, one line per engine and
+// query that recorded an error. An ERR cell says a query did not run and
+// nothing about why, and the samples are gone by the time the matrix is
+// rendered, so the message the first failure carried is printed here.
+//
+// Partial failures get a line too. A query that fails one time in fifty still
+// has percentiles, and they read as a healthy row, so the count and the
+// message are the only sign anything went wrong.
+func writeErrors(w io.Writer, docs []*Document, prefix, suffix string) {
+	var lines []string
+	for _, d := range docs {
+		for _, qid := range slices.Sorted(maps.Keys(d.Queries)) {
+			s := d.Queries[qid]
+			if s.Errors == 0 || s.FirstError == "" {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("%s%s %s: %d/%d failed, first: %s%s\n",
+				prefix, colLabel(d), qid, s.Errors, s.Count, oneLine(s.FirstError), suffix))
+		}
+	}
+	if len(lines) == 0 {
+		return
+	}
+	for _, l := range lines {
+		fmt.Fprint(w, l)
+	}
+	fmt.Fprintln(w)
+}
+
+// oneLine flattens an engine's error text so a multi-line diagnostic does not
+// break the column the rest of the footer keeps, and caps it so a driver that
+// dumps a whole query into its message does not bury the table.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 160 {
+		s = s[:157] + "..."
+	}
+	return s
+}
+
 // orUnknown replaces an empty stamp field with "unknown" so an incomplete
 // condition is visible instead of silently blank.
 func orUnknown(s string) string {
@@ -346,6 +388,7 @@ func RenderTable(w io.Writer, m *Matrix) {
 	}
 
 	fmt.Fprintln(w)
+	writeErrors(w, m.Docs, "", "")
 	writeFooters(w, m.Docs, "", "")
 }
 
