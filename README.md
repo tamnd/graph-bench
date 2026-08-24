@@ -2,17 +2,17 @@
 
 A fair, reproducible benchmark for graph databases.
 
-`graph-bench` measures graph databases against each other on the same data, the same queries, and the same machine, and reports the result without spin. It treats [`gr`](https://github.com/tamnd/gr) as one target among many, held to the same rules as every other engine, so the numbers `gr` publishes about itself come from a harness that has no reason to flatter it.
+`graph-bench` measures graph databases against each other on the same data, the same queries, and the same machine, and reports the result without spin. It treats [`zu`](https://github.com/tamnd/zu) as one target among many, held to the same rules as every other engine, so the numbers `zu` publishes about itself come from a harness that has no reason to flatter it.
 
-It is the benchmarking sibling of `gr` the way `githome-bench` is to `githome`: a standalone harness that drives the system under test from the outside, defines its objectives as code, and turns raw measurements into pass/fail gates that run in CI.
+It is the benchmarking sibling of `zu` the way `githome-bench` is to `githome`: a standalone harness that drives the system under test from the outside, defines its objectives as code, and turns raw measurements into pass/fail gates that run in CI.
 
 ## What it is
 
 - **A cross-engine harness.** One program loads a dataset into many graph databases, runs a workload against each, and collects latency and throughput per query, per engine, per scale. Engines plug in behind a single Target interface, so adding a database is one adapter, not a fork of the harness.
-- **Multi-plane.** It drives engines three ways: in-process for embedded engines with a Go API (`gr` itself), over the Bolt wire protocol with openCypher for the server engines that speak it (Neo4j, Memgraph, FalkorDB, `gr serve`), and over each remaining engine's native protocol or language where Bolt does not reach (DuckPGQ's SQL/PGQ, Apache AGE over Postgres).
+- **Multi-plane.** It drives engines three ways: in-process for embedded engines with a C or Go API (`zu` itself, through cgo over libzu), over the Bolt wire protocol with openCypher for the server engines that speak it (Neo4j, Memgraph, FalkorDB, `zu serve`), and over each remaining engine's native protocol or language where Bolt does not reach (DuckPGQ's SQL/PGQ, Apache AGE over Postgres).
 - **Standards-anchored.** The workloads are drawn from the recognized graph benchmarks (LDBC SNB Interactive and BI, LDBC Graphalytics, LSQB, Graph500), plus a layer of focused micro-benchmarks. The data is generated deterministically so a run reproduces.
 - **Honest by construction.** Every number carries its conditions: engine version, hardware, dataset scale and checksum, cold or warm cache, configuration, and seed. The headline metric is a high percentile, never a mean. Results are validated for correctness before they are timed.
-- **A regression gate.** A small subset runs in GitHub Actions on every change to catch `gr` slowing down against a stored baseline. The full cross-engine comparison runs on a controlled machine.
+- **A regression gate.** A small subset runs in GitHub Actions on every change to catch `zu` slowing down against a stored baseline. The full cross-engine comparison runs on a controlled machine.
 
 ## What it is not
 
@@ -279,7 +279,7 @@ Disk read and write bytes are per-process kernel counters read from `/proc/self/
 
 A workload only produces numbers for an engine that has text in that engine's dialect chain. There is no silent fallback: if the chain has nothing, the query reports SKIP with a reason, and the reason is in the result file.
 
-This table used to say that no labelled workload ran on zu at all, because the loader took a two column edge list and flattened every label into one table. The labelled load path landed, the dialect texts followed, and what is left is seven queries out of the whole suite.
+This table used to say that no labelled workload ran on zu at all, because the loader took a two column edge list and flattened every label into one table. The labelled load path landed, the dialect texts followed, and what is left is two queries out of the whole suite.
 
 | Workload | zu | reason |
 | --- | --- | --- |
@@ -292,7 +292,7 @@ This table used to say that no labelled workload ran on zu at all, because the l
 | snb-update | runs | all six |
 | fb-read, fb-write | runs | all twelve |
 | snb-bi | 4 of 5 | bi1 buckets by content length with `CASE`, which zuQL does not parse ([tamnd/zu#303](https://github.com/tamnd/zu/issues/303)) |
-| linkbench | 8 of 10 | `lb-update-node` and `lb-delete-node` need a scratch object at a chosen id, and `INSERT` cannot choose one ([tamnd/zu#293](https://github.com/tamnd/zu/issues/293)) |
+| linkbench | 9 of 10 | `lb-delete-node` has to name the object it deletes, and the only name a point lookup has on zu is the primary key, which an `INSERT` cannot choose ([tamnd/zu#293](https://github.com/tamnd/zu/issues/293)) |
 | lsqb | runs | all nine |
 
 Every skip above is a text that was withheld on purpose, not a text that failed. One FAIL discards the measurement for the whole workload, so a query zu answers wrongly is left without a text and the reason is written down next to it rather than in a result file nobody reads.
@@ -416,7 +416,7 @@ done
 What is not yet wired:
 
 - Managed containers -- the Bolt engines only work against a server the caller points them at with `NEO4J_URI` or `MEMGRAPH_URI`. Left to start their own container, both fail to bind a reachable port.
-- Dialect coverage -- zu has text for the micro family only, so the labelled workloads skip. See the coverage table above.
+- Dialect coverage -- every workload but two runs whole on zu. What is left is one `snb-bi` query and one `linkbench` write. See the coverage table above.
 - Neo4j on the in-process plane -- the desktop tables were measured over the subprocess adapter that has since been removed, so they need a rerun before they can sit next to the laptop tables.
 - LDBC SNB SF1 pin -- the URL and checksums in `dataset/ldbc/pins/snb-sf1.json` are placeholders until the first verified dataset run.
 - First published cross-engine result in the lineage. The tables above are a working run on developer machines, not a controlled-machine publication.
