@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,6 +56,13 @@ type ContainerSpec struct {
 	// the run verb hands the adapter a string it can dial rather than
 	// reassembling one from a port.
 	URI string
+
+	// DataDir is the path inside the container where the server keeps its
+	// database files. Container.DataBytes measures it, which is the only
+	// way to size a served engine: its files are in a container this
+	// process cannot walk, which is why every such engine has reported an
+	// unknown footprint. Empty means unknown and DataBytes answers -1.
+	DataDir string
 }
 
 // Container is a running container returned by Start.
@@ -106,6 +114,7 @@ func Neo4j(image string) ContainerSpec {
 			"7687/tcp": "0", // Bolt: free port
 			"7474/tcp": "0", // HTTP UI: free port (not required, helps debugability)
 		},
+		DataDir:      "/data",
 		ReadyTimeout: 90 * time.Second,
 	}
 }
@@ -122,6 +131,7 @@ func Memgraph(image string) ContainerSpec {
 		Ports: map[string]string{
 			"7687/tcp": "0", // Bolt
 		},
+		DataDir:      "/var/lib/memgraph",
 		ReadyTimeout: 60 * time.Second,
 	}
 }
@@ -146,9 +156,13 @@ func Postgres(image string) ContainerSpec {
 			"POSTGRES_PASSWORD": "bench",
 			"POSTGRES_DB":       "bench",
 		},
-		Ports:        map[string]string{"5432/tcp": "0"},
-		Primary:      "5432/tcp",
-		URI:          "postgres://bench:bench@%s/bench?sslmode=disable",
+		Ports:   map[string]string{"5432/tcp": "0"},
+		Primary: "5432/tcp",
+		URI:     "postgres://bench:bench@%s/bench?sslmode=disable",
+		// The parent of PGDATA rather than PGDATA itself, because the
+		// image moved it under a version directory and both layouts sit
+		// below this one.
+		DataDir:      "/var/lib/postgresql",
 		ReadyTimeout: 90 * time.Second,
 	}
 }
@@ -167,6 +181,7 @@ func Mongo(image string) ContainerSpec {
 		Ports:        map[string]string{"27017/tcp": "0"},
 		Primary:      "27017/tcp",
 		URI:          "mongodb://%s",
+		DataDir:      "/data/db",
 		ReadyTimeout: 90 * time.Second,
 	}
 }
@@ -244,6 +259,60 @@ func Start(ctx context.Context, spec ContainerSpec) (*Container, error) {
 	}
 
 	return c, nil
+}
+
+// DataBytes is the size of the server's database directory right now,
+// measured with du inside the container, or -1 when the spec named no data
+// directory or du would not answer. Call it after the load and again after
+// the measured run: the difference is the durable footprint the run added,
+// which for a served engine is otherwise unknowable from out here.
+//
+// The reading is what is on disk at that instant and not what the engine
+// will eventually settle at. A server that checkpoints on its own clock has
+// work in flight at any moment one asks, so a footprint taken while it runs
+// is a lower bound on a write workload and an upper bound on nothing.
+func (c *Container) DataBytes(ctx context.Context) int64 {
+	if c.spec.DataDir == "" {
+		return -1
+	}
+	// Apparent size, so the number means the same thing as the one the
+	// embedded planes report for their own directories by adding up file
+	// sizes. A growth figure is only a difference when both ends were
+	// measured the same way. An image without GNU coreutils has neither
+	// flag, hence the fallback to kilobyte blocks.
+	if n := c.du(ctx, "-sb"); n >= 0 {
+		return n
+	}
+	if n := c.du(ctx, "-sk"); n >= 0 {
+		return n * 1024
+	}
+	return -1
+}
+
+// du runs one du inside the container and returns the count it printed, or
+// -1 when the command failed.
+func (c *Container) du(ctx context.Context, flags string) int64 {
+	out, err := exec.CommandContext(ctx, "docker", "exec", c.ID, "du", flags, c.spec.DataDir).Output()
+	if err != nil {
+		return -1
+	}
+	return parseDU(string(out))
+}
+
+// parseDU reads the count off a du -s line, which is a number, a tab and the
+// path. Anything else is -1, including a negative number, since a directory
+// cannot hold fewer than no bytes and a parse that produces one has read
+// something other than du output.
+func parseDU(out string) int64 {
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return -1
+	}
+	n, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || n < 0 {
+		return -1
+	}
+	return n
 }
 
 // Stop sends a docker stop to the container (run with --rm, so stop also
