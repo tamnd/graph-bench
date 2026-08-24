@@ -103,6 +103,55 @@ func TestContainerSpecReadyTimeout(t *testing.T) {
 	}
 }
 
+// TestParseDU proves the du reader takes the count off a du -s line and
+// answers -1 for anything that is not one, so a footprint the harness could
+// not read stays unknown instead of arriving as a plausible number.
+func TestParseDU(t *testing.T) {
+	cases := []struct {
+		out  string
+		want int64
+	}{
+		{"1234\t/data\n", 1234},
+		{"0\t/data\n", 0},
+		{"8192   /var/lib/memgraph\n", 8192},
+		{"", -1},
+		{"\n", -1},
+		{"du: /data: Permission denied\n", -1},
+		{"-5\t/data\n", -1},
+	}
+	for _, c := range cases {
+		if got := parseDU(c.out); got != c.want {
+			t.Errorf("parseDU(%q) = %d, want %d", c.out, got, c.want)
+		}
+	}
+}
+
+// TestDataBytesWithoutDataDir proves a spec that names no data directory
+// reports an unknown footprint without running docker at all.
+func TestDataBytesWithoutDataDir(t *testing.T) {
+	c := &Container{ID: strings.Repeat("a", 64)}
+	if got := c.DataBytes(context.Background()); got != -1 {
+		t.Errorf("DataBytes = %d, want -1", got)
+	}
+}
+
+// TestSpecsNameTheirDataDir proves every served engine the harness starts
+// knows where its own files live. Without it the engine reports an unknown
+// footprint and the disk column stays empty for the rivals.
+func TestSpecsNameTheirDataDir(t *testing.T) {
+	specs := map[string]ContainerSpec{
+		"neo4j":    Neo4j(""),
+		"memgraph": Memgraph(""),
+		"postgres": Postgres(""),
+		"mongodb":  Mongo(""),
+	}
+	for name, spec := range specs {
+		if !strings.HasPrefix(spec.DataDir, "/") {
+			t.Errorf("%s: DataDir=%q, want an absolute path in the container", name, spec.DataDir)
+		}
+	}
+}
+
 // TestBoltURIFormat proves a BoltURI produced for a given port is well-formed.
 func TestBoltURIFormat(t *testing.T) {
 	c := &Container{ID: strings.Repeat("a", 64), ports: map[string]string{"7687/tcp": "54321"}}

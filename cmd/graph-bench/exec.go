@@ -85,11 +85,25 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 			os.RemoveAll(dbTempDir)
 		}
 	}()
+	// The engine's footprint, read at whatever moment it is called. One
+	// method per plane and the same method at both ends of a run, because
+	// what the growth figure is for is the bytes the measured run made
+	// durable, and a difference between two rulers is not that.
+	storeBytes := func() int64 { return -1 }
+	if dbTempDir != "" {
+		dir := dbTempDir
+		storeBytes = func() int64 { return measure.DirSizeBytes(dir) }
+	}
 	container, err := startContainerIfNeeded(ctx, engName, rc)
 	if err != nil {
 		return nil, err
 	}
 	if container != nil {
+		// A served engine we started ourselves: its files are in the
+		// container, so du runs there. A server the operator supplied
+		// keeps its files somewhere this process was never told about,
+		// and that one stays unknown.
+		storeBytes = func() int64 { return container.DataBytes(context.WithoutCancel(ctx)) }
 		// Each adapter reads its connection string from its own key: the
 		// Bolt ones from "uri", PostgreSQL from "dsn". Both get the same
 		// URL, which keeps the per-engine switch out of here and costs
@@ -124,6 +138,15 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	loadStats, err := sess.Load(ctx, ds)
 	if err != nil {
 		return nil, fmt.Errorf("%s: Load: %w", engName, err)
+	}
+	// The loader's own figure only where the harness cannot measure the
+	// store itself. An adapter answers for whatever it thinks its store is,
+	// which is one file for one engine and a whole directory for another,
+	// and the run has to compare it against a reading taken here after the
+	// workload. Measuring both ends the same way is worth more than each
+	// adapter's idea of its own footprint.
+	if n := storeBytes(); n >= 0 {
+		loadStats.BytesOnDisk = n
 	}
 
 	// Bind curated parameter pools (queries with a PoolKey and no Params).
@@ -178,7 +201,7 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	res.Resource = measure.CaptureResource(usageStart, measure.Snapshot(), measure.Disk{
 		DatasetBytes: measure.DirSizeBytes(ds.Dir()),
 		LoadBytes:    loadStats.BytesOnDisk,
-		StoreBytes:   measure.DirSizeBytes(dbTempDir),
+		StoreBytes:   storeBytes(),
 	})
 
 	doc := report.FromMeasure(wl.Name, wl.Family, wl.Fidelity, res, toVerifications(plan.Reports))
