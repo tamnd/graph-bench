@@ -430,6 +430,15 @@ func Read(path string) (*Document, error) {
 		if err := json.Unmarshal(data, &doc); err != nil {
 			return nil, fmt.Errorf("report: parse schema-%d %s: %w", probe.Schema, path, err)
 		}
+		// A document written before the memory sampler existed carries no
+		// sampled fields, and a missing number decodes as zero, which in
+		// this table reads as an engine that used no memory. A run that
+		// sampled nothing records -1, so a zero count is the older file.
+		if doc.Resource.SampledCount == 0 && doc.Resource.SampledPeakBytes == 0 {
+			doc.Resource.SampledPeakBytes = -1
+			doc.Resource.SampledSteadyBytes = -1
+			doc.Resource.SampledCount = -1
+		}
 		return &doc, nil
 	}
 	return readV1(data, path)

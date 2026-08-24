@@ -605,6 +605,8 @@ type resourceRow struct {
 var resourceRows = []resourceRow{
 	{"peak rss", Bytes, func(r measure.Resource) int64 { return r.MaxRSSBytes }},
 	{"peak rss (children)", Bytes, func(r measure.Resource) int64 { return r.ChildMaxRSSBytes }},
+	{"memory peak (sampled)", Bytes, func(r measure.Resource) int64 { return r.SampledPeakBytes }},
+	{"memory steady (sampled)", Bytes, func(r measure.Resource) int64 { return r.SampledSteadyBytes }},
 	{"heap live", Bytes, func(r measure.Resource) int64 { return r.HeapAllocBytes }},
 	{"heap reserved", Bytes, func(r measure.Resource) int64 { return r.HeapSysBytes }},
 	{"runtime total", Bytes, func(r measure.Resource) int64 { return r.GoSysBytes }},
@@ -724,6 +726,9 @@ var resourceNotes = []string{
 	"      children rows are the engine itself on a subprocess plane, a load helper",
 	"      on an in-process plane, and nothing on a Bolt plane: that server was not",
 	"      forked here, so read the server process or its container to size it.",
+	"      the sampled memory rows are read once a second where the engine is,",
+	"      the container's cgroup for a served engine and the process tree for",
+	"      an embedded one, so they attribute to one engine on any plane.",
 }
 
 // Bytes renders a byte count in the largest unit that keeps it readable,

@@ -90,9 +90,16 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	// what the growth figure is for is the bytes the measured run made
 	// durable, and a difference between two rulers is not that.
 	storeBytes := func() int64 { return -1 }
+	// The engine's memory, likewise read where the engine is: the process
+	// tree for an embedded or subprocess engine, the container's cgroup for
+	// a served one. A served engine appears in no rusage this process can
+	// read, so without this it reports its driver's memory and calls that
+	// the engine.
+	memBytes := func() int64 { return -1 }
 	if dbTempDir != "" {
 		dir := dbTempDir
 		storeBytes = func() int64 { return measure.DirSizeBytes(dir) }
+		memBytes = measure.ProcessTreeBytes
 	}
 	container, err := startContainerIfNeeded(ctx, engName, rc)
 	if err != nil {
@@ -104,6 +111,7 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 		// keeps its files somewhere this process was never told about,
 		// and that one stays unknown.
 		storeBytes = func() int64 { return container.DataBytes(context.WithoutCancel(ctx)) }
+		memBytes = func() int64 { return container.MemoryBytes(context.WithoutCancel(ctx)) }
 		// Each adapter reads its connection string from its own key: the
 		// Bolt ones from "uri", PostgreSQL from "dsn". Both get the same
 		// URL, which keeps the per-engine switch out of here and costs
@@ -113,8 +121,13 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 		defer container.Stop(context.WithoutCancel(ctx))
 	}
 
-	// Start and load.
+	// Start and load. Sampling begins here, before the engine is up, so the
+	// peak covers the load as well as the measured run: the load is often
+	// where an engine reaches highest, and a peak that skipped it would
+	// understate what the engine has to be given.
 	usageStart := measure.Snapshot()
+	memSampler := measure.NewSampler(time.Second, memBytes)
+	defer memSampler.Stop()
 	sess, err := eng.Start(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("%s: Start: %w", engName, err)
@@ -202,7 +215,7 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 		DatasetBytes: measure.DirSizeBytes(ds.Dir()),
 		LoadBytes:    loadStats.BytesOnDisk,
 		StoreBytes:   storeBytes(),
-	})
+	}, memSampler.Stop())
 
 	doc := report.FromMeasure(wl.Name, wl.Family, wl.Fidelity, res, toVerifications(plan.Reports))
 	return doc, nil
