@@ -35,13 +35,16 @@
 // LinkBench's update_node does and something a literal id can express.
 //
 // lb-delete-node has no zu text and SKIPs. The same trick does not work
-// for it: an object that has been deleted cannot be put back at the id
-// it had, so the next repetition would delete nothing and a
-// post-condition that asserts absence would pass without the operation
-// having run. Matching on payload instead would put a scan of the whole
-// object table inside the timed statement, which is not the point
-// operation LinkBench measures. It is 1.0 of the mix's 100, and it is a
-// write, so its absence flatters an engine that skips it.
+// for it, because the timed statement has to name the object it takes
+// away and the setup cannot make one zu will answer to. An id there is
+// the key the loader put in the primary-key index rather than a
+// property: the Obj table declares otype, version, time and payload,
+// so an INSERT naming an id is refused, and one that does not gets
+// whatever offset the store hands out, which no statement written ahead
+// of the run can name. Matching on payload instead would put a scan of
+// the whole object table inside the timed statement, which is not the
+// point operation LinkBench measures. It is 1.0 of the mix's 100, and
+// it is a write, so its absence flatters an engine that skips it.
 //
 // The three association writes address the pairs (0,1), (0,2) and (0,3),
 // which the generator leaves unlinked at every scale. That matters on zu
@@ -363,10 +366,18 @@ SET o.payload = '` + scratchSeed + `', o.version = 0`,
 
 // deleteNode is LinkBench delete_node: it removes the scratch object
 // the setup creates; the teardown is an idempotent sweep in case the
-// operation itself failed. No zu text: a deleted object cannot be put
-// back at the id it had, so unlike updateNode there is no object the
-// dataset already holds that this could address twice. See the package
-// comment. [Write]
+// operation itself failed.
+//
+// No zu text. The timed statement has to name the object it takes away,
+// and on zu the only name a point lookup can use is the key the loader
+// put in the primary-key index. An `id` is that key rather than a
+// property: the Obj table declares otype, version, time and payload and
+// nothing else, so an INSERT that names an id is refused, and one that
+// does not gets whatever offset the store hands out, which no statement
+// written ahead of the run can name. Matching on the payload marker the
+// way lb-add-node's teardown does would work and would put a scan of
+// the whole object table inside the timed statement, which is not the
+// point operation LinkBench measures. See the package comment. [Write]
 func deleteNode() *workload.Query {
 	return &workload.Query{
 		ID:    "lb-delete-node",
