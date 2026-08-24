@@ -283,7 +283,7 @@ func TestConditionFields(t *testing.T) {
 // strings and reports a plausible core count — the spec 08 §7 rule that
 // hardware is collected, not hand-entered, and never silently blank.
 func TestCollectHardware(t *testing.T) {
-	h := CollectHardware(DurableSyncNanos(t.TempDir()))
+	h := CollectHardware(DurableSync(t.TempDir()))
 	if h.CPU == "" {
 		t.Error("CPU is empty; want a model string or \"unknown\"")
 	}
@@ -302,7 +302,7 @@ func TestCollectHardware(t *testing.T) {
 	// A run that owned no store carries the unprobed value through
 	// rather than reporting the cost of a volume its engine never
 	// wrote to.
-	if unprobed := CollectHardware(-1).SyncNanos; unprobed != -1 {
+	if unprobed := CollectHardware(-1, -1, -1).SyncNanos; unprobed != -1 {
 		t.Errorf("SyncNanos with no store dir = %d, want -1", unprobed)
 	}
 }
@@ -324,5 +324,24 @@ func TestDurableSyncNanos(t *testing.T) {
 	}
 	if DurableSyncNanos(filepath.Join(dir, "nowhere")) != -1 {
 		t.Error("a directory that is not there should read -1, not a duration")
+	}
+}
+
+// TestDurableSyncReportsItsBand proves the probe says how much it
+// disagreed with itself. One median is a number, and a commit count
+// divided by it is only worth what the band around it is worth.
+func TestDurableSyncReportsItsBand(t *testing.T) {
+	nanos, low, high := DurableSync(t.TempDir())
+	if nanos <= 0 || low <= 0 || high <= 0 {
+		t.Fatalf("DurableSync = %d, %d, %d, want three positive durations", nanos, low, high)
+	}
+	if low > high {
+		t.Errorf("band is %d to %d, which is backwards", low, high)
+	}
+	if nanos < low || nanos > high {
+		t.Errorf("median %d sits outside its own band %d to %d", nanos, low, high)
+	}
+	if _, low, high := DurableSync(filepath.Join(t.TempDir(), "nowhere")); low != -1 || high != -1 {
+		t.Error("an unprobeable directory should read -1 on the band too")
 	}
 }

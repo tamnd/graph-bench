@@ -105,6 +105,64 @@ func TestCompareRivalKeepsOneUnitPerMachine(t *testing.T) {
 	}
 }
 
+// TestCheckRivalDeclinesACeilingInsideTheProbesBand proves a commit
+// count is only ruled on where the volume said the same thing twice.
+// Six medians of fifteen flushes on one M4 came back between 3.01 and
+// 3.97 ms, and a 7.86 ms commit is 2.61 syncs by the first and 1.98 by
+// the last, so the ceiling of two is inside what the host does not
+// know about itself.
+func TestCheckRivalDeclinesACeilingInsideTheProbesBand(t *testing.T) {
+	band := func(low, high int64) measure.Result {
+		r := rivalRun("zu", int64(3024291), 8, map[engine.Class]measure.Stat{
+			engine.Write: stat(engine.Write, 7860*time.Microsecond, 10*time.Millisecond),
+		})
+		r.Condition.Hardware.SyncLowNanos = low
+		r.Condition.Hardware.SyncHighNanos = high
+		return r
+	}
+	theirs := rivalRun("ladybug", int64(3024291), 8, map[engine.Class]measure.Stat{
+		engine.Write: stat(engine.Write, 12*time.Millisecond, 21*time.Millisecond),
+	})
+
+	v := CheckRival(CompareRival(band(3010000, 3970000), theirs), Options{})
+	if len(v) != 1 || v[0].Kind != Indeterminate {
+		t.Fatalf("a ceiling inside the band decides nothing, got %v", v)
+	}
+	if !strings.Contains(v[0].Detail, "2.61") {
+		t.Errorf("the finding does not say how wide the answer is: %q", v[0].Detail)
+	}
+	if (Decision{Violations: v}).Pass() != true {
+		t.Error("an indeterminate finding must not fail the run")
+	}
+
+	// A volume that agreed with itself is a volume that can be asked.
+	// Both ends of a tight band around three milliseconds put this
+	// commit over two syncs, so it fails and says so.
+	v = CheckRival(CompareRival(band(2980000, 3060000), theirs), Options{})
+	if len(v) != 1 || v[0].Kind != "rival" {
+		t.Fatalf("a band entirely over the ceiling is a failure, got %v", v)
+	}
+}
+
+// TestRivalPrintsWhatTheCountIsWorth proves the band reaches the table
+// and not only the gate's findings. A reader quoting one number out of
+// a comment should be able to see how much of a number it is.
+func TestRivalPrintsWhatTheCountIsWorth(t *testing.T) {
+	mine := rivalRun("zu", int64(3024291), 8, map[engine.Class]measure.Stat{
+		engine.Write: stat(engine.Write, 7860*time.Microsecond, 10*time.Millisecond),
+	})
+	mine.Condition.Hardware.SyncLowNanos = 3010000
+	mine.Condition.Hardware.SyncHighNanos = 3970000
+	theirs := rivalRun("ladybug", int64(3024291), 8, map[engine.Class]measure.Stat{
+		engine.Write: stat(engine.Write, 12*time.Millisecond, 21*time.Millisecond),
+	})
+	var b strings.Builder
+	CompareRival(mine, theirs).Write(&b)
+	if !strings.Contains(b.String(), "at the dearest flush this volume gave") {
+		t.Errorf("the table prints a count and not what it is worth:\n%s", b.String())
+	}
+}
+
 // TestCheckRivalGatesReadsOnTheRatio proves a read class under the factor
 // fails and one over it does not, and that the failure names both
 // latencies rather than only the ratio.

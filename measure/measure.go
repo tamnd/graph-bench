@@ -138,6 +138,13 @@ type Hardware struct {
 	// this number is a budget about the disk. -1 when the run owned no
 	// store to probe, which is every served engine.
 	SyncNanos int64
+	// SyncLowNanos and SyncHighNanos are the cheapest and the dearest a
+	// flush was seen to cost while that median was being taken, the
+	// lowest and highest of the probe's batch medians. The same volume
+	// probed a second apart comes back at three milliseconds or at
+	// four, so a commit count divided by the median alone carries a
+	// third of slack it does not admit to. -1 alongside a -1 median.
+	SyncLowNanos, SyncHighNanos int64
 }
 
 // Condition is the stamp every published number carries (spec 08 §7). It is
@@ -188,19 +195,21 @@ type Condition struct {
 // empty strings: an unreadable CPU model reads "unknown", unreadable RAM
 // reads -1, so an incomplete stamp is visible instead of silently blank.
 //
-// syncNanos is what DurableSyncNanos read on the volume the run's store
-// sat on, taken before the run rather than here: a drive still draining
-// a write workload answers with its queue and not with its latency, and
-// the number this stamp is for is the floor. Pass -1 for a run that
-// owned no store, which is every served engine.
-func CollectHardware(syncNanos int64) Hardware {
+// The three sync numbers are what DurableSync read on the volume the
+// run's store sat on, taken before the run rather than here: a drive
+// still draining a write workload answers with its queue and not with
+// its latency, and the number this stamp is for is the floor. Pass -1
+// for a run that owned no store, which is every served engine.
+func CollectHardware(syncNanos, syncLow, syncHigh int64) Hardware {
 	h := Hardware{
-		CPU:       cpuModel(),
-		Cores:     runtime.NumCPU(),
-		RAMBytes:  ramBytes(),
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
-		SyncNanos: syncNanos,
+		CPU:           cpuModel(),
+		Cores:         runtime.NumCPU(),
+		RAMBytes:      ramBytes(),
+		OS:            runtime.GOOS,
+		Arch:          runtime.GOARCH,
+		SyncNanos:     syncNanos,
+		SyncLowNanos:  syncLow,
+		SyncHighNanos: syncHigh,
 	}
 	if h.CPU == "" {
 		h.CPU = "unknown"

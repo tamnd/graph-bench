@@ -96,6 +96,16 @@ type Rival struct {
 	// CompareRival for why it is the cheaper of the two probes.
 	SharedSyncNanos int64
 
+	// SyncLowNanos and SyncHighNanos are the cheapest and the dearest a
+	// flush was seen to cost on the gated engine's volume while its
+	// probe ran, widened to the rival's band when the two runs share a
+	// machine. The sync count in Rows is one number off the median, and
+	// this is how much of a number it is: on a laptop the two ends are
+	// three milliseconds and four, which moves a commit count by a
+	// third. Zero when the run carried no band, which is every document
+	// written before the probe reported one.
+	SyncLowNanos, SyncHighNanos int64
+
 	// NotRun are query ids the rival ran and the gated engine did not.
 	// They are the reason a class rollup can flatter: a shape an engine
 	// cannot express costs it nothing here.
@@ -117,6 +127,17 @@ func isRead(c engine.Class) bool {
 		return true
 	}
 	return false
+}
+
+// commitBand is what a latency costs in syncs at the cheap and the dear
+// end of what a flush was seen to cost, so the low count comes from the
+// dear flush and the high count from the cheap one. Both are zero when
+// the run carried no band.
+func (r Rival) commitBand(latency time.Duration) (low, high float64) {
+	if r.SyncLowNanos <= 0 || r.SyncHighNanos <= 0 {
+		return 0, 0
+	}
+	return CommitSyncs(latency, r.SyncHighNanos), CommitSyncs(latency, r.SyncLowNanos)
 }
 
 // CommitSyncs is a write latency in units of one durable sync on the
@@ -194,9 +215,19 @@ func CompareRival(res, rival measure.Result) Rival {
 	// one taken, because it is the least a flush was seen to cost here and
 	// because the conservative reading is the one owed to the engine the
 	// gate rules on.
-	if sameHost(res.Condition.Hardware, rival.Condition.Hardware) &&
-		r.SyncNanos > 0 && r.RivalSyncNanos > 0 {
+	shared := sameHost(res.Condition.Hardware, rival.Condition.Hardware)
+	if shared && r.SyncNanos > 0 && r.RivalSyncNanos > 0 {
 		r.SharedSyncNanos = min(r.SyncNanos, r.RivalSyncNanos)
+	}
+	// The band is the gated engine's, widened to the rival's when the
+	// two ran on one machine, because then both bands are that machine
+	// saying what a flush costs it and the wider of the two is the more
+	// honest account of what it does not know.
+	r.SyncLowNanos = res.Condition.Hardware.SyncLowNanos
+	r.SyncHighNanos = res.Condition.Hardware.SyncHighNanos
+	if shared && rival.Condition.Hardware.SyncLowNanos > 0 && r.SyncLowNanos > 0 {
+		r.SyncLowNanos = min(r.SyncLowNanos, rival.Condition.Hardware.SyncLowNanos)
+		r.SyncHighNanos = max(r.SyncHighNanos, rival.Condition.Hardware.SyncHighNanos)
 	}
 	for _, class := range classOrder {
 		mine, okMine := res.Stats[class]
@@ -291,7 +322,22 @@ func CheckRival(r Rival, opts Options) []Violation {
 			})
 			continue
 		}
-		if ceiling := opts.commitSyncs(); row.Syncs[0] > ceiling {
+		ceiling := opts.commitSyncs()
+		// The count is one number divided by another that moved while
+		// it was being measured. Where using the cheapest flush the
+		// probe saw and the dearest put the commit on opposite sides of
+		// the ceiling, the ceiling is not something this host was asked:
+		// it would be answering with which end of its own band the
+		// median happened to land on.
+		if lo, hi := r.commitBand(row.P50); lo > 0 && lo <= ceiling && hi > ceiling {
+			out = append(out, Violation{
+				Kind:  Indeterminate,
+				Where: string(engine.Write),
+				Detail: fmt.Sprintf("write p50 %v is between %.2f and %.2f durable syncs, because a flush on this volume cost between %v and %v while the probe ran, and the %.2f ceiling is inside that",
+					round(row.P50), lo, hi,
+					time.Duration(r.SyncLowNanos), time.Duration(r.SyncHighNanos), ceiling),
+			})
+		} else if row.Syncs[0] > ceiling {
 			out = append(out, Violation{
 				Kind:  "rival",
 				Where: string(engine.Write),
@@ -383,6 +429,13 @@ func (r Rival) Write(w io.Writer) {
 			fmt.Fprintf(w, " (one sync %v)", time.Duration(r.SyncNanos))
 		}
 		fmt.Fprintln(w)
+		// And what that count is worth. A band the ceiling sits inside
+		// is the run saying it cannot answer, and it should read that
+		// way in the table and not only in the gate's findings.
+		if lo, hi := r.commitBand(row.P50); lo > 0 {
+			fmt.Fprintf(w, "  the same p50 is %.2f syncs at the dearest flush this volume gave (%v) and %.2f at the cheapest (%v)\n",
+				lo, time.Duration(r.SyncHighNanos), hi, time.Duration(r.SyncLowNanos))
+		}
 	}
 	if len(r.NotRun) > 0 {
 		fmt.Fprintf(w, "%s did not run %d of what %s did: %s. A class rollup missing a shape flatters the engine missing it.\n",
