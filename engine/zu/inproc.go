@@ -240,8 +240,15 @@ func (s *Session) Calibrate(ctx context.Context) time.Duration { return 0 }
 // canonical rel files into one edge list and running
 // `zu copy --reorder degree`, edge properties included, then drops any
 // open session so the next query opens the file that copy just wrote.
-// libzu has no load entry point; when it grows one this moves in-process
-// too. Load is outside every timed region either way.
+//
+// This used to say libzu has no load entry point and that when it grew
+// one this would move in process. It grew one: zu_loader_create,
+// zu_loader_table, zu_loader_edges and zu_loader_finish have been in the
+// ABI since 0.11, which the package comment above already says, so the
+// two halves of this file disagreed with each other. Shelling out is now
+// a thing that has not been done rather than a thing that cannot be.
+// Load is outside every timed region either way, so no published number
+// depends on which way it goes. tamnd/zu#375.
 //
 // A statements-only dataset has no directory to copy, and goes through
 // loadStatements instead: one Exec per setup statement, which is a write
