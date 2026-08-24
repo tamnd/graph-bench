@@ -38,6 +38,17 @@ type Resource struct {
 	ChildMaxRSSBytes int64 // peak resident set of the largest reaped child, which is the
 	// engine itself on a subprocess plane, -1 when unavailable
 
+	// Memory read at the engine on an interval while it ran, rather than
+	// taken from this process's accounting: the container's cgroup for a
+	// served engine, the process tree for an embedded or subprocess one.
+	// This is the only memory figure a Bolt engine has, since its server
+	// was never forked here and appears in no rusage. Both are -1 where
+	// the plane has no probe, which off Linux is every plane but a
+	// container (sample.go says why).
+	SampledPeakBytes   int64 // largest reading taken over the run
+	SampledSteadyBytes int64 // last reading, what the engine settled at
+	SampledCount       int64 // readings taken, 0 when nothing was sampled
+
 	// CPU, as deltas over the run. A latency that is all waiting and a latency
 	// that is all computing are the same duration and a different engine.
 	CPUUserNs      int64 // user time in the harness process
@@ -163,12 +174,18 @@ type Disk struct {
 }
 
 // CaptureResource diffs the end reading against the start and attaches the disk
-// sizes. The counter fields (allocations, GC, CPU, faults, switches, disk
-// bytes) are deltas describing the work between the readings; the heap-in-use
-// fields are the end-of-run absolutes, the live footprint the engine settled
-// at; the peak resident figures are high-water marks since process start.
-func CaptureResource(start, end Usage, disk Disk) Resource {
+// sizes and whatever the memory sampler collected. The counter fields
+// (allocations, GC, CPU, faults, switches, disk bytes) are deltas describing
+// the work between the readings; the heap-in-use fields are the end-of-run
+// absolutes, the live footprint the engine settled at; the peak resident
+// figures are high-water marks since process start; the sampled figures
+// describe the interval the sampler ran over, which is the engine's run.
+func CaptureResource(start, end Usage, disk Disk, mem Samples) Resource {
 	r := Resource{
+		SampledPeakBytes:   mem.PeakBytes,
+		SampledSteadyBytes: mem.SteadyBytes,
+		SampledCount:       int64(mem.Count),
+
 		HeapAllocBytes:  int64(end.mem.heapAlloc),
 		HeapSysBytes:    int64(end.mem.heapSys),
 		GoSysBytes:      int64(end.mem.sys),

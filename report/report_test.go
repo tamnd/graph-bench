@@ -458,6 +458,7 @@ func TestRenderResourcesEmpty(t *testing.T) {
 	blank.Resource = measure.Resource{
 		HeapAllocBytes: -1, HeapSysBytes: -1, GoSysBytes: -1, TotalAllocBytes: -1,
 		NumGC: -1, GCPauseTotalNs: -1, MaxRSSBytes: -1, ChildMaxRSSBytes: -1,
+		SampledPeakBytes: -1, SampledSteadyBytes: -1, SampledCount: -1,
 		CPUUserNs: -1, CPUSysNs: -1, ChildCPUUserNs: -1, ChildCPUSysNs: -1,
 		MinorFaults: -1, MajorFaults: -1,
 		VoluntaryCtxSwitches: -1, InvoluntaryCtxSwitches: -1,

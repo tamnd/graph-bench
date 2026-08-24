@@ -65,7 +65,7 @@ func TestCaptureResource(t *testing.T) {
 		}
 	}
 	end := Snapshot()
-	r := CaptureResource(start, end, Disk{DatasetBytes: 2048, LoadBytes: 4096, StoreBytes: 5120})
+	r := CaptureResource(start, end, Disk{DatasetBytes: 2048, LoadBytes: 4096, StoreBytes: 5120}, NoSamples)
 	if r.DatasetBytes != 2048 {
 		t.Errorf("DatasetBytes = %d, want 2048", r.DatasetBytes)
 	}
@@ -135,7 +135,7 @@ func TestChildUsage(t *testing.T) {
 		t.Skipf("child failed: %v", err)
 	}
 	after := Snapshot()
-	r := CaptureResource(before, after, Disk{DatasetBytes: -1, LoadBytes: -1, StoreBytes: -1})
+	r := CaptureResource(before, after, Disk{DatasetBytes: -1, LoadBytes: -1, StoreBytes: -1}, NoSamples)
 	if r.ChildCPUUserNs+r.ChildCPUSysNs <= 0 {
 		t.Errorf("child cpu = %d user + %d sys, want > 0 after a busy child",
 			r.ChildCPUUserNs, r.ChildCPUSysNs)

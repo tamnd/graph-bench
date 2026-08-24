@@ -315,6 +315,34 @@ func parseDU(out string) int64 {
 	return n
 }
 
+// MemoryBytes is what the container is charged for right now, read out of
+// its own cgroup, or -1 when neither cgroup layout answered.
+//
+// It is the counterpart of a resident set for an engine this process did not
+// fork: getrusage has no field for a server in a container, so the only way
+// to a peak is to ask on an interval while it runs. The figure includes the
+// page cache the container caused, which is the fair comparison against an
+// embedded engine, since a resident set counts the file pages that engine
+// mapped in the same way.
+func (c *Container) MemoryBytes(ctx context.Context) int64 {
+	// cgroup v2 first, which is what a current daemon gives a container,
+	// then the v1 file for an older host.
+	for _, path := range []string{
+		"/sys/fs/cgroup/memory.current",
+		"/sys/fs/cgroup/memory/memory.usage_in_bytes",
+	} {
+		out, err := exec.CommandContext(ctx, "docker", "exec", c.ID, "cat", path).Output()
+		if err != nil {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+		if err == nil && n >= 0 {
+			return n
+		}
+	}
+	return -1
+}
+
 // Stop sends a docker stop to the container (run with --rm, so stop also
 // removes it). Always call this (via defer) after Start.
 func (c *Container) Stop(ctx context.Context) error {
