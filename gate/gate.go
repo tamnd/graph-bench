@@ -101,6 +101,14 @@ type Options struct {
 	// DriftFactor is the allowed p99 growth from a sustained run's first
 	// window to its worst; 0 means DefaultDriftFactor.
 	DriftFactor float64
+
+	// ReadSpeedup is how many times faster than the rival the gated
+	// engine has to answer a read class; 0 means DefaultReadSpeedup.
+	ReadSpeedup float64
+
+	// CommitSyncs is the most durable syncs a commit may cost at the
+	// median; 0 means DefaultCommitSyncs.
+	CommitSyncs float64
 }
 
 func (o Options) regression() float64 {

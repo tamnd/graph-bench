@@ -371,6 +371,7 @@ What works today:
 - `report --file result.json` -- re-renders any saved JSON result in table, Markdown, CSV, or JSON.
 - `compare --files a.json,b.json` -- puts two or more result sets side by side with optional Bolt plane-overhead section.
 - `gate --file result.json --point-read-budget 1ms` -- checks p99 against per-class budgets and exits 2 on violations.
+- `gate --file zu.json --rival ladybug.json` -- holds one engine against another on the same workload, reads as a ratio and writes in durable syncs a commit.
 - `noise --results results --engine zu --workload micro-read --scale smoke` -- reads repeated runs of one unchanged binary and reports how much they disagreed, per query and per metric, widest first. It prints a suggested `--noise-floor` for `gate`.
 - `ab --before before/ --after after/ --engine zu` -- compares two builds of one engine that were run against each other on the same machine, best of N per side, and exits 2 when a query is at or over `--factor`.
 
@@ -385,6 +386,14 @@ Passing that measured floor to `gate --noise-floor` moves differences inside it 
 A p99 over a whole run is one number for a thing that changed while it was being measured. A run that is fast for ten seconds and slower for the next fifty publishes a p99 somewhere in between, and nothing in the report says the engine was never doing it. A store that fragments, a cache that fills, a compaction backlog that builds all look like that.
 
 So a run long enough to hold two ten-second windows is cut into them and reported per class as the p99 of the first window, of the worst, and the trend from the run's first half to its second. The trend is the one to gate on, and `gate --drift-factor` fails a run whose second half is more than a tenth slower than its first. The worst window is for reading, not for gating: it is the largest of however many windows the run held, so it beats the first window even on a run that never changed, and a check built on it would get stricter every time the run got longer. The full per-window series is in the result JSON, which is what separates a run that drifted from a run that wobbled.
+
+### Beating a rival on a mixed workload
+
+A mixed workload's speedup over a rival is two questions wearing one number. On the read side almost all of the latency is the engine's own work, so a ratio there says what the two engines are worth. On the write side a durable commit costs one flush of the drive, no engine goes below it, and two correct engines on one disk converge no matter how good either is. LinkBench is thirty percent durable commits, so a single blended ratio for it is capped by the drive rather than by either engine: even a write path that costs exactly one sync holds the weighted number far under what the read half reaches alone.
+
+`gate --rival other.json` splits it. Every read class is gated as a ratio, `--read-speedup`, default 10. The write class is gated in units of one durable sync on the volume the run wrote to, which is the part of a commit the engine decides: at or under `--commit-syncs`, default 2, at the median, and no more syncs a commit than the rival at either statistic. One sync is the floor, since a durable commit has to flush. Two is what a writer pays arriving an instant after a flush began and waiting that one out before its own. A median above two is commits that are not grouping, which is the engine's to fix and not the drive's.
+
+Two things the split has to get right to be honest. When both runs are on one machine, both sides are divided by one number, the cheaper of the two probes, because otherwise the two columns of one table are in different units and whichever engine drew the dearer probe gets a smaller count for free. And where a flush does not reach a device the write half declines to rule: WSL2 on a virtual disk probes a durable sync at 316ns, which would read a healthy 132us commit as four hundred syncs of work, so a run there is reported as indeterminate rather than failed. The comparison prints whether it passed or not, because a run that beat a rival by a hundred times said something worth reading.
 
 ### Two builds, one machine
 

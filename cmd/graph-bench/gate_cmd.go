@@ -27,11 +27,14 @@ func newGateCmd() *cobra.Command {
 		inFile      string
 		dir         string
 		baseline    string
+		rivalFile   string
 		gateEngine  string
 		wlFilter    string
 		regression  float64
 		noiseFloor  float64
 		driftFactor float64
+		readSpeedup float64
+		commitSyncs float64
 	)
 	cmd := &cobra.Command{
 		Use:   "gate",
@@ -77,7 +80,20 @@ func newGateCmd() *cobra.Command {
 				}
 			}
 
+			// The rival, when there is one: one document from another
+			// engine, keyed by workload the way the baseline is, because a
+			// comparison across two workloads is not a comparison.
+			rivalDocs := map[string]*report.Document{}
+			if rivalFile != "" {
+				doc, err := report.Read(rivalFile)
+				if err != nil {
+					return fmt.Errorf("gate: rival: %w", err)
+				}
+				rivalDocs[doc.Workload] = doc
+			}
+
 			d := gate.Decision{Engine: gateEngine}
+			var rivals []gate.Rival
 			for _, doc := range docs {
 				res := docToResult(doc)
 				plane := engine.Plane(doc.Condition.Plane)
@@ -90,16 +106,32 @@ func newGateCmd() *cobra.Command {
 							NoiseFloor:       noiseFloor,
 						})...)
 				}
+				if riv, ok := rivalDocs[doc.Workload]; ok {
+					cmp := gate.CompareRival(res, docToResult(riv))
+					rivals = append(rivals, cmp)
+					d.Violations = append(d.Violations, gate.CheckRival(cmp, gate.Options{
+						ReadSpeedup: readSpeedup,
+						CommitSyncs: commitSyncs,
+					})...)
+				}
 				d.Violations = append(d.Violations, checkDocVerification(doc, baseDocs[doc.Workload])...)
 			}
 
 			out := cmd.OutOrStdout()
+			// The comparison prints whether it passed or not: a run that
+			// beat a rival by nine times said something worth reading, and
+			// a gate that only prints its failures throws it away.
+			for _, cmp := range rivals {
+				cmp.Write(out)
+			}
 			// Findings inside the noise floor are printed either way: they
 			// are the difference between a run that passed and a run that
 			// passed because the machine could not tell.
 			if undecided := d.Undecided(); len(undecided) > 0 {
-				fmt.Fprintf(out, "gate: %s: %d finding(s) inside the %.2fx noise floor, not ruled on:\n",
-					gateEngine, len(undecided), noiseFloor)
+				// The reason is in each finding rather than in this
+				// line: a regression inside the noise floor says so, and
+				// a write on a volume that does not flush says that.
+				fmt.Fprintf(out, "gate: %s: %d finding(s) not ruled on:\n", gateEngine, len(undecided))
 				for _, v := range undecided {
 					fmt.Fprintf(out, "  %s\n", v)
 				}
@@ -120,12 +152,17 @@ func newGateCmd() *cobra.Command {
 	f.StringVar(&inFile, "file", "", "single JSON result document to gate")
 	f.StringVar(&dir, "results", "results", "lineage directory holding the candidate results")
 	f.StringVar(&baseline, "baseline", "", "baseline lineage directory or JSON file")
+	f.StringVar(&rivalFile, "rival", "", "a rival engine's JSON result document for the same workload: reads are gated as a ratio against it, writes in durable syncs a commit")
 	f.StringVar(&gateEngine, "gate-engine", "zu", "the one engine the gate applies to")
 	f.StringVar(&wlFilter, "workload", "", "gate only this workload")
 	f.Float64Var(&regression, "regression-factor", gate.DefaultRegressionFactor,
 		"allowed p50/p99 growth over the baseline")
 	f.Float64Var(&driftFactor, "drift-factor", gate.DefaultDriftFactor,
 		"allowed p99 growth from a sustained run's first window to its worst")
+	f.Float64Var(&readSpeedup, "read-speedup", gate.DefaultReadSpeedup,
+		"how many times faster than the rival every read class has to be (--rival)")
+	f.Float64Var(&commitSyncs, "commit-syncs", gate.DefaultCommitSyncs,
+		"the most durable syncs a commit may cost at the median (--rival)")
 	f.Float64Var(&noiseFloor, "noise-floor", 0,
 		"this machine's measured run-to-run spread; differences within it are reported, not failed (see 'graph-bench noise')")
 	return cmd
