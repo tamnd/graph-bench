@@ -128,7 +128,7 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 	usageStart := measure.Snapshot()
 	memSampler := measure.NewSampler(time.Second, memBytes)
 	defer memSampler.Stop()
-	sess, err := eng.Start(ctx, cfg)
+	sess, err := startSession(ctx, eng, cfg, container != nil)
 	if err != nil {
 		return nil, fmt.Errorf("%s: Start: %w", engName, err)
 	}
@@ -219,6 +219,45 @@ func executeRun(ctx context.Context, engName string, wl *workload.Workload, rc r
 
 	doc := report.FromMeasure(wl.Name, wl.Family, wl.Fidelity, res, toVerifications(plan.Reports))
 	return doc, nil
+}
+
+// containerStartWindow is how long a session may keep failing against a
+// server this run launched before the run gives up on it. A Neo4j container
+// takes the best part of a minute to go from accepting connections to
+// answering on them.
+const containerStartWindow = 90 * time.Second
+
+// startSession opens the engine's session, retrying while a server this run
+// launched is still coming up.
+//
+// A container accepts a TCP connection well before it will speak its own
+// protocol on one: the readiness wait in setup dials the port, and the port
+// is open as soon as the server binds it, which for Neo4j is many seconds
+// before Bolt is enabled. The first Ping then gets an EOF and the whole run
+// is reported as an engine that is not there. Retrying is the honest fix,
+// because nothing is wrong except that the caller asked early.
+//
+// A server the operator supplied gets one attempt. That one really is either
+// up or not, and waiting ninety seconds to say so helps nobody.
+func startSession(ctx context.Context, eng engine.Engine, cfg engine.Config, managed bool) (engine.Session, error) {
+	sess, err := eng.Start(ctx, cfg)
+	if err == nil || !managed {
+		return sess, err
+	}
+	deadline := time.Now().Add(containerStartWindow)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(2 * time.Second):
+		}
+		sess, retryErr := eng.Start(ctx, cfg)
+		if retryErr == nil {
+			return sess, nil
+		}
+		err = retryErr
+	}
+	return nil, err
 }
 
 // measurePlan runs the measurement phase appropriate to the workload shape:

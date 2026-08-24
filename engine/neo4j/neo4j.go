@@ -181,6 +181,17 @@ func (s *session) Load(ctx context.Context, ds engine.Dataset) (engine.LoadStats
 	if importDir == "" {
 		importDir = detectImportDir(s.cfg)
 	}
+	// A directory this process can write is not automatically the one the
+	// server reads. The local heuristics find a homebrew install's import
+	// directory whether or not the server on the other end of this
+	// connection is that install, and a containerized server reads a path
+	// of its own with nothing of ours in it. Both cases used to end the
+	// run with the server saying it could not load a file this process had
+	// just written. So the directory is proved rather than assumed: one
+	// row written here and read back through the server.
+	if importDir != "" && !s.importDirReaches(ctx, importDir) {
+		importDir = ""
+	}
 	method := "load-csv"
 	if importDir == "" {
 		method = "unwind"
@@ -315,6 +326,42 @@ func (s *session) queryImportDir(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+// importDirReaches reports whether the server reads the files this process
+// writes into dir. It writes one row carrying the file's own name and asks
+// the server to read it back: a server that cannot see the file errors, and
+// a server that sees a different directory of the same name reads something
+// that is not the token. Either way the LOAD CSV path is not available and
+// the load falls back to UNWIND batching.
+func (s *session) importDirReaches(ctx context.Context, dir string) bool {
+	f, err := os.CreateTemp(dir, "gb-probe-*.csv")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	token := filepath.Base(name)
+	_, werr := f.WriteString("probe\n" + token + "\n")
+	if cerr := f.Close(); werr != nil || cerr != nil {
+		return false
+	}
+	res, err := s.pool.Run(ctx, engine.Op{
+		Text: "LOAD CSV WITH HEADERS FROM 'file:///" + token + "' AS row RETURN row.probe AS probe",
+	})
+	if err != nil {
+		return false
+	}
+	defer res.Close()
+	if !res.Next() {
+		return false
+	}
+	row := res.Row()
+	if len(row) == 0 {
+		return false
+	}
+	got, _ := row[0].(string)
+	return got == token && res.Err() == nil
 }
 
 // detectImportDir returns the Neo4j import directory, or "" when it cannot
